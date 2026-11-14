@@ -1,0 +1,34 @@
+# Genesis Remote protocol v1
+
+Private HTTPS via Tailscale Serve -> loopback Mac companion. Every /v1 request uses `Authorization: Bearer <paired token>`; tokens never enter logs. JSON body <= 128 KiB. No shell commands or arbitrary files. Existing USB controller remains a separate input client.
+
+Pairing QR/deep link: `genesiscontroller://pair?data=<base64url JSON>` where JSON is `{v:1,name,hostID,baseURL,token}`. HTTPS is required except DEBUG localhost simulator. Default HTTPS port 8451, local service 18765. Identity is a persisted host UUID, not its address.
+
+## JSON shapes
+
+- HostStatus: `{protocolVersion:1,hostID,hostName,providers:[ProviderInfo]}`
+- ProviderInfo: `{id,name,installed,readiness,capabilities:[string],reason?:string,actions?:[RemoteAction]}`. IDs codex/claude/muse. readiness ready/locked/needsAccessibility/closed/unavailable. Capabilities are the current host's dispatch authority; catalog metadata alone does not enable an action. Phone-local dictation does not need nativeVoice. The phone can record a local Codex draft when paired with a selected chat and Codex openChat is available. The Mac advertises Codex sendPrompt when the bundled queue command and current-account inventory are available. Claude continues to require sendPrompt before offering its record/review/Send flow.
+- RemoteAction: `{id,title,group,detail,requiresChat,changesChat,opensNavigation?:Bool}`. Closed host catalog with display metadata. No arbitrary shell commands, keyboard sequences or internal IPC. Current Mac view actions are labeled accordingly.
+- ChatRecord: `{id,title,state}`. Reject ambiguous titles; never silently create a new chat.
+- SlotMapping: `{index:Int,kind,title,targetID}`. Zero-based 0..5, kind empty/chat/action. An action targetID is a command name. Slot identity colors never change.
+- RemoteProfile: `{provider,revision:Int,slots:[SlotMapping],quickActions?:[string]}`. Six slots and optionally four action IDs. Separate storage from current hardware UserDefaults; seed existing mappings read-only where resolvable. Older writes omitting quickActions preserve the previously stored quick keys.
+- RemoteCommand: `{id,hostID,provider,chatID?:string,action,text?:string,artifactID?:string,generation:Int,navigationSession?:string}`. UUID id; base actions openChat/sendPrompt/stop/openArtifact/nativeVoice plus the closed expanded catalog. Phone draft remains local until explicit Send. Claude sendPrompt inserts and sends only into the verified target and refuses to overwrite an existing draft. Codex sendPrompt verifies the exact current-account thread UUID and invokes the bundled Codex CLI queue command. Do not automatically retry sending.
+- CommandReceipt: `{id,status,message,activeChat?:ChatRecord,navigation?:RemoteNavigationState}` Status is pending, confirmed, queued, failed or uncertain. A Codex queued receipt means the CLI acknowledged the exact thread’s queue entry. It is terminal for submission. Processing may occur later when the chat is open and idle. Persist request fingerprint/receipt before action; restarted pending becomes uncertain; same ID/different payload returns conflict. No prompt text persisted in receipts/logs. For native menu/deep-link actions, confirmed means the OS accepted the request; the message says requested, not that the new UI state was visually verified. Chat-changing actions without a verified activeChat clear the phone's implicit Send destination but preserve its old draft.
+- RemoteNavigationState: `{active:Bool,session?:UUID,label:string,selection?:string}`. One recognized popup, app process, provider, phone generation and chat context per 30-second renewable lease. No lease means no input. Selection is a bounded control/file label, not composer text or document contents.
+- ArtifactRecord: `{id,title,kind,url?:string,mimeType?:string,hostID,provider,chatID}`. kind web/image/pdf/text. Stable host-scoped reference, not arbitrary URL/file command.
+
+## Endpoints
+
+- GET /v1/status -> HostStatus
+- GET /v1/chats?provider=... -> `{chats:[ChatRecord]}`
+- GET /v1/navigation?provider=...&generation=...&chatID=... -> RemoteNavigationState; only while the navigation sheet is visible
+- GET /v1/profile?provider=... -> RemoteProfile
+- PUT /v1/profile -> RemoteProfile with expected existing `revision`; compare-and-swap, return incremented revision; conflict HTTP 409
+- POST /v1/commands -> CommandReceipt; HTTP 409 duplicate payload mismatch, 422 unavailable or bad target
+- GET /v1/commands/<id> -> CommandReceipt; 404 means not known, not permission to resend
+- GET /v1/artifacts?provider=...&chatID=... -> `{artifacts:[ArtifactRecord]}`
+- GET /v1/artifacts/<id>/content -> only registered/exported artifact content; no arbitrary path traversal
+
+Poll status while foreground (2 s), chat/profile on activation or explicit refresh, command receipts by ID after uncertain response; refresh all upon foreground/reconnect. Menu commands menuPrevious/menuNext/menuSelect/menuBack/menuHome carry the exact navigationSession; they are idempotently journaled like other commands and revalidate the native popup immediately before input. Home cancels only a bounded recognized popup stack, never an arbitrary window.
+
+Switching target invalidates the client generation, stops capture and preserves that target's draft. Never apply stale responses to a new selection. No automatic Send, approval, deletion or thread creation. New chat is an explicit user action. Native voice is unavailable until same-thread/two-way audio is proven. Artwork and simulator preview must visibly identify demo data.

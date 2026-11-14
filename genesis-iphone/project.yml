@@ -1,0 +1,60 @@
+name: GenesisController
+options:
+  bundleIdPrefix: com.richardholguin
+  deploymentTarget:
+    iOS: "26.0"
+settings:
+  base:
+    SWIFT_VERSION: "5.0"
+    CURRENT_PROJECT_VERSION: 9
+    MARKETING_VERSION: 0.1.0
+    ENABLE_USER_SCRIPT_SANDBOXING: YES
+    COMPRESS_PNG_FILES: NO
+targets:
+  GenesisController:
+    type: application
+    platform: iOS
+    sources:
+      - path: ios/Sources
+      - path: ios/Resources
+        buildPhase: resources
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.richardholguin.GenesisController
+        GENERATE_INFOPLIST_FILE: NO
+        TARGETED_DEVICE_FAMILY: "1,2"
+        CODE_SIGN_STYLE: Automatic
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+    info:
+      path: ios/Info.plist
+      properties:
+        CFBundleDisplayName: Genesis Controller
+        CFBundleShortVersionString: $(MARKETING_VERSION)
+        CFBundleVersion: $(CURRENT_PROJECT_VERSION)
+        UIRequiresFullScreen: true
+        UILaunchScreen: {}
+        UIApplicationSceneManifest:
+          UIApplicationSupportsMultipleScenes: false
+        UISupportedInterfaceOrientations:
+          - UIInterfaceOrientationPortrait
+        UISupportedInterfaceOrientations~ipad:
+          - UIInterfaceOrientationPortrait
+          - UIInterfaceOrientationLandscapeLeft
+          - UIInterfaceOrientationLandscapeRight
+        NSMicrophoneUsageDescription: Dictate a draft for your selected chat. Genesis sends only when you tap Send.
+        NSSpeechRecognitionUsageDescription: Turn your speech into an editable chat draft.
+        NSCameraUsageDescription: Scan the pairing code shown by your Mac's Genesis controller.
+        NSLocalNetworkUsageDescription: Connect to your paired Genesis companions on your private network.
+        CFBundleURLTypes:
+          - CFBundleURLName: com.richardholguin.genesis.pair
+            CFBundleURLSchemes:
+              - genesiscontroller
+schemes:
+  GenesisController:
+    build:
+      targets:
+        GenesisController: all
+    run:
+      config: Debug
+    archive:
+      config: Release

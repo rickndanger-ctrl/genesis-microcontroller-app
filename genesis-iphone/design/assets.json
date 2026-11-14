@@ -1,0 +1,65 @@
+{
+  "generator": "Blender 5.2.1 LTS / Cycles CPU",
+  "slotColors": [
+    "#3478F6",
+    "#9B5CF6",
+    "#F0529C",
+    "#FF9933",
+    "#30C778",
+    "#29C4DE"
+  ],
+  "assets": [
+    {
+      "file": "ios/Resources/ControllerDial.png",
+      "width": 512,
+      "height": 512,
+      "mode": "RGBA",
+      "alphaBounds": [
+        48,
+        54,
+        464,
+        469
+      ],
+      "sha256": "ae711598bb958d8e7df35cba08ae85120932334bc0696b280223eab67b8895eb"
+    },
+    {
+      "file": "ios/Resources/ControllerDialSilver.png",
+      "width": 512,
+      "height": 512,
+      "mode": "RGBA",
+      "alphaBounds": [
+        48,
+        54,
+        464,
+        469
+      ],
+      "sha256": "258907b726583a813eafa05f24a5df04a27d5a262a6db667bfa24142b321b528"
+    },
+    {
+      "file": "ios/Resources/ControllerKey.png",
+      "width": 512,
+      "height": 512,
+      "mode": "RGBA",
+      "alphaBounds": [
+        47,
+        52,
+        465,
+        469
+      ],
+      "sha256": "944ebf85e40a0111b02c45ca69c39f670a8505434fa2f488f11ee9b2883eac1d"
+    },
+    {
+      "file": "ios/Resources/ControllerShell.png",
+      "width": 1536,
+      "height": 1536,
+      "mode": "RGBA",
+      "alphaBounds": [
+        64,
+        67,
+        1472,
+        1472
+      ],
+      "sha256": "ff205c214d1de11e01d3f55bd913bdcae1875eb6499ec83b32da3ef34cfd9ef0"
+    }
+  ]
+}
