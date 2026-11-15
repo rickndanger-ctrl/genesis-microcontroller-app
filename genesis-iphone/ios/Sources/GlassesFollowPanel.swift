@@ -80,10 +80,10 @@ struct GlassesFollowPanel: View {
                     Text("Glasses show the first 16,000 characters. Your complete draft stays here for review and Send.")
                         .font(.caption).foregroundStyle(.secondary)
                 }
-                Text("This screen stays awake while Follow is on. Leaving Genesis pauses Follow. For now, keep Even open on your iPhone and use this controller on your iPad.")
+                Text("This screen stays awake while Follow is on. Leaving Genesis pauses Follow. For same-iPhone control, enable background relay in the Even Beta first.")
                     .font(.caption).foregroundStyle(.secondary)
             } else {
-                Text("G2 · Keep Even open on your iPhone. Your iPad can control the glasses through the same paired Mac. Same-phone background operation is not verified yet.")
+                Text("G2 · Use your iPad with Even open on iPhone, or enable background relay in the Even Beta for same-iPhone control.")
                     .font(.caption).foregroundStyle(.secondary)
             }
         }
