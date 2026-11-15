@@ -21,6 +21,11 @@ struct CodexNativeMenuRoute {
 // Electron menu builder, not the larger (non-executable) keycap/command catalog.
 // Never turn an arbitrary command ID into keystrokes or an internal IPC message.
 enum CodexNativeActionPolicy {
+    // Codex's composer.openModelPicker command uses Control-Shift-M.
+    // This opens the picker for the current Mac view without choosing a model.
+    static let modelPickerID = "modelAndEffort"
+    static let modelPickerKey: CGKeyCode = 46
+    static let modelPickerModifiers: CGEventFlags = [.maskControl, .maskShift]
     // Exact public page links only: no caller-supplied URLs, queries, paths,
     // plugin installs, skill invocation, or composer prefill.
     static let pageLinks: [String:String] = [
@@ -84,6 +89,7 @@ enum CodexNativeActions {
                 detail:"Acts on the current Codex view on the Mac using \($0.menu) → \($0.item), when available.",
                 requiresChat:$0.requiresChat,changesChat:$0.changesChat)
         } + [
+            RemoteAction(id:CodexNativeActionPolicy.modelPickerID,title:"Change model",group:"Compose",detail:"Open model and reasoning choices for the current Codex view on your Mac (Control–Shift–M).",requiresChat:false,changesChat:false,opensNavigation:true),
             RemoteAction(id:"newChat",title:"New chat",group:"Chat",detail:"Open a new local Codex chat on the Mac, launching Codex if needed. No prompt is sent.",requiresChat:false,changesChat:true),
             RemoteAction(id:"openSettings",title:"Codex settings",group:"App",detail:"Open Codex's settings page on the Mac. Does not change settings.",requiresChat:false,changesChat:true),
             RemoteAction(id:"openSkills",title:"Browse skills",group:"App",detail:"Open Codex's skills page on the Mac. Does not invoke a skill.",requiresChat:false,changesChat:true)
@@ -110,7 +116,9 @@ enum CodexNativeActions {
                 return .init(requested:true,message:message)
             } catch {return failed("macOS could not open this Codex page.")}
         }
-        guard let route=CodexNativeActionPolicy.routes.first(where:{$0.id==actionID}) else {
+        let route=CodexNativeActionPolicy.routes.first(where:{$0.id==actionID})
+        let modelPicker=actionID==CodexNativeActionPolicy.modelPickerID
+        guard route != nil || modelPicker else {
             return failed("This Codex action is not connected to a verified native control.")
         }
         guard isCurrent(),!Task.isCancelled else {return failed("The controller selection changed. No menu action ran.")}
@@ -128,6 +136,23 @@ enum CodexNativeActions {
         guard isCurrent(),NSWorkspace.shared.frontmostApplication?.processIdentifier==app.processIdentifier else {
             return failed("Codex could not become the active Mac app. No menu action ran.")
         }
+        if modelPicker {
+            guard let source=CGEventSource(stateID:.hidSystemState),
+                  let down=CGEvent(keyboardEventSource:source,virtualKey:CodexNativeActionPolicy.modelPickerKey,keyDown:true),
+                  let up=CGEvent(keyboardEventSource:source,virtualKey:CodexNativeActionPolicy.modelPickerKey,keyDown:false) else {
+                return failed("macOS could not create the model picker shortcut.")
+            }
+            guard isCurrent(),!Task.isCancelled,!app.isTerminated,
+                  NSWorkspace.shared.frontmostApplication?.processIdentifier==app.processIdentifier else {
+                return failed("The active Mac view changed before the model picker could open.")
+            }
+            down.flags=CodexNativeActionPolicy.modelPickerModifiers
+            up.flags=CodexNativeActionPolicy.modelPickerModifiers
+            down.postToPid(app.processIdentifier)
+            up.postToPid(app.processIdentifier)
+            return .init(requested:true,message:"Requested Codex’s model picker. Choose a model in the open menu. If you changed Select effort’s keyboard shortcut in Codex, restore Control–Shift–M to use this control.")
+        }
+        guard let route else {return failed("The Codex menu action is unavailable.")}
         let deadline=ProcessInfo.processInfo.systemUptime+1.5
         func value(_ e: AXUIElement,_ attribute: String) -> CFTypeRef? {
             guard ProcessInfo.processInfo.systemUptime<deadline else {return nil}

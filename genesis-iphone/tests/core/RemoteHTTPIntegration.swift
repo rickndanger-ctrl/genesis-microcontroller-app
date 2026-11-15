@@ -237,6 +237,9 @@ final class FixtureCredentials: ControllerCredentialVault {
     var delayAuthorization = false
     var denyPermission = false
     var finalText: String?
+    var delayFinalization = false
+    private var finalization: CheckedContinuation<Void, Never>?
+    func completeFinalization() { let pending = finalization; finalization = nil; pending?.resume() }
     func start() async throws {
         starts += 1; epoch += 1; let current = epoch
         state = .authorizing
@@ -253,6 +256,10 @@ final class FixtureCredentials: ControllerCredentialVault {
     func stop() async {
         guard state == .recording else { cancel(); return }
         state = .finalizing
+        if delayFinalization {
+            delayFinalization = false
+            await withCheckedContinuation { finalization = $0 }
+        }
         if let finalText { onText?(finalText); self.finalText = nil }
         state = .idle
     }
@@ -603,14 +610,24 @@ final class FixtureCredentials: ControllerCredentialVault {
         let localTalkMapped = await codexStore.saveSlot(.init(index:2,kind:"action",title:"Hold to talk",targetID:"dictate"))
         let localQuickMapped = await codexStore.saveQuickAction(1,actionID:"dictate")
         await codexStore.openSlot(2)
-        expect(localTalkMapped && localQuickMapped && codexStore.requestedPanel == "talk" && codexSpeech.starts == 0,
-               "Codex slot and quick key accept local Talk and only ready the microphone, without recording automatically")
+        expect(localTalkMapped && localQuickMapped && codexStore.isRecording && codexSpeech.starts == 1,
+               "Mapped Talk starts local recording instead of requesting a nonexistent panel")
         await codexStore.startDictation()
         expect(codexSpeech.recordings == 1 && codexStore.isRecording && !codexStore.canSend,
                "Codex Hold to talk starts the phone capture service while Send remains unavailable")
         codexSpeech.emit("Partial words")
+        codexSpeech.emit("  ")
+        expect(codexStore.draft == "Existing local Codex draft\nPartial words", "Empty speech results cannot erase a valid partial draft")
         codexSpeech.finalText = "Final words from local dictation."
+        codexSpeech.delayFinalization = true
+        let finalizingShortcut = Task { await codexStore.runAction("dictate") }
+        for _ in 0..<100 { if codexStore.isFinalizing { break }; await Task.yield() }
         await codexStore.stopDictation()
+        expect(codexStore.isFinalizing && !codexStore.sendReady, "A duplicate release does not finish the pending transcript early")
+        codexSpeech.completeFinalization()
+        let stoppedFromShortcut = await finalizingShortcut.value
+        expect(stoppedFromShortcut && !codexStore.isRecording && codexStore.sendReady,
+               "A second mapped Talk activation finalizes the draft for review without sending")
         let codexRoute = DraftRoute(hostID:codexFixture.hostID,provider:"codex",chatID:codexFixture.codexChatID)
         expect(!codexStore.isRecording && codexStore.draft == "Existing local Codex draft\nFinal words from local dictation." &&
                codexPersistence.load().ledger.text(for:codexRoute) == codexStore.draft,
@@ -673,8 +690,29 @@ final class FixtureCredentials: ControllerCredentialVault {
                "Selecting another Codex chat cancels capture and preserves text only under its original UUID")
         await captureStore.startDictation(); captureSpeech.emit("Interrupted draft")
         captureSpeech.interrupt()
-        expect(!captureStore.isRecording && captureStore.draft == "Interrupted draft" && captureStore.lastError?.contains("interrupted") == true,
+        expect(!captureStore.isRecording && captureStore.sendReady && captureStore.draft == "Interrupted draft" && captureStore.lastError?.contains("interrupted") == true,
                "Audio interruption leaves the captured Codex draft available for editing")
+        let interruptedCallback = captureSpeech.onText
+        interruptedCallback?("Late interrupted callback")
+        expect(captureStore.draft == "Interrupted draft", "An interrupted recording cannot overwrite a draft with late speech")
+        await captureStore.startDictation()
+        codexFixture.setProviders([])
+        await captureStore.refresh()
+        expect(captureStore.canRunAction("dictate") && captureStore.actionUnavailableReason("dictate") == nil,
+               "The mapped microphone remains stoppable when the Mac loses provider readiness")
+        let offlineStopped = await captureStore.runAction("dictate")
+        expect(offlineStopped && !captureStore.isRecording && captureStore.sendReady && captureStore.draft == "Interrupted draft",
+               "Stopping an offline recording preserves its draft and review state")
+        codexFixture.setProviders([claudeInfo,codexInfo]); await captureStore.refresh()
+        captureSpeech.delayAuthorization = true
+        let obsoleteAuthorization = Task { await captureStore.startDictation() }
+        for _ in 0..<100 { if captureSpeech.state == .authorizing { break }; await Task.yield() }
+        await captureStore.stopDictation()
+        await captureStore.startDictation()
+        captureSpeech.completeAuthorization(); await obsoleteAuthorization.value
+        expect(captureStore.isRecording && captureSpeech.state == .recording,
+               "A canceled authorization finishing later cannot cancel the next recording")
+        await captureStore.stopDictation()
         captureStore.setForeground(true)
         captureSpeech.delayAuthorization = true
         let backgroundCapture = Task { await captureStore.startDictation() }
@@ -955,6 +993,22 @@ final class FixtureCredentials: ControllerCredentialVault {
         demoStore.selectProvider(.codex)
         expect(demoStore.navigationOnly && demoStore.canDictate && !demoStore.canSend && demoStore.availableActions.contains(where:{$0.id == "newChat"}),
                "Demo Codex previews local draft capture and navigation without inventing remote Send support")
+        let modelAction = demoStore.availableActions.first { $0.id == "modelAndEffort" }
+        expect(modelAction?.title == "Change model" && modelAction?.requiresChat == false &&
+               modelAction?.changesChat == false && modelAction?.opensNavigation == true,
+               "Codex model shortcut advertises current-view navigation without changing the chat")
+        let demoSlots = demoStore.profile.slots
+        let mappedModel = await demoStore.saveQuickAction(2, actionID:"modelAndEffort")
+        expect(mappedModel && demoStore.profile.quickActionIDs[2] == "modelAndEffort" && demoStore.profile.slots == demoSlots,
+               "Codex model shortcut maps to a quick key while preserving all chat assignments")
+        let mappedModelSlot = await demoStore.saveSlot(.init(index:5,kind:"action",title:"Change model",targetID:"modelAndEffort"))
+        expect(mappedModelSlot && demoStore.profile.slots[5].targetID == "modelAndEffort" &&
+               demoStore.profile.quickActionIDs[2] == "modelAndEffort",
+               "Codex model shortcut also maps to an agent slot without replacing the quick key")
+        demoStore.selectProvider(.claude)
+        expect(demoStore.action("modelAndEffort")?.title == "Model & effort" &&
+               demoStore.profile.quickActionIDs[2] == "nativeVoice",
+               "Claude retains its model control and independently mapped quick keys")
 
         // Regression: .task + scenePhase both reported active while the third Mac
         // was still answering. Polling cancellation must not cancel provisioning.

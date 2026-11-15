@@ -34,16 +34,25 @@ The Mac build uses an ad hoc signature by default. Set `CLAUDE_CONTROLLER_SIGN_I
 
 Codex Send uses the [bundled Codex queue command](https://learn.chatgpt.com/docs/developer-commands#codex-queue) to target the exact selected chat. **Queued** means Codex accepted the message. If the chat is busy, it can process the draft after the current turn. Open the chat on the Mac if it is unloaded. Claude Code uses the Mac composer and presents its own delivery status.
 
+Under **Codex → Actions → Change model**, open the model and reasoning picker for the current Codex view on the paired Mac. You can also hold an A key or a quick key to assign **Change model**. Codex must be open, with Accessibility enabled for the companion, and its **Select effort** keyboard shortcut set to the default **Control–Shift–M**. The app offers menu navigation when macOS exposes the picker. After choosing a model, select your chat again if the controller returns to chat selection.
+
 ## Verify
 
 From the repository root:
 
 ```sh
 sh genesis-iphone/tests/core/run.sh
+sh genesis-iphone/tests/core/run-dictation.sh
 sh genesis-iphone/tools/test-host.sh
 sh genesis-mapper/test-codex-queue.sh
 ```
 
 For the iOS HTTP integration suite, boot an iOS 26+ simulator and run `GENESIS_TEST_SIMULATOR=<simulator-udid> sh genesis-iphone/tests/core/run-integration.sh`. The Codex queue integration uses temporary local state and a loopback test model. Run it with `python3 genesis-iphone/tools/test-codex-queue-isolated.py --codex /path/to/codex`.
+
+The simulator UI suite covers phone and tablet layouts, all slot and quick-key editors, microphone gestures, draft isolation, menus, and artifact browsing. See [UI test instructions](genesis-iphone/tests/ui/README.md) and [the app audit](genesis-iphone/docs/APP-AUDIT-2026-11-14.md).
+
+Hold to Talk records on the phone or iPad. Shortcuts mapped to **Hold to talk** toggle recording on a tap; the wide microphone key records while held. Pauses and longer recordings retain earlier words, and releasing preserves the final transcript for review. Nothing is submitted until **Send** is pressed.
+
+Two-way native Voice mode, Steer, and Muse chat controls are not connected in this version. Unsupported mapped keys explain their limitation and can be remapped with a long press. Registered artifacts can be browsed; automatic artifact discovery is not implemented. The Mac Photos library picker still requires the mouse.
 
 See [Mac bridge setup](genesis-iphone/docs/HOST-BRIDGE.md), [protocol details](genesis-iphone/docs/PROTOCOL.md), and [artwork build instructions](genesis-iphone/design/README.md).

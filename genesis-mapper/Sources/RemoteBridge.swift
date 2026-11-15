@@ -376,7 +376,7 @@ import CoreImage.CIFilterBuiltins
                 let requested=await CodexNativeActions.perform(command.action,isCurrent:{self.enabled && !self.isLocked})
                 return result(requested.requested ? "confirmed":"failed",requested.message)
             }
-            guard command.action=="openChat" else{return result("failed","Codex supports existing chat selection here. Phone Send, Stop, and live voice are not enabled yet.")}
+            guard command.action=="openChat" else{return result("failed","This Codex action is unavailable. Chat selection, phone Send, and available Mac menu controls are supported; Stop and native live voice are not connected yet.")}
             guard !isLocked,let application=NSWorkspace.shared.urlForApplication(withBundleIdentifier:"com.openai.codex") else{return result("failed","Unlock this Mac and install Codex before opening a chat.")}
             let records=await loadCodexChats(force:true)
             guard !isLocked,let id=command.chatID,let target=records.first(where:{$0.id==id}),
@@ -517,7 +517,7 @@ struct RemotePairingView:View {
             ForEach(bridge.artifacts.filter{$0.provider==provider},id:\.id) { item in HStack {Image(systemName:item.kind=="web" ? "globe":"doc");Text(item.title);Spacer();Button("Remove"){bridge.removeArtifact(item.id)}}.padding(8).background(.quaternary,in:RoundedRectangle(cornerRadius:8)) }
             Divider()
             Text(bridge.lastResult).font(.callout).textSelection(.enabled)
-            Text("Claude desktop controls require an unlocked Mac and Accessibility. Codex supports saved-chat selection; phone Send, Stop, and native live voice are not connected yet. Muse currently provides the artifact shelf.").font(.caption).foregroundStyle(.secondary)
+            Text("Claude desktop controls require Claude to be open, an unlocked Mac, and Accessibility. Codex supports saved-chat selection, phone Send, and available Mac menu controls. Stop and native live voice are not connected for Codex; native live voice is also unavailable for Claude. Muse currently provides the artifact shelf.").font(.caption).foregroundStyle(.secondary)
         }.padding(28)}.frame(minWidth:740,minHeight:640)
     }
 }

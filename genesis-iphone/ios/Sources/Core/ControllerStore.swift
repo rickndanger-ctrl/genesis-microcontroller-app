@@ -64,8 +64,13 @@ final class ControllerStore: ObservableObject {
         selectedProvider = saved.selectedProvider
         profile = .empty(saved.selectedProvider)
         self.speech.onState = { [weak self] state in
-            self?.isRecording = state == .authorizing || state == .recording
-            self?.isFinalizing = state == .finalizing
+            guard let self else { return }
+            self.isRecording = state == .authorizing || state == .recording
+            self.isFinalizing = state == .finalizing
+            if state == .idle {
+                self.captureRoute = nil
+                self.sendReady = !self.draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            }
         }
         self.speech.onError = { [weak self] error in self?.lastError = error }
         restoreSelection()
@@ -92,6 +97,8 @@ final class ControllerStore: ObservableObject {
     var availableActions: [RemoteAction] { providerInfo?.availableActions ?? [] }
     func action(_ id: String) -> RemoteAction? { (providerInfo?.actionCatalog ?? RemoteAction.defaults).first { $0.id == id } }
     func canRunAction(_ id: String) -> Bool {
+        // A local recording must remain stoppable even if the Mac disconnects.
+        if id == "dictate", isRecording { return true }
         guard !isBusy, let action = action(id), providerInfo?.supportsControllerAction(action) == true,
               !action.requiresChat || selectedChat != nil else { return false }
         if id == "sendPrompt" { return canSend }
@@ -100,6 +107,10 @@ final class ControllerStore: ObservableObject {
         return true
     }
     func actionUnavailableReason(_ id: String) -> String? {
+        if id == "dictate", isRecording { return nil }
+        if id == "nativeVoice", providerInfo?.supports("nativeVoice") != true {
+            return "Two-way voice mode is not connected in Genesis yet. Use Hold to talk to dictate a draft, then Send."
+        }
         guard let action = action(id), providerInfo?.supportsControllerAction(action) == true else { return "This action is not available for this connection." }
         if isBusy { return "Another action is finishing." }
         if action.requiresChat && selectedChat == nil { return "Choose a chat first." }
@@ -411,7 +422,10 @@ final class ControllerStore: ObservableObject {
             return false
         }
         lastError = nil
-        if id == "dictate" { sendReady = false; requestedPanel = "talk"; return true }
+        if id == "dictate" {
+            if isRecording { await stopDictation(); return !isRecording }
+            await startDictation(); return isRecording
+        }
         if id == "artifacts" { requestedPanel = "artifacts"; await refreshArtifacts(); return true }
         if ["previousControllerChat", "nextControllerChat"].contains(id), let (index, chat) = historyDestination(id) {
             let receipt = await execute(action:"openChat",chatID:chat.id)
@@ -437,8 +451,9 @@ final class ControllerStore: ObservableObject {
         }
         if action.changesChat { Task { await refresh() } }
         if receipt.isConfirmed, action.opensNavigation == true {
+            let menuGeneration = gate.generation
             await refreshNavigation()
-            if navigation.active { requestedPanel = "navigate" }
+            if gate.accepts(menuGeneration), navigation.active { requestedPanel = "navigate" }
         }
         return receipt.isConfirmed
     }
@@ -484,8 +499,11 @@ final class ControllerStore: ObservableObject {
 
     func refreshNavigation() async {
         if isDemo {
-            navigation = .init(active:true,session:"00000000-0000-4000-8000-000000000099",label:"Demo · Add attachment",selection:"Choose a file from your Mac")
-            navigationGeneration = gate.generation; return
+            if !navigation.active || navigationGeneration != gate.generation {
+                navigation = .init(active:true,session:"00000000-0000-4000-8000-000000000099",label:"Demo · Add attachment",selection:"Choose a file from your Mac")
+                navigationGeneration = gate.generation
+            }
+            return
         }
         guard !isDemo, !Task.isCancelled, !isBusy, providerInfo?.supports("menuNavigation") == true,
               navigationRefreshGeneration != gate.generation else { return }
@@ -542,14 +560,23 @@ final class ControllerStore: ObservableObject {
         if isDemo { isRecording = true; return }
         speech.onText = { [weak self] text in
             guard let self, self.dictationIntent == intent, self.captureRoute == route else { return }
+            let text = text.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !text.isEmpty else { return }
             let full = base.isEmpty ? text : base + "\n" + text
             self.settings.ledger.set(full, for: route)
             if self.currentRoute == route { self.draft = full } else { self.persist() }
         }
         do {
             try await speech.start()
-            if dictationIntent != intent { speech.cancel() }
-        } catch { if dictationIntent == intent { lastError = error.localizedDescription } }
+            // Selection changes and releases already cancel their own capture.
+            // An older authorization finishing must not cancel a newer session.
+        } catch {
+            if dictationIntent == intent {
+                captureRoute = nil
+                sendReady = !draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                lastError = error.localizedDescription
+            }
+        }
     }
     func stopDictation() async {
         if isDemo {
@@ -557,9 +584,13 @@ final class ControllerStore: ObservableObject {
             if draft.isEmpty { draft = "Show me the latest changes and what still needs attention." }
             sendReady = !draft.isEmpty; return
         }
+        // The first release owns finalization. A second release must not clear
+        // its capture route while the final transcript is still arriving.
+        guard speech.state != .finalizing else { return }
         // Cancels an outstanding permission prompt/start even before audio has begun.
         if speech.state == .authorizing || speech.state == .idle {
             dictationIntent &+= 1; speech.cancel(); captureRoute = nil
+            sendReady = !draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
             return
         }
         let intent = dictationIntent
@@ -748,7 +779,12 @@ final class ControllerStore: ObservableObject {
         ]
         status = HostStatus(protocolVersion: 1, hostID: identity, hostName: selectedHost?.name ?? "Mini 2",
             providers: ProviderID.allCases.map { provider in
-                let actions = provider == .muse ? [] : demoActions.filter { provider == .claude || ["newChat","toggleSidebar","toggleTerminal","keyboardShortcuts"].contains($0.id) }
+                var actions = provider == .muse ? [] : demoActions.filter { provider == .claude || ["newChat","modelAndEffort","toggleSidebar","toggleTerminal","keyboardShortcuts"].contains($0.id) }
+                if provider == .codex, let index = actions.firstIndex(where: { $0.id == "modelAndEffort" }) {
+                    actions[index].title = "Change model"
+                    actions[index].detail = "Open model and reasoning choices for the current Codex view on your Mac."
+                    actions[index].requiresChat = false
+                }
                 let base = provider == .muse ? ["artifacts"] : provider == .claude ? ["openChat","sendPrompt","stop","artifacts","menuNavigation"] : ["openChat","artifacts","menuNavigation"]
                 return .init(id:provider.rawValue,name:provider.name,installed:true,readiness:"ready",capabilities:base + actions.map(\.id),
                              reason:"Design preview only. No Mac commands are sent. Native live voice is not connected.",actions:actions)

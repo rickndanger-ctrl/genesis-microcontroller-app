@@ -13,6 +13,11 @@ import ApplicationServices
             .init(menu:menu,title:title,role:role,enabled:enabled,hidden:hidden,canPress:press)
         }
         let routes=CodexNativeActionPolicy.routes
+        let model=CodexNativeActions.descriptors.first{$0.id=="modelAndEffort"}
+        check(model?.title=="Change model" && model?.opensNavigation==true,"model picker offers remote menu navigation")
+        check(model?.requiresChat==false && model?.changesChat==false,"model picker acts on current Mac view without claiming chat navigation")
+        check(CodexNativeActionPolicy.modelPickerKey==46 && CodexNativeActionPolicy.modelPickerModifiers==[.maskControl,.maskShift],"model picker uses only the documented Control Shift M shortcut")
+        check(CodexNativeActions.descriptors.filter{$0.id=="modelAndEffort"}.count==1,"model picker has one mapping descriptor")
         check(Set(routes.map(\.id)).count==routes.count,"unique explicit action IDs")
         for route in routes {
             check(CodexNativeActionPolicy.matchingIndex(actionID:route.id,items:[item(route.item,menu:route.menu)])==0,"correct scoped menu for \(route.id)")

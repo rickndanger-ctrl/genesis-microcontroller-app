@@ -12,7 +12,12 @@ struct GenesisControllerApp: App {
                 .preferredColorScheme(.light)
                 .onOpenURL { url in Task { do { try await store.pair(url) } catch { store.lastError = error.localizedDescription } } }
                 .task { store.setForeground(true) }
-                .onChange(of: scenePhase) { _, phase in store.setForeground(phase == .active) }
+                .onChange(of: scenePhase) { _, phase in
+                    // Permission alerts temporarily make the scene inactive. Keep
+                    // their in-flight authorization alive until the user responds.
+                    if phase == .active { store.setForeground(true) }
+                    else if phase == .background { store.setForeground(false) }
+                }
         }
     }
 }

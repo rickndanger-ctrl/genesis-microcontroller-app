@@ -65,7 +65,12 @@ struct SettingsScreen: View {
             .navigationTitle("Your controller")
             .toolbar { ToolbarItem(placement: .confirmationAction) { Button("Done") { dismiss() } } }
             .sheet(isPresented: $scanning) {
-                QRScanner { code in scanning = false; pairingLink = code; pair(code) }
+                NavigationStack {
+                    QRScanner { code in scanning = false; pairingLink = code; pair(code) }
+                        .navigationTitle("Scan pairing code")
+                        .navigationBarTitleDisplayMode(.inline)
+                        .toolbar { ToolbarItem(placement: .cancellationAction) { Button("Cancel") { scanning = false } } }
+                }
             }
         }
     }
@@ -101,7 +106,9 @@ struct MappingScreen: View {
                 }
                 Section("\(store.selectedProvider.name) chats on \(store.selectedHost?.name ?? "this Mac")") {
                     if store.navigationOnly {
-                        Text("Chat switching and artifacts are available. Talk, Send, Stop, and live Voice are not available for this provider yet.")
+                        Text(store.providerInfo?.supportsPhoneDictation == true
+                             ? "Chat switching, phone dictation drafts, and artifacts are available. Send is not connected for this provider yet."
+                             : "Chat switching and artifacts are available. Send is not connected for this provider yet.")
                             .font(.caption).foregroundStyle(.secondary)
                     }
                     ForEach(store.chats.filter { query.isEmpty || $0.title.localizedCaseInsensitiveContains(query) }) { chat in
@@ -120,7 +127,7 @@ struct MappingScreen: View {
                 }
                 ActionCatalogSections(store: store, query: query) { action in save(kind:"action",title:action.title,id:action.id) }
                 Section { Button("Remove assignment", role: .destructive) { save(kind: "empty", title: "Unassigned", id: "") } }
-            }.disabled(saving).searchable(text: $query, prompt: "Search chats and actions")
+            }.disabled(saving).searchable(text: $query, placement: .navigationBarDrawer(displayMode: .always), prompt: "Search chats and actions")
                 .navigationTitle("Map \(prefix)\(index + 1)")
                 .toolbar { ToolbarItem(placement: .cancellationAction) { Button("Cancel") { dismiss() } } }
         }
@@ -144,12 +151,13 @@ final class ScannerViewController: UIViewController, AVCaptureMetadataOutputObje
     private let completion: (String) -> Void
     private var preview: AVCaptureVideoPreviewLayer?
     private var done = false
+    private let instructionLabel = UILabel()
     private let cameraQueue = DispatchQueue(label: "genesis.qr.camera")
     init(completion: @escaping (String) -> Void) { self.completion = completion; super.init(nibName: nil, bundle: nil) }
     required init?(coder: NSCoder) { fatalError("init(coder:) is unavailable") }
     override func viewDidLoad() {
         super.viewDidLoad(); view.backgroundColor = .black
-        let label = UILabel(); label.text = "Scan your Mac’s Genesis pairing code"; label.textColor = .white; label.textAlignment = .center
+        let label = instructionLabel; label.text = "Scan your Mac’s Genesis pairing code"; label.textColor = .white; label.textAlignment = .center
         label.numberOfLines = 0; label.translatesAutoresizingMaskIntoConstraints = false; view.addSubview(label)
         NSLayoutConstraint.activate([label.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor, constant: 24), label.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 24), label.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -24)])
         AVCaptureDevice.requestAccess(for: .video) { [weak self] allowed in
@@ -161,9 +169,23 @@ final class ScannerViewController: UIViewController, AVCaptureMetadataOutputObje
         }
     }
     private func configure() {
-        guard !done, let camera = AVCaptureDevice.default(for: .video), let input = try? AVCaptureDeviceInput(device: camera), session.canAddInput(input) else { return }
+        guard !done else { return }
+        guard let camera = AVCaptureDevice.default(for: .video),
+              let input = try? AVCaptureDeviceInput(device: camera), session.canAddInput(input) else {
+            instructionLabel.text = "The camera is unavailable. Tap Cancel and paste the pairing link instead."
+            return
+        }
         session.addInput(input)
-        let output = AVCaptureMetadataOutput(); guard session.canAddOutput(output) else { return }; session.addOutput(output)
+        let output = AVCaptureMetadataOutput()
+        guard session.canAddOutput(output) else {
+            instructionLabel.text = "The scanner is unavailable. Tap Cancel and paste the pairing link instead."
+            return
+        }
+        session.addOutput(output)
+        guard output.availableMetadataObjectTypes.contains(.qr) else {
+            instructionLabel.text = "QR scanning is unavailable. Tap Cancel and paste the pairing link instead."
+            return
+        }
         output.setMetadataObjectsDelegate(self, queue: .main); output.metadataObjectTypes = [.qr]
         let preview = AVCaptureVideoPreviewLayer(session: session); preview.videoGravity = .resizeAspectFill; self.preview = preview
         view.layer.insertSublayer(preview, at: 0); preview.frame = view.bounds

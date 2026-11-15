@@ -36,14 +36,14 @@ struct ArtifactShelf: View {
                                 Button(pinned.contains(pinKey(artifact)) ? "Unpin" : "Pin", systemImage: "pin") { togglePin(artifact) }
                             }
                         }
-                    }.searchable(text: $query, prompt: "Find an artifact")
+                    }.searchable(text: $query, placement: .navigationBarDrawer(displayMode: .always), prompt: "Find an artifact")
                         .onAppear { if store.artifacts.indices.contains(initialIndex) { proxy.scrollTo(store.artifacts[initialIndex].id, anchor: .center) } }
                     }
                 }
             }.navigationTitle("Artifacts")
                 .toolbar {
                     ToolbarItem(placement: .cancellationAction) { Button("Done") { dismiss() } }
-                    ToolbarItem(placement: .primaryAction) { Button { Task { await store.refreshArtifacts() } } label: { Image(systemName: "arrow.clockwise") } }
+                    ToolbarItem(placement: .primaryAction) { Button { Task { await store.refreshArtifacts() } } label: { Image(systemName: "arrow.clockwise") }.accessibilityLabel("Refresh artifacts") }
                 }
                 .task { await store.refreshArtifacts() }
                 .sheet(item: $selected) { artifact in ArtifactPreview(store: store, artifact: artifact) }
@@ -79,8 +79,9 @@ struct ArtifactPreview: View {
                 ToolbarItem(placement: .primaryAction) { Button { Task { await store.openArtifact(artifact) } } label: { Image(systemName: "desktopcomputer") }.accessibilityLabel("Open on Mac") }
             }
             .task {
-                guard !store.isDemo, artifact.kind != "web" else { return }
-                guard let request = store.artifactRequest(artifact) else { error = "Pair the Mac that owns this artifact."; return }
+                guard !store.isDemo else { return }
+                guard let request = store.artifactRequest(artifact) else { error = "This artifact’s link is unavailable. Refresh the connection to its Mac and try again."; return }
+                guard artifact.kind != "web" else { return }
                 do {
                     let loader = URLSession(configuration: .ephemeral, delegate: ArtifactDownloadGuard(), delegateQueue: nil)
                     defer { loader.invalidateAndCancel() }

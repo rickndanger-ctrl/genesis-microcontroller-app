@@ -20,6 +20,9 @@ struct ControllerScreen: View {
     @State private var mappingIndex: Int?
     @State private var dialSlot: Int?
     @State private var heldTalk = false
+    @GestureState private var talkGestureActive = false
+    @State private var talkGestureID: UUID?
+    @State private var talkStopTask: Task<Void, Never>?
     @State private var blockedTalkReason: String?
     @State private var artifactID: String?
     @State private var dialArtifactPreview: ArtifactRecord?
@@ -63,6 +66,11 @@ struct ControllerScreen: View {
         .alert("Controller update", isPresented: Binding(get: { store.lastError != nil }, set: { if !$0 { store.lastError = nil } })) {
             Button("OK", role: .cancel) { store.lastError = nil }
         } message: { Text(store.lastError ?? "") }
+        .onChange(of: talkGestureActive) { _, active in
+            // onEnded is not called when the system cancels a touch.
+            if !active { finishTalkGesture() }
+        }
+        .onDisappear { finishTalkGesture() }
         .onChange(of: store.selectedProvider) { _, _ in clearPresentation() }
         .onChange(of: store.selectedHostID) { _, _ in clearPresentation() }
         .onChange(of: store.selectedChat?.id) { _, _ in artifactID = nil }
@@ -155,7 +163,7 @@ struct ControllerScreen: View {
     }
 
     private func clearPresentation() {
-        dialSlot = nil; artifactID = nil; heldTalk = false; blockedTalkReason = nil
+        dialSlot = nil; artifactID = nil; heldTalk = false; talkGestureID = nil; blockedTalkReason = nil
         showArtifacts = false; mappingIndex = nil; resolvingSend = false
         showActions = false; showNavigation = false; quickMappingIndex = nil; store.requestedPanel = nil
     }
@@ -386,7 +394,7 @@ struct ControllerScreen: View {
     private func quickActionKey(_ index: Int, size: CGFloat, scale: CGFloat) -> some View {
         let id = store.profile.quickActionIDs[index]
         let action = store.action(id)
-        let titles = ["sendPrompt":"Send", "stop":"Stop", "nativeVoice":"Voice", "artifacts":"Artifacts"]
+        let titles = ["sendPrompt":"Send", "stop":"Stop", "nativeVoice":"Voice", "artifacts":"Artifacts", "modelAndEffort":"Model"]
         let title = titles[id] ?? action?.title ?? "Unavailable"
         let enabled = store.canRunAction(id)
         return ZStack {
@@ -405,13 +413,44 @@ struct ControllerScreen: View {
                 switch value {
                 case .first: ControllerSound.shared.keyClick(); quickMappingIndex = index
                 case .second:
-                    if enabled { ControllerSound.shared.keyClick(); Task { await store.runAction(id) } }
+                    runQuickAction(id)
                 }
             })
             .accessibilityElement(children: .ignore)
             .accessibilityAddTraits(.isButton).accessibilityLabel(title)
-            .accessibilityAction { if enabled { ControllerSound.shared.keyClick(); Task { await store.runAction(id) } } }
+            .accessibilityHint(enabled ? "Tap to run. Hold to change this action." : store.actionUnavailableReason(id) ?? "This action is not available.")
+            .accessibilityAction { runQuickAction(id) }
             .accessibilityAction(named:"Change action") { quickMappingIndex = index }
+    }
+
+    private func runQuickAction(_ id: String) {
+        ControllerSound.shared.keyClick()
+        guard store.canRunAction(id) else {
+            store.lastError = store.actionUnavailableReason(id) ?? "This action is not available."
+            return
+        }
+        Task { await store.runAction(id) }
+    }
+
+    private func finishTalkGesture() {
+        let reason = blockedTalkReason
+        blockedTalkReason = nil
+        guard heldTalk else {
+            if let reason { store.lastError = reason }
+            return
+        }
+        heldTalk = false
+        let host = store.selectedHostID
+        let provider = store.selectedProvider
+        let chat = store.selectedChat?.id
+        talkStopTask = Task {
+            // Switching context already cancels capture in the store. An old
+            // release must not stop a new chat's independently started capture.
+            guard store.selectedHostID == host, store.selectedProvider == provider,
+                  store.selectedChat?.id == chat else { return }
+            await store.stopDictation()
+            ControllerSound.shared.keyClick()
+        }
     }
 
     private func talkKey(width: CGFloat, height: CGFloat, scale: CGFloat) -> some View {
@@ -426,17 +465,22 @@ struct ControllerScreen: View {
                     .lineLimit(1).truncationMode(.tail).frame(width: max(0, width - 14 * scale))
             }.foregroundStyle(store.isRecording ? slotColor : GenesisPalette.ink).opacity(store.canDictate ? 1 : 0.35)
         }.frame(width: width, height: height).contentShape(RoundedRectangle(cornerRadius: 16 * scale))
-            .gesture(DragGesture(minimumDistance: 0).onChanged { _ in
+            .highPriorityGesture(DragGesture(minimumDistance: 0)
+                .updating($talkGestureActive) { _, active, _ in active = true }
+                .onChanged { _ in
                 guard !heldTalk, blockedTalkReason == nil else { return }
                 guard store.canDictate else { blockedTalkReason = store.dictationControl.explanation; return }
                 heldTalk = true
+                let gestureID = UUID()
+                talkGestureID = gestureID
+                let previousStop = talkStopTask
                 UIImpactFeedbackGenerator(style: .soft).impactOccurred()
-                Task { await store.startDictation() }
-            }.onEnded { _ in
-                let reason = blockedTalkReason; blockedTalkReason = nil
-                if heldTalk { heldTalk = false; Task { await store.stopDictation(); ControllerSound.shared.keyClick() } }
-                else if let reason { store.lastError = reason }
-            })
+                Task {
+                    await previousStop?.value
+                    guard heldTalk, talkGestureID == gestureID else { return }
+                    await store.startDictation()
+                }
+            }.onEnded { _ in finishTalkGesture() })
             .accessibilityElement(children: .ignore).accessibilityLabel(store.dictationControl.accessibilityLabel)
             .accessibilityHint(store.dictationControl.explanation ?? "Hold to record, then release to review your draft.")
             .accessibilityAddTraits(.isButton)
@@ -456,7 +500,7 @@ struct ControllerScreen: View {
                 Text(providerName).font(isPad ? .caption : .caption2).foregroundStyle(.secondary)
             }
             TextField(codexDraftOnly ? "Local draft — Send is not connected yet" : "Hold the microphone, or type a draft…", text: $store.draft, axis: .vertical)
-                .font(.system(size: isPad ? 17 : 14)).lineLimit(isPad ? 3...8 : 2...5).disabled(store.selectedChat == nil)
+                .font(.system(size: isPad ? 17 : 14)).lineLimit(isPad ? 3...8 : 2...5).disabled(store.selectedChat == nil || store.isRecording || store.isFinalizing)
                 .accessibilityLabel("Draft for selected chat")
             HStack {
                 Text(codexDraftOnly ? (store.isRecording ? "Listening on iPhone · draft only" : "Saved on iPhone · Send is not available for \(providerName) yet") : store.isRecording ? "Listening on iPhone" : codexQueuesPrompt ? "Send queues this draft for the selected Codex chat" : "Only sent when you press Send")
