@@ -438,10 +438,19 @@ import CoreImage.CIFilterBuiltins
         let target=resolveClaudeTarget(id)
         guard let target else{return result("failed","Chat is missing or ambiguous. Show Claude’s Code sidebar and refresh.")}
         guard !RemoteClaudeLookup.isAmbiguous(sidebarDestinationCount:access.targetSnapshot(target.title).destinationCount) else{return result("failed","More than one sidebar chat has this title. Rename one before using its remote key.")}
-        let opened=await access.select(target.title)
-        let selected=access.targetSnapshot(target.title)
-        guard !isLocked,selected.isCurrent,opened.hasPrefix("Opened ") else{return result("failed",opened)}
-        guard !RemoteClaudeLookup.isAmbiguous(sidebarDestinationCount:selected.destinationCount) else{return result("failed","This title resolves to multiple sidebar chats. No action was sent.")}
+        guard let claudePID=NSRunningApplication.runningApplications(withBundleIdentifier:access.bundle).first?.processIdentifier else{return result("failed","Open Claude first.")}
+        func selectionContextOK()->Bool {
+            self.enabled && !self.isLocked && AXIsProcessTrusted() &&
+            NSRunningApplication.runningApplications(withBundleIdentifier:self.access.bundle).first?.processIdentifier==claudePID
+        }
+        let opened=await access.select(target.title,contextIsCurrent:selectionContextOK)
+        guard opened.hasPrefix("Opened ") else{return result("failed",opened)}
+        guard selectionContextOK() else{return result("failed","Claude navigation context changed before confirmation. No Send or Stop action was sent.")}
+        let confirmation=await access.confirmedTarget(target.title,processIdentifier:claudePID,contextIsCurrent:selectionContextOK)
+        guard case .ready(let selected)=confirmation else {
+            if case .ambiguous=confirmation {return result("failed","This title resolves to multiple sidebar chats. No action was sent.")}
+            return result("failed","Claude navigation could not be confirmed. Select the chat again; no Send or Stop action was sent.")
+        }
         if command.action=="openChat" {return result("confirmed","Opened \(target.title).")}
         // Sending/stopping requires a fresh unique sidebar destination as well
         // as the active header. A cached label only allowed us to navigate.

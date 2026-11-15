@@ -133,13 +133,22 @@ final class ControllerStore: ObservableObject {
     }
     var chatAvailabilityMessage: String {
         if !isPaired { return "Pair this Mac to see its available chats." }
-        guard let info = providerInfo else { return status == nil ? "Refresh the connection to check this Mac’s available controls." : "This provider is not available on this Mac." }
+        guard let info = providerInfo else {
+            if status == nil {
+                return connectionMessage == "Connecting…" || refreshGeneration == gate.generation
+                    ? "Connecting to \(selectedHost?.name ?? "your Mac"). Wait for the connection, then try again."
+                    : "Refresh the connection to check this Mac’s available controls."
+            }
+            return "Open \(selectedProvider.name) on \(selectedHost?.name ?? "your Mac"), then refresh Genesis to check its controls."
+        }
+        if !info.installed { return "Install \(selectedProvider.name) on \(selectedHost?.name ?? "your Mac"), then refresh." }
         switch info.readiness {
         case "locked": return "Unlock \(selectedHost?.name ?? "your Mac") to open its chats."
         case "needsAccessibility": return "Allow Accessibility for Genesis on \(selectedHost?.name ?? "your Mac")."
         case "closed": return "Open \(selectedProvider.name) on \(selectedHost?.name ?? "your Mac"), then refresh."
         default: break
         }
+        if info.readiness != "ready" { return info.reason ?? "\(selectedProvider.name) is not ready on \(selectedHost?.name ?? "your Mac"). Open it, then refresh." }
         guard info.supports("openChat") else { return info.reason ?? "Chat switching is not available for \(selectedProvider.name) on this Mac yet." }
         return isRefreshingChats ? "Loading \(selectedProvider.name) chats…" : "No existing \(selectedProvider.name) chats were found on this Mac."
     }
@@ -188,7 +197,7 @@ final class ControllerStore: ObservableObject {
     func selectProvider(_ provider: ProviderID) {
         guard provider != selectedProvider else { return }
         persistDraft(); invalidateSelection(); selectedProvider = provider; restoreSelection(); persist()
-        if isDemo { loadDemo() } else { Task { await refresh() } }
+        if isDemo { loadDemo() } else { connectionMessage = isPaired ? "Connecting…" : "Pair this Mac"; Task { await refresh() } }
     }
     func returnHome() { selectedSlotIndex = nil }
 
@@ -508,7 +517,7 @@ final class ControllerStore: ObservableObject {
         if isDemo {
             changeChat(chat, preferredSlotIndex: preferredSlotIndex); return
         }
-        guard providerInfo?.supports("openChat") == true else { lastError = RemoteError.capability("Open chat").localizedDescription; return }
+        guard providerInfo?.supports("openChat") == true else { lastError = chatAvailabilityMessage; return }
         let receipt = await execute(action: "openChat", chatID: chat.id)
         if receipt?.isConfirmed == true { changeChat(chat, preferredSlotIndex: preferredSlotIndex) }
     }

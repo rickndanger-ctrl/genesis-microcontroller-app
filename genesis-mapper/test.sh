@@ -14,6 +14,8 @@ xcrun swiftc "$ROOT/Sources/ClaudeTalkFocus.swift" "$ROOT/tests/ClaudeTalkFocusT
 "$ROOT/test-build/claude-talk-focus"
 xcrun swiftc "$ROOT/Sources/ReadSnapshotCache.swift" "$ROOT/tests/ReadSnapshotCacheTests.swift" -o "$ROOT/test-build/read-snapshot-cache"
 "$ROOT/test-build/read-snapshot-cache"
+xcrun swiftc "$ROOT/Sources/ReadSnapshotCache.swift" "$ROOT/Sources/ClaudeNavigationRead.swift" "$ROOT/tests/ClaudeNavigationReadTests.swift" -o "$ROOT/test-build/claude-navigation-read"
+"$ROOT/test-build/claude-navigation-read"
 
 xcrun swiftc "$ROOT/Sources/RemoteNavigationLease.swift" "$ROOT/tests/RemoteNavigationLeaseTests.swift" -o "$ROOT/test-build/remote-navigation-lease"
 "$ROOT/test-build/remote-navigation-lease"

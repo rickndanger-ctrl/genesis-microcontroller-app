@@ -14,6 +14,7 @@ final class ClaudeAccess {
     let bundle = "com.anthropic.claudefordesktop"
     private var scanDeadline=Double.infinity
     private var scanExpired=false
+    private var scanReadFailed=false
     private let scanCache=ReadSnapshotCache<String,(AXUIElement,AnyObject?)>()
     func readSnapshot<Result>(_ read:()->Result)->Result {scanCache.withSnapshot(read)}
     func sessionSnapshot()->[Session]? {
@@ -28,6 +29,9 @@ final class ClaudeAccess {
         if ProcessInfo.processInfo.systemUptime>scanDeadline {scanExpired=true;return nil}
         AXUIElementSetMessagingTimeout(e,0.06)
         var v: CFTypeRef?;let result=AXUIElementCopyAttributeValue(e,key as CFString,&v)
+        // Missing optional attributes are normal. A busy/stale AX tree is not
+        // proof that a requested chat or a second matching row is absent.
+        if result == .cannotComplete || result == .invalidUIElement || result == .failure {scanReadFailed=true}
         let value:AnyObject?=result == .success ? v:nil
         scanCache[cacheKey]=(e,value)
         return value
@@ -43,7 +47,9 @@ final class ClaudeAccess {
         while index<queue.count && index<4500 { let e=queue[index]; index+=1; result.append(e)
             if ["Chat messages","Changes"].contains(text(e)) { continue }
             if let children=value(e,kAXChildrenAttribute) as? [AXUIElement] { queue.append(contentsOf:children) }
-        }; return result
+        }
+        if index<queue.count {scanReadFailed=true}
+        return result
     }
     var lastActivitySnapshot=""
     let states=["Awaiting input","Something went wrong","Needs input","Working","Running","Idle","Unread"]
@@ -106,6 +112,26 @@ final class ClaudeAccess {
             let all=nodes()
             return (all.filter{text($0)==title+", rename session"}.count==1,sidebarTargets(title,in:all).count)
         }
+    }
+    private func navigationSnapshot(_ title:String,deadline:Double)->ClaudeNavigationSnapshot<AXUIElement> {
+        let previousDeadline=scanDeadline,previousExpired=scanExpired,previousFailure=scanReadFailed
+        scanDeadline=min(scanDeadline,deadline);scanExpired=false;scanReadFailed=false
+        defer {scanDeadline=previousDeadline;scanExpired=previousExpired;scanReadFailed=previousFailure}
+        return readSnapshot {
+            let all=nodes()
+            let headers=all.filter{text($0)==title+", rename session"}.count
+            let destinations=sidebarTargets(title,in:all)
+            let sidebar=all.filter{text($0)=="Show sidebar" && value($0,kAXRoleAttribute) as? String==kAXButtonRole}
+            return ClaudeNavigationSnapshot(headerCount:headers,destinations:destinations,sidebarControls:sidebar,complete:!scanExpired && !scanReadFailed)
+        }
+    }
+    @MainActor func confirmedTarget(_ title:String,processIdentifier:pid_t,
+        maximumAttempts:Int=3,delayNanoseconds:UInt64=100_000_000,
+        contextIsCurrent:@escaping ()->Bool) async ->ClaudeNavigationReadResult<AXUIElement> {
+        await ClaudeNavigationRead.resolve(mode:.current,deadline:ProcessInfo.processInfo.systemUptime+2.5,
+            maximumAttempts:maximumAttempts,delayNanoseconds:delayNanoseconds,
+            contextIsCurrent:{contextIsCurrent() && AXIsProcessTrusted() && NSWorkspace.shared.frontmostApplication?.processIdentifier==processIdentifier && NSRunningApplication.runningApplications(withBundleIdentifier:self.bundle).first?.processIdentifier==processIdentifier},
+            read:{self.navigationSnapshot(title,deadline:$0)})
     }
     // A session can have matching menus in its sidebar row and primary toolbar.
     // Only navigable sidebar buttons establish distinct destinations.
@@ -191,37 +217,45 @@ final class ClaudeAccess {
         if let previous {CGEvent(mouseEventSource:nil,mouseType:.mouseMoved,mouseCursorPosition:previous,mouseButton:.left)?.post(tap:.cghidEventTap)}
         return true
     }
-    @MainActor func select(_ title: String) async -> String {
+    @MainActor func select(_ title: String,contextIsCurrent:(()->Bool)?=nil) async -> String {
         guard let app=NSRunningApplication.runningApplications(withBundleIdentifier:bundle).first else {return "Open Claude first."}
+        func contextOK(requireForeground:Bool=true)->Bool {
+            contextIsCurrent?() != false && AXIsProcessTrusted() && !Task.isCancelled &&
+            NSRunningApplication.runningApplications(withBundleIdentifier:bundle).first?.processIdentifier==app.processIdentifier &&
+            (!requireForeground || NSWorkspace.shared.frontmostApplication?.processIdentifier==app.processIdentifier)
+        }
+        guard contextOK(requireForeground:false) else{return "Claude navigation context changed. No click sent."}
         NSApp.yieldActivation(to: app)
         if let url=app.bundleURL {
             let configuration=NSWorkspace.OpenConfiguration();configuration.activates=true
             _ = try? await NSWorkspace.shared.openApplication(at:url,configuration:configuration)
         } else {app.activate()}
         for _ in 0..<10 {
+            guard contextOK(requireForeground:false) else{return "Claude navigation context changed. No click sent."}
             if NSWorkspace.shared.frontmostApplication?.processIdentifier == app.processIdentifier {break}
             try? await Task.sleep(nanoseconds:100_000_000)
         }
-        guard NSWorkspace.shared.frontmostApplication?.processIdentifier == app.processIdentifier else {return "Claude could not come to the foreground. No click sent."}
+        guard contextOK() else {return "Claude could not come to the foreground. No click sent."}
         try? await Task.sleep(nanoseconds:200_000_000)
-        let initial=readSnapshot { ()->(Bool,[AXUIElement],[AXUIElement]) in
-            let all=nodes()
-            return (all.filter{text($0)==title+", rename session"}.count==1,sidebarTargets(title,in:all),all.filter{text($0)=="Show sidebar" && value($0,kAXRoleAttribute) as? String==kAXButtonRole})
+        let deadline=ProcessInfo.processInfo.systemUptime+2.5
+        func resolve() async ->ClaudeNavigationReadResult<AXUIElement> {
+            await ClaudeNavigationRead.resolve(mode:.destination,deadline:deadline,contextIsCurrent:{contextOK()},read:{self.navigationSnapshot(title,deadline:$0)})
         }
-        if initial.0 {return "Opened \(title)"}
-        var matches=initial.1
-        if matches.isEmpty,initial.2.count==1 {
-            _=await navigationClick(initial.2[0],app:app)
+        guard case .ready(var snapshot)=await resolve() else {return "Session missing or ambiguous. Open Claude’s Code sidebar and refresh."}
+        if snapshot.isCurrent {return "Opened \(title)"}
+        if snapshot.destinations.isEmpty,snapshot.sidebarControls.count==1 {
+            guard await navigationClick(snapshot.sidebarControls[0],app:app,contextIsCurrent:{contextOK()}) else{return "Claude sidebar is unavailable. No session click sent."}
             try? await Task.sleep(nanoseconds:300_000_000)
-            matches=readSnapshot {sidebarTargets(title,in:nodes())}
+            guard case .ready(let refreshed)=await resolve() else{return "Session missing or ambiguous. Open Claude’s Code sidebar and refresh."}
+            snapshot=refreshed
+            if snapshot.isCurrent {return "Opened \(title)"}
         }
-        controllerTrace("navigation matches=\(matches.count)")
-        guard matches.count==1 else { return "Session missing or ambiguous. Open Claude’s Code sidebar and refresh." }
-        guard await navigationClick(matches[0],app:app) else {return "Claude session is obscured or off-screen. No click sent."}
-        for _ in 0..<10 {
-            try? await Task.sleep(nanoseconds:150_000_000)
-            if current(title) {return "Opened \(title)"}
-        }
+        controllerTrace("navigation matches=\(snapshot.destinationCount)")
+        guard snapshot.destinationCount==1 else {return "Session missing or ambiguous. Open Claude’s Code sidebar and refresh."}
+        guard contextOK(),ProcessInfo.processInfo.systemUptime<deadline,
+              await navigationClick(snapshot.destinations[0],app:app,contextIsCurrent:{contextOK()}) else {return "Claude session is obscured or off-screen. No click sent."}
+        // Confirmation retries are read-only: never click the target again.
+        if case .ready = await confirmedTarget(title,processIdentifier:app.processIdentifier,maximumAttempts:10,delayNanoseconds:150_000_000,contextIsCurrent:{contextOK()}) {return "Opened \(title)"}
         return "Claude accepted the click but did not open the session. No Send or Dictate action is enabled."
     }
     @MainActor func discover() async -> [Session] {

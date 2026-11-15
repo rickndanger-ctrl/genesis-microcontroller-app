@@ -38,13 +38,15 @@ Under **Codex → Actions → Change model**, open the model and reasoning picke
 
 ## Even Realities G2 glasses
 
-Native version **0.2.1 / build 18** supports **Follow this controller** on both iPhone and iPad. The separate [Genesis G2 app](https://github.com/rickndanger-ctrl/genesis-g2) displays the selected Codex conversation above a dedicated draft box. The native app handles dictation and explicit Send; the glasses never submit a message themselves.
+Native version **0.2.1 / build 19** supports **Follow this controller** on both iPhone and iPad. The separate [Genesis G2 app](https://github.com/rickndanger-ctrl/genesis-g2) displays the selected Codex or supported Claude Code conversation above a dedicated draft box. The native app handles dictation and explicit Send; the glasses never submit a message themselves.
 
 Open Genesis G2 inside Even on the paired iPhone, then enable **Follow this controller** in this app and tap an assigned chat. **Conversation** and **Draft** choose which area the page arrows navigate. The right arrow shows older text; the left returns toward the latest. One native device controls the display at a time, and taking over from another device requires an explicit choice.
 
 You can use this controller on an iPad while Even remains open on iPhone. For control from that same iPhone, use the installed Genesis G2 Beta and enable **Try background relay — Even Beta only** in it first. Keep native Genesis foreground; leaving it pauses Follow. Select a chat again after returning if the glasses show Home. The initial same-iPhone flow, conversation paging, and separate draft review are user-confirmed on the tested Mini 2 setup. Locked-phone relay and long-duration reliability remain unverified.
 
-Claude chat selection, drafts, and native Send status can follow, but **Claude replies are not readable on G2 yet**. G2 installation, pairing, build instructions, and validation are maintained in its separate repository. This integration does not require changing Genesis Mini firmware.
+Claude chat selection, drafts, and native Send status can follow. Genesis G2 0.4.0 or later can also read a uniquely identified local Claude Code conversation; ordinary Claude web chats are not supported by that reader. G2 0.4.1 adds automatic paired-Mac connection recovery after Even restarts. G2 installation, pairing, build instructions, and validation are maintained in its separate repository. This integration does not require changing Genesis Mini firmware.
+
+The [November 15 audit](genesis-iphone/docs/APP-AUDIT-2026-11-15.md) records build 19, the matching 0.5.1-preview Mac companion, live switching checks on both Minis, and the remaining physical test boundaries.
 
 ## Verify
 

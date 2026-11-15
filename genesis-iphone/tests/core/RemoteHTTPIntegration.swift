@@ -276,6 +276,11 @@ final class FixtureCredentials: ControllerCredentialVault {
         if !value { fatalError("FAIL: \(label)") }
     }
     @MainActor static func main() async throws {
+        if ProcessInfo.processInfo.arguments.contains("--chat-readiness") {
+            try await chatReadinessRegression()
+            print("Chat readiness: \(count) integration checks passed")
+            return
+        }
         if ProcessInfo.processInfo.arguments.contains("--duplicate-slots") {
             try await duplicateSlotRegression()
             print("Duplicate slot identity: \(count) integration checks passed")
@@ -1230,7 +1235,60 @@ final class FixtureCredentials: ControllerCredentialVault {
         let normalWithPreviewFlag = ControllerStore(client:client,credentials:followVault,persistence:followPersistence,speech:FixtureDictation(),demoFollow:true)
         expect(!normalWithPreviewFlag.glasses.enabled && !normalWithPreviewFlag.isDemo, "--demo-follow alone cannot activate a fixture in the real app")
         try await duplicateSlotRegression()
+        try await chatReadinessRegression()
         print("Remote HTTP + ControllerStore: \(count) integration checks passed")
+    }
+
+    @MainActor static func chatReadinessRegression() async throws {
+        let temporary = FileManager.default.temporaryDirectory.appendingPathComponent("genesis-chat-readiness-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: temporary) }
+        let mac = HTTPFixture(name:"readiness-mac"); try await mac.start(); defer { mac.stop() }
+        let vault = FixtureCredentials(); try vault.save(mac.token, for:mac.name)
+        let persistence = ControllerPersistence(directory:temporary)
+        let speech = FixtureDictation()
+        let chat = ChatRecord(id:"chat-\(mac.name)",title:"Saved Claude chat",state:"Idle")
+        var settings = LocalControllerSettings()
+        settings.hosts = [mac.host]; settings.selectedHostID = mac.name; settings.selectedProvider = .claude
+        settings.selectedChats["\(mac.hostID).claude"] = chat
+        try persistence.save(settings)
+        let store = ControllerStore(client:RemoteClient(),credentials:vault,persistence:persistence,speech:speech)
+        await store.refresh(); store.draft = "Keep this draft while the app is unavailable."
+        let originalSelection = store.selectedChat
+        let cases: [(String, Bool, [String], String)] = [
+            ("closed", true, ["openChat"], "Open Claude on readiness-mac, then refresh."),
+            ("locked", true, ["openChat"], "Unlock readiness-mac to open its chats."),
+            ("needsAccessibility", true, ["openChat"], "Allow Accessibility for Genesis on readiness-mac."),
+            ("missing", false, [], "Install Claude on readiness-mac, then refresh."),
+            ("loading", true, ["openChat"], "Claude is not ready on readiness-mac. Open it, then refresh."),
+            ("ready", true, [], "Chat switching is not available for Claude on this Mac yet.")
+        ]
+        for (readiness, installed, capabilities, expected) in cases {
+            mac.setProviders([.init(id:"claude",name:"Claude",installed:installed,readiness:readiness,capabilities:capabilities,reason:nil)])
+            await store.refresh(); await store.selectChat(chat)
+            expect(store.lastError == expected && store.chatAvailabilityMessage == expected,
+                   "\(readiness) blocked chat tap matches its actionable inline readiness message")
+            expect(store.selectedChat == originalSelection && store.draft == "Keep this draft while the app is unavailable.",
+                   "\(readiness) blocked chat tap preserves the exact selection and draft")
+        }
+        mac.setProviders([]); await store.refresh(); await store.selectChat(chat)
+        expect(store.lastError == "Open Claude on readiness-mac, then refresh Genesis to check its controls.",
+               "An absent provider suggests checking the app instead of claiming an unsupported feature")
+
+        mac.hold("/v1/status")
+        store.selectProvider(.codex)
+        expect(store.status == nil && store.connectionMessage == "Connecting…", "Provider switch immediately clears the previous connection label")
+        await store.selectChat(.init(id:mac.codexChatID,title:"Codex fixture",state:"Idle"))
+        expect(store.lastError == "Connecting to readiness-mac. Wait for the connection, then try again.",
+               "A tap while the new provider connects reports waiting, not unsupported chat controls")
+        for _ in 0..<100 { if mac.heldCount("/v1/status") > 0 { break }; try? await Task.sleep(nanoseconds:5_000_000) }
+        mac.release("/v1/status")
+        for _ in 0..<100 { if store.status != nil { break }; try? await Task.sleep(nanoseconds:5_000_000) }
+        vault.remove(for:mac.name); store.selectProvider(.claude)
+        expect(store.connectionMessage == "Pair this Mac", "Unpaired provider switch immediately shows pairing status")
+        await store.selectChat(chat)
+        expect(store.lastError == "Pair this Mac to see its available chats.", "Unpaired chat tap asks for pairing")
+        expect(!mac.received.contains(where: { $0.0.hasPrefix("POST /v1/commands ") }) && speech.starts == 0,
+               "Readiness checks and switching never send commands or start dictation")
     }
 
     @MainActor static func duplicateSlotRegression() async throws {
