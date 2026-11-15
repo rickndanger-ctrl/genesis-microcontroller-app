@@ -15,6 +15,13 @@ final class ControllerUITests: XCTestCase {
             app.swipeUp()
         }
         XCTAssertTrue(draft.isHittable, "Follow controls are reachable on the native controller screen")
+        XCTAssertEqual(app.buttons["glasses.reply"].label, "Conversation", "The visible label describes the conversation while preserving the reply control identifier")
+        let pageHelp = app.staticTexts["glasses.pageHelp"]
+        XCTAssertTrue(pageHelp.exists)
+        XCTAssertTrue(pageHelp.label.contains("right arrow shows older conversation text"))
+        XCTAssertTrue(pageHelp.label.contains("Draft to page through your current draft"))
+        XCTAssertGreaterThanOrEqual(pageHelp.frame.minX, app.frame.minX)
+        XCTAssertLessThanOrEqual(pageHelp.frame.maxX, app.frame.maxX)
         let controls = ["glasses.reply", "glasses.draft", "glasses.home", "glasses.previous", "glasses.next", "glasses.refresh", "glasses.send"]
         for identifier in controls {
             let button = app.buttons[identifier]

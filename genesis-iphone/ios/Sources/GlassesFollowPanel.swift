@@ -14,7 +14,7 @@ struct GlassesFollowPanel: View {
                     .font(.headline)
             }
             .disabled(store.isDemo || store.selectedProvider == .muse || !store.isPaired)
-            .accessibilityHint("Show this controller’s confirmed chat, reply, or draft on your G2 glasses.")
+            .accessibilityHint("Show this controller’s confirmed conversation and draft on your G2 glasses.")
 
             Label(follow.message, systemImage: follow.acknowledged ? "checkmark.circle.fill" : follow.unsupported ? "arrow.down.app" : "info.circle")
                 .font(.caption)
@@ -43,6 +43,11 @@ struct GlassesFollowPanel: View {
                     HStack { viewButtons }
                     VStack(alignment: .leading) { viewButtons }
                 }
+
+                Text("Conversation starts at the newest text. The right arrow shows older conversation text. Choose Draft to page through your current draft. Both stay visible on your glasses.")
+                    .font(.caption).foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .accessibilityIdentifier("glasses.pageHelp")
 
                 HStack(spacing: 12) {
                     Button { follow.page(-1) } label: { Image(systemName: "chevron.left").frame(minWidth: 28, minHeight: 28) }
@@ -94,7 +99,7 @@ struct GlassesFollowPanel: View {
     }
 
     @ViewBuilder private var viewButtons: some View {
-        Button { follow.show(.reply) } label: { Label("Reply", systemImage: "text.bubble") }
+        Button { follow.show(.reply) } label: { Label("Conversation", systemImage: "text.bubble") }
             .accessibilityIdentifier("glasses.reply")
             .disabled(!follow.hasChat)
             .buttonStyle(.bordered)
