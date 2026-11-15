@@ -1155,6 +1155,75 @@ final class FixtureCredentials: ControllerCredentialVault {
         }
         expect(retryStore.hosts.first(where:{$0.id == third.name})?.hostID == third.hostID, "Failed verification retries from memory on next foreground")
         retryStore.setForeground(false)
+        // Native G2 follow reuses the same Mac credentials and command receipt
+        // path. Only display writes use this in-memory fixture; chat/send still
+        // traverse the real local HTTP fixture above.
+        let followMac = HTTPFixture(name:"follow-mac"); try await followMac.start(); defer { followMac.stop() }
+        let followVault = FixtureCredentials(); try followVault.save(followMac.token, for:followMac.name)
+        var followSettings = LocalControllerSettings()
+        followSettings.hosts = [followMac.host, second.host]; followSettings.selectedHostID = followMac.name
+        followSettings.selectedProvider = .claude
+        let followChat = ChatRecord(id:"chat-\(followMac.name)",title:"Follow fixture chat",state:"Idle")
+        followSettings.selectedChats["\(followMac.hostID).claude"] = followChat
+        let followPersistence = ControllerPersistence(directory:temporary.appendingPathComponent("follow-state"))
+        try followPersistence.save(followSettings)
+        let followDisplay = GlassesFollowFixture()
+        let followSpeech = FixtureDictation()
+        let followStore = ControllerStore(client:client,credentials:followVault,persistence:followPersistence,speech:followSpeech,glassesTransport:followDisplay)
+        followStore.setForeground(true)
+        for _ in 0..<100 { if followStore.status != nil { break }; try? await Task.sleep(nanoseconds:20_000_000) }
+        followStore.enableGlassesFollow()
+        for _ in 0..<4 { await followStore.glasses.waitForWrites(); await Task.yield() }
+        expect(followStore.glasses.enabled && followDisplay.current(followMac.host).state?.chatID == nil,
+               "Follow does not publish a merely restored chat before open confirmation")
+        followMac.hold("/v1/commands/openChat")
+        let followOpening = Task { await followStore.selectChat(followChat) }
+        for _ in 0..<100 { if followMac.heldCount("/v1/commands/openChat") > 0 { break }; try? await Task.sleep(nanoseconds:10_000_000) }
+        expect(followDisplay.current(followMac.host).state?.chatID == nil, "In-flight chat open cannot prematurely redirect G2")
+        followMac.release("/v1/commands/openChat"); await followOpening.value
+        for _ in 0..<4 { await followStore.glasses.waitForWrites(); await Task.yield() }
+        expect(followDisplay.current(followMac.host).state?.chatID == followChat.id, "Confirmed ordinary open receipt publishes matching G2 target")
+        await followStore.startDictation(); followSpeech.emit("First spoken sentence.")
+        await followStore.stopDictation()
+        await followStore.startDictation(); followSpeech.emit("Second spoken sentence.")
+        await followStore.stopDictation()
+        for _ in 0..<4 { await followStore.glasses.waitForWrites(); await Task.yield() }
+        let followDraft = "First spoken sentence.\nSecond spoken sentence."
+        expect(followStore.draft == followDraft && followDisplay.current(followMac.host).state?.draft == followDraft,
+               "Repeated hold/release retains the complete native draft and shares its review snapshot")
+        expect(followMac.sendCount == 0, "G2 draft review never sends a message")
+        await followStore.sendDraft()
+        for _ in 0..<4 { await followStore.glasses.waitForWrites(); await Task.yield() }
+        expect(followMac.sendCount == 1 && followStore.draft.isEmpty && !followStore.hasUnresolvedSend &&
+               followDisplay.current(followMac.host).state?.sendState == .confirmed && followDisplay.current(followMac.host).state?.view == .reply,
+               "Dedicated Send path retains native receipt/ledger behavior and only observes delivery on G2")
+        followStore.draft = "A new unsent draft"
+        try? await Task.sleep(nanoseconds:300_000_000)
+        await followStore.glasses.waitForWrites()
+        expect(followDisplay.current(followMac.host).state?.sendState == GlassesSendState.none && followMac.sendCount == 1,
+               "Editing after a confirmed send clears display receipt without sending again")
+        followStore.selectProvider(.codex)
+        for _ in 0..<4 { await followStore.glasses.waitForWrites(); await Task.yield() }
+        expect(!followStore.glasses.enabled && !followDisplay.current(followMac.host).active,
+               "Provider change releases Follow and its private draft")
+        followStore.selectProvider(.claude)
+        followStore.enableGlassesFollow()
+        for _ in 0..<4 { await followStore.glasses.waitForWrites(); await Task.yield() }
+        followStore.setForeground(false)
+        for _ in 0..<4 { await followStore.glasses.waitForWrites(); await Task.yield() }
+        expect(!followDisplay.current(followMac.host).active && followStore.draft == "A new unsent draft",
+               "Background releases G2 draft while preserving the native draft ledger")
+        followStore.setForeground(true)
+        expect(!followStore.glasses.enabled, "Foreground return does not silently reclaim or steal Follow")
+        followStore.enableGlassesFollow()
+        for _ in 0..<4 { await followStore.glasses.waitForWrites(); await Task.yield() }
+        followStore.selectHost(second.name)
+        for _ in 0..<4 { await followStore.glasses.waitForWrites(); await Task.yield() }
+        expect(!followStore.glasses.enabled && !followDisplay.current(followMac.host).active,
+               "Host change releases old display owner without publishing to another Mac")
+        followStore.setForeground(false)
+        let normalWithPreviewFlag = ControllerStore(client:client,credentials:followVault,persistence:followPersistence,speech:FixtureDictation(),demoFollow:true)
+        expect(!normalWithPreviewFlag.glasses.enabled && !normalWithPreviewFlag.isDemo, "--demo-follow alone cannot activate a fixture in the real app")
         print("Remote HTTP + ControllerStore: \(count) integration checks passed")
     }
 }

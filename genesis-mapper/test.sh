@@ -17,3 +17,4 @@ xcrun swiftc "$ROOT/Sources/ReadSnapshotCache.swift" "$ROOT/tests/ReadSnapshotCa
 
 xcrun swiftc "$ROOT/Sources/RemoteNavigationLease.swift" "$ROOT/tests/RemoteNavigationLeaseTests.swift" -o "$ROOT/test-build/remote-navigation-lease"
 "$ROOT/test-build/remote-navigation-lease"
+sh "$ROOT/test-display-session.sh"

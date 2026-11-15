@@ -2,6 +2,46 @@ import XCTest
 
 final class ControllerUITests: XCTestCase {
     @MainActor
+    func testGlassesFollowPanel() {
+        continueAfterFailure = false
+        let app = XCUIApplication()
+        app.launchArguments = ["--demo", "--demo-follow"]
+        XCUIDevice.shared.orientation = UIDevice.current.userInterfaceIdiom == .pad ? .landscapeLeft : .portrait
+        app.launch()
+        XCTAssertTrue(app.staticTexts["Agent Micro Controller"].waitForExistence(timeout: 8))
+        let draft = app.buttons["glasses.draft"]
+        for _ in 0..<8 {
+            if draft.isHittable { break }
+            app.swipeUp()
+        }
+        XCTAssertTrue(draft.isHittable, "Follow controls are reachable on the native controller screen")
+        let controls = ["glasses.reply", "glasses.draft", "glasses.home", "glasses.previous", "glasses.next", "glasses.refresh", "glasses.send"]
+        for identifier in controls {
+            let button = app.buttons[identifier]
+            XCTAssertTrue(button.exists, "\(identifier) is present")
+            XCTAssertGreaterThanOrEqual(button.frame.minX, app.frame.minX, "\(identifier) stays inside the left edge")
+            XCTAssertLessThanOrEqual(button.frame.maxX, app.frame.maxX, "\(identifier) stays inside the right edge")
+            XCTAssertGreaterThanOrEqual(button.frame.height, 28, "\(identifier) has a usable touch target")
+        }
+        draft.tap()
+        let next = app.buttons["glasses.next"]
+        next.tap()
+        XCTAssertTrue(app.staticTexts["Page 2 of 3"].waitForExistence(timeout: 3))
+        app.buttons["glasses.previous"].tap()
+        XCTAssertTrue(app.staticTexts["Page 1 of 3"].exists)
+        app.buttons["glasses.home"].tap()
+        XCTAssertFalse(next.isEnabled, "Home view has no reply page controls")
+        app.buttons["glasses.reply"].tap()
+        XCTAssertTrue(next.isEnabled)
+        app.buttons["glasses.refresh"].tap()
+        XCTAssertTrue(app.staticTexts["Design preview · simulated glasses display"].exists)
+        let image = XCTAttachment(screenshot: XCUIScreen.main.screenshot())
+        image.name = UIDevice.current.userInterfaceIdiom == .pad ? "G2 follow iPad landscape" : "G2 follow iPhone portrait"
+        image.lifetime = .keepAlways
+        add(image)
+    }
+
+    @MainActor
     func testDialsAndRotation() {
         continueAfterFailure = false
         let app = XCUIApplication()

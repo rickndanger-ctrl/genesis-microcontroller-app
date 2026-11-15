@@ -15,6 +15,8 @@ import CoreImage.CIFilterBuiltins
     private var server:RemoteHTTPServer?
     private let access=ClaudeAccess()
     private let menuNavigation=RemoteMenuNavigation()
+    private var displaySession=RemoteDisplaySession()
+    private var displayExpiryTask:Task<Void,Never>?
     private var commandBusy=false
     private var registrations:[NSObjectProtocol]=[]
     private var screenLocked=false
@@ -35,12 +37,12 @@ import CoreImage.CIFilterBuiltins
             startIfEnabled()
         } catch {serviceStatus="Remote storage could not be loaded. Existing controller is unchanged."}
         let center=DistributedNotificationCenter.default()
-        registrations.append(center.addObserver(forName:NSNotification.Name("com.apple.screenIsLocked"),object:nil,queue:.main){[weak self] _ in Task{@MainActor in self?.screenLocked=true;self?.menuNavigation.invalidate()}})
+        registrations.append(center.addObserver(forName:NSNotification.Name("com.apple.screenIsLocked"),object:nil,queue:.main){[weak self] _ in Task{@MainActor in self?.screenLocked=true;self?.menuNavigation.invalidate();self?.clearDisplaySession()}})
         registrations.append(center.addObserver(forName:NSNotification.Name("com.apple.screenIsUnlocked"),object:nil,queue:.main){[weak self] _ in Task{@MainActor in self?.screenLocked=false}})
         if baseURL.isEmpty {Task {await discoverAddress()}}
         Task {_ = await loadCodexChats()}
     }
-    func setEnabled(_ value:Bool) {if !value {menuNavigation.invalidate()};enabled=value;UserDefaults.standard.set(value,forKey:"remote.enabled");if value {startIfEnabled()} else {server?.stop();server=nil;serviceStatus="Remote access is off"}}
+    func setEnabled(_ value:Bool) {if !value {menuNavigation.invalidate();clearDisplaySession()};enabled=value;UserDefaults.standard.set(value,forKey:"remote.enabled");if value {startIfEnabled()} else {server?.stop();server=nil;serviceStatus="Remote access is off"}}
     func saveAddress() {UserDefaults.standard.set(baseURL,forKey:"remote.baseURL")}
     func startIfEnabled() {
         guard enabled,server==nil,let store else{return}
@@ -215,6 +217,32 @@ import CoreImage.CIFilterBuiltins
         func parameter(_ key:String)->String {query.first{$0.name==key}?.value ?? ""}
         do {
             if request.method=="GET",path=="/v1/status" {return .json(status())}
+            if request.method=="GET",path=="/v1/display-session" {
+                if isLocked {clearDisplaySession()}
+                return .json(displaySession.snapshot(hostID:store.hostID,now:Date().timeIntervalSince1970))
+            }
+            if request.method=="POST",path=="/v1/display-session" {
+                guard !isLocked else {clearDisplaySession();return .error(423,"Unlock this Mac to follow a controller.")}
+                let operation=try RemoteDisplayRequest.decode(request.body)
+                let target=try displaySession.requiredTarget(for:operation,now:Date().timeIntervalSince1970)
+                var validated:RemoteDisplaySession.ValidatedTarget?
+                if let target {
+                    // Inventory reads only on a changed target. Draft updates and
+                    // heartbeats never perform an accessibility traversal.
+                    let inventory=target.provider=="codex" ? await loadCodexChats():loadChats(target.provider)
+                    let matches=inventory.filter{$0.id==target.chatID}
+                    if matches.count==1 {validated = .init(target:target,title:matches[0].title)}
+                }
+                guard enabled,!isLocked else {clearDisplaySession();return .error(423,"Unlock this Mac to follow a controller.")}
+                let result=try displaySession.apply(operation,hostID:store.hostID,now:Date().timeIntervalSince1970,validated:validated)
+                scheduleDisplayExpiry(active:result.active)
+                return .json(result)
+            }
+            if request.method=="POST",path=="/v1/display-feedback" {
+                if isLocked {clearDisplaySession()}
+                let feedback=try RemoteDisplayFeedbackRequest.decode(request.body)
+                return .json(try displaySession.applyFeedback(feedback,hostID:store.hostID,now:Date().timeIntervalSince1970))
+            }
             if request.method=="GET",path=="/v1/navigation" {
                 let provider=parameter("provider"),chatID=parameter("chatID").isEmpty ? nil:parameter("chatID")
                 guard ["claude","codex"].contains(provider),let generation=Int(parameter("generation")),generation>=0 else{return .error(422,"Invalid navigation context.")}
@@ -262,8 +290,21 @@ import CoreImage.CIFilterBuiltins
                 return RemoteHTTPResponse(contentType:record.mimeType ?? "application/octet-stream",data:content)
             }
             return .error(404,"Unknown endpoint.")
-        } catch let error as RemoteFault {return .error(error.status,error.message)}
+        } catch let error as RemoteDisplayFault {return .error(error.status,error.message)}
+        catch let error as RemoteFault {return .error(error.status,error.message)}
         catch {return .error(400,"Invalid request or unavailable artifact.")}
+    }
+    private func clearDisplaySession() {
+        displayExpiryTask?.cancel();displayExpiryTask=nil;displaySession.invalidate()
+    }
+    private func scheduleDisplayExpiry(active:Bool) {
+        displayExpiryTask?.cancel();displayExpiryTask=nil
+        guard active else{return}
+        displayExpiryTask=Task { @MainActor [weak self] in
+            do {try await Task.sleep(nanoseconds:UInt64(RemoteDisplaySession.lifetime * 1_000_000_000))} catch{return}
+            // Delete transient drafts even when every display client disconnects.
+            self?.displaySession.expire(now:Date().timeIntervalSince1970)
+        }
     }
     private func navigationContextIsCurrent(provider:String,chatID:String?)->Bool {
         guard enabled,!isLocked,AXIsProcessTrusted() else{return false}

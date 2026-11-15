@@ -144,6 +144,7 @@ struct ControllerScreen: View {
             .buttonStyle(.plain)
         }
         composer
+        GlassesFollowPanel(store: store, follow: store.glasses)
         if let receipt = store.lastReceipt {
             Label(receipt.message, systemImage: receipt.statusIcon)
                 .font(isPad ? .subheadline : .caption)

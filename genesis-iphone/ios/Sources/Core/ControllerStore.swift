@@ -11,7 +11,7 @@ final class ControllerStore: ObservableObject {
     @Published private(set) var chats: [ChatRecord] = []
     @Published private(set) var profile: RemoteProfile
     @Published private(set) var selectedChat: ChatRecord?
-    @Published var draft = "" { didSet { persistDraft() } }
+    @Published var draft = "" { didSet { persistDraft(); publishGlassesDraft() } }
     @Published private(set) var artifacts: [ArtifactRecord] = []
     @Published private(set) var connectionMessage = "Pair your Mac to connect"
     @Published private(set) var isBusy = false
@@ -25,6 +25,7 @@ final class ControllerStore: ObservableObject {
     @Published var requestedPanel: String?
     @Published private(set) var navigation = RemoteNavigationState.inactive
     let isDemo: Bool
+    let glasses: GlassesFollowController
 
     private let client: RemoteClient
     private let credentials: any ControllerCredentialVault
@@ -44,6 +45,7 @@ final class ControllerStore: ObservableObject {
     private var dictationIntent = 0
     private var captureRoute: DraftRoute?
     private var foreground = false
+    private var glassesConfirmedChatID: String?
     private var importingProvisioning = false
     private var provisioningTask: Task<Void, Never>?
     private var pendingProvisioning: [PairingPayload] = []
@@ -51,8 +53,11 @@ final class ControllerStore: ObservableObject {
 
     init(demo: Bool = false, client: RemoteClient = RemoteClient(),
          credentials: any ControllerCredentialVault = GenesisCredentials(), persistence: ControllerPersistence = ControllerPersistence(),
-         provisioningDirectory: URL? = nil, speech: (any PhoneDictationService)? = nil) {
+         provisioningDirectory: URL? = nil, speech: (any PhoneDictationService)? = nil,
+         glassesTransport: (any GlassesDisplayTransport)? = nil, demoFollow: Bool = false) {
         self.client = client; self.credentials = credentials; self.persistence = persistence
+        glasses = GlassesFollowController(transport: glassesTransport ?? RemoteGlassesDisplayTransport(client: client),
+                                          previewOnly: demo && demoFollow)
         self.speech = speech ?? PhoneDictation()
         self.provisioningDirectory = provisioningDirectory
         isDemo = demo
@@ -74,10 +79,14 @@ final class ControllerStore: ObservableObject {
                 self.captureRoute = nil
                 self.sendReady = !self.draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
             }
+            self.publishGlassesDraft()
         }
         self.speech.onError = { [weak self] error in self?.lastError = error }
         restoreSelection()
-        if demo { loadDemo() }
+        if demo {
+            loadDemo()
+            if demoFollow { glasses.startPreview(provider: selectedProvider, chatID: selectedChat?.id, draft: draft) }
+        }
     }
 
     var selectedHost: RemoteHost? { hosts.first { $0.id == selectedHostID } }
@@ -164,6 +173,8 @@ final class ControllerStore: ObservableObject {
         sendReady = !draft.isEmpty
     }
     private func invalidateSelection() {
+        glasses.stop("Selection changed. Turn on Follow for this Mac and provider.")
+        glassesConfirmedChatID = nil
         dictationIntent &+= 1; speech.cancel(); captureRoute = nil
         gate.advance(); status = nil; chats = []; artifacts = []; lastReceipt = nil; lastError = nil; requestedPanel = nil
         isBusy = false; isRefreshingChats = false; sendReady = false
@@ -181,6 +192,27 @@ final class ControllerStore: ObservableObject {
     }
     func returnHome() { selectedSlotIndex = nil }
 
+    func enableGlassesFollow(takeover: Bool = false) {
+        guard foreground, !isDemo, selectedProvider != .muse else {
+            glasses.stop("Glasses follow is available for Codex and Claude while Genesis is open."); return
+        }
+        do {
+            let (host, token) = try connection()
+            // A restored selection has not opened the Mac chat in this session.
+            // Follow starts on Home until the ordinary open receipt confirms it.
+            let confirmed = selectedChat?.id == glassesConfirmedChatID ? selectedChat : nil
+            glasses.enable(host: host, token: token, provider: selectedProvider, chatID: confirmed?.id,
+                           slotIndex: confirmed == nil ? nil : selectedSlotIndex,
+                           draft: confirmed == nil ? "" : draft, recording: confirmed != nil && isRecording,
+                           takeover: takeover)
+        } catch { glasses.stop(error.localizedDescription) }
+    }
+
+    private func publishGlassesDraft() {
+        guard !loadingDraft, let confirmed = glassesConfirmedChatID, selectedChat?.id == confirmed else { return }
+        glasses.updateDraft(draft, recording: isRecording)
+    }
+
     func setForeground(_ active: Bool) {
         // SwiftUI can report active from both .task and scenePhase. A duplicate
         // callback must not cancel an in-flight pair/status operation.
@@ -188,6 +220,8 @@ final class ControllerStore: ObservableObject {
         foreground = active
         polling?.cancel(); polling = nil
         if !active {
+            glasses.stop("Follow paused in the background. Turn it on when you return.")
+            glassesConfirmedChatID = nil
             dictationIntent &+= 1; speech.cancel(); captureRoute = nil
             gate.advance(); isBusy = false; isRefreshingChats = false; persistDraft()
             navigation = .inactive; navigationGeneration = nil
@@ -466,6 +500,8 @@ final class ControllerStore: ObservableObject {
         selectedChat = nil; settings.selectedChats.removeValue(forKey:scope); selectedSlotIndex = nil
         loadingDraft = true; draft = ""; loadingDraft = false; sendReady = false; artifacts = []; persist()
         navigation = .inactive; navigationGeneration = nil
+        glassesConfirmedChatID = nil
+        glasses.confirmedChat(provider: selectedProvider, chatID: nil, slotIndex: nil, draft: "")
     }
 
     func selectChat(_ chat: ChatRecord) async {
@@ -496,6 +532,8 @@ final class ControllerStore: ObservableObject {
         selectedSlotIndex = profile.slots.first { $0.kind == "chat" && $0.targetID == chat.id }?.index
         sendReady = !draft.isEmpty; artifacts = []; persist()
         navigation = .inactive; navigationGeneration = nil
+        glassesConfirmedChatID = chat.id
+        glasses.confirmedChat(provider: selectedProvider, chatID: chat.id, slotIndex: selectedSlotIndex, draft: draft)
         if isDemo { loadDemoArtifacts() }
         else { Task { await refreshArtifacts() } }
     }
@@ -650,6 +688,9 @@ final class ControllerStore: ObservableObject {
             }
         }
         settings.ledger.resolve(receipt, route: pending.route); persist()
+        // Display observation only. The existing receipt/ledger above remains the
+        // sole authority for delivery and clearing a draft; G2 never sends again.
+        if currentRoute == pending.route { glasses.sendChanged(receipt, draft: draft) }
     }
     func recoverPendingSend() async {
         guard !isDemo, !isBusy, let route = currentRoute,

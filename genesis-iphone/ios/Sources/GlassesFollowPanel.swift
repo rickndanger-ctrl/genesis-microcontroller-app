@@ -1,0 +1,112 @@
+import SwiftUI
+
+struct GlassesFollowPanel: View {
+    @ObservedObject var store: ControllerStore
+    @ObservedObject var follow: GlassesFollowController
+    @State private var confirmTakeover = false
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            Toggle(isOn: Binding(get: { follow.enabled }, set: { on in
+                if on { store.enableGlassesFollow() } else { follow.stop() }
+            })) {
+                Label("Follow this controller", systemImage: "eyeglasses")
+                    .font(.headline)
+            }
+            .disabled(store.isDemo || store.selectedProvider == .muse || !store.isPaired)
+            .accessibilityHint("Show this controller’s confirmed chat, reply, or draft on your G2 glasses.")
+
+            Label(follow.message, systemImage: follow.acknowledged ? "checkmark.circle.fill" : follow.unsupported ? "arrow.down.app" : "info.circle")
+                .font(.caption)
+                .foregroundStyle(follow.acknowledged ? Color.green : Color.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+
+            if let owner = follow.otherOwner, !follow.enabled {
+                Button("Take over from \(owner)") { confirmTakeover = true }
+                    .buttonStyle(.bordered)
+            }
+
+            if follow.enabled {
+                HStack {
+                    Label("This \(follow.sourceName) controls the display", systemImage: "dot.radiowaves.left.and.right")
+                    Spacer(minLength: 4)
+                    if follow.connecting { ProgressView().controlSize(.small) }
+                }
+                .font(.caption)
+
+                if !follow.hasChat {
+                    Text("Open an assigned chat to show it on the glasses.")
+                        .font(.subheadline).foregroundStyle(.secondary)
+                }
+
+                ViewThatFits(in: .horizontal) {
+                    HStack { viewButtons }
+                    VStack(alignment: .leading) { viewButtons }
+                }
+
+                HStack(spacing: 12) {
+                    Button { follow.page(-1) } label: { Image(systemName: "chevron.left").frame(minWidth: 28, minHeight: 28) }
+                        .accessibilityIdentifier("glasses.previous")
+                        .disabled(follow.desired.page == 0 || follow.desired.view == .home)
+                        .accessibilityLabel("Previous glasses page")
+                    Text(follow.pageLabel).font(.caption.monospacedDigit()).frame(maxWidth: .infinity)
+                    Button { follow.page(1) } label: { Image(systemName: "chevron.right").frame(minWidth: 28, minHeight: 28) }
+                        .accessibilityIdentifier("glasses.next")
+                        .disabled(!follow.canGoNext)
+                        .accessibilityLabel("Next glasses page")
+                }
+                .buttonStyle(.bordered)
+
+                HStack {
+                    Button { follow.refresh() } label: { Label("Refresh", systemImage: "arrow.clockwise") }
+                        .accessibilityIdentifier("glasses.refresh")
+                        .buttonStyle(.bordered)
+                    Spacer(minLength: 8)
+                    Button { Task { await store.sendDraft() } } label: { Label("Send draft", systemImage: "arrow.up.circle.fill") }
+                        .accessibilityIdentifier("glasses.send")
+                        .buttonStyle(.borderedProminent)
+                        .disabled(!store.canSend)
+                        .accessibilityHint("Send the reviewed draft to the selected Mac chat once, using the normal delivery receipt.")
+                }
+
+                Text("Hold the microphone on the controller, release to review, then Send draft. Nothing sends from the glasses display.")
+                    .font(.caption).foregroundStyle(.secondary)
+                if follow.draftIsExcerpt {
+                    Text("Glasses show the first 16,000 characters. Your complete draft stays here for review and Send.")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
+                Text("This screen stays awake while Follow is on. Leaving Genesis pauses Follow. For now, keep Even open on your iPhone and use this controller on your iPad.")
+                    .font(.caption).foregroundStyle(.secondary)
+            } else {
+                Text("G2 · Keep Even open on your iPhone. Your iPad can control the glasses through the same paired Mac. Same-phone background operation is not verified yet.")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+        }
+        .padding(18)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(.white.opacity(0.78), in: RoundedRectangle(cornerRadius: 24))
+        .confirmationDialog("Switch which device controls the glasses?", isPresented: $confirmTakeover, titleVisibility: .visible) {
+            Button("Follow this \(follow.sourceName)") { store.enableGlassesFollow(takeover: true) }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("The other controller will stop publishing to the glasses. Its chat drafts are kept on that device.")
+        }
+    }
+
+    @ViewBuilder private var viewButtons: some View {
+        Button { follow.show(.reply) } label: { Label("Reply", systemImage: "text.bubble") }
+            .accessibilityIdentifier("glasses.reply")
+            .disabled(!follow.hasChat)
+            .buttonStyle(.bordered)
+            .tint(follow.desired.view == .reply ? .blue : .secondary)
+        Button { follow.show(.draft) } label: { Label("Draft", systemImage: "square.and.pencil") }
+            .accessibilityIdentifier("glasses.draft")
+            .disabled(!follow.hasChat)
+            .buttonStyle(.bordered)
+            .tint(follow.desired.view == .draft ? .blue : .secondary)
+        Button { follow.show(.home) } label: { Label("Home", systemImage: "square.grid.2x2") }
+            .accessibilityIdentifier("glasses.home")
+            .buttonStyle(.bordered)
+            .tint(follow.desired.view == .home ? .blue : .secondary)
+    }
+}
