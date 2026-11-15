@@ -15,17 +15,24 @@ protocol PhoneDictationService: AnyObject {
 
 @MainActor
 final class PhoneDictation: PhoneDictationService {
-    enum State { case idle, authorizing, recording, finalizing }
+    enum State: Int { case idle, authorizing, recording, finalizing }
     var onText: ((String) -> Void)?
     var onState: ((State) -> Void)?
     var onError: ((String) -> Void)?
-    private(set) var state: State = .idle { didSet { onState?(state) } }
+    private(set) var state: State = .idle {
+        didSet {
+            DictationDiagnostics.record("speech_state", ["capture": captureNumber, "state": state.rawValue])
+            onState?(state)
+        }
+    }
     private var recognizer: SFSpeechRecognizer?
-    private let engine = AVAudioEngine()
+    private let inputLifecycle = DictationInputLifecycle()
     private let audioRelay = DictationAudioRelay()
     private var request: SFSpeechAudioBufferRecognitionRequest?
     private var task: SFSpeechRecognitionTask?
-    private var tapInstalled = false
+    private var captureNumber = 0
+    private var segmentNumber = 0
+    private var hasResult = false
     private var sessionID = UUID()
     private var segmentID = UUID()
     private var transcript = DictationTranscript()
@@ -34,6 +41,7 @@ final class PhoneDictation: PhoneDictationService {
     private var rolloverTimer: Task<Void, Never>?
     private var quietTimer: Task<Void, Never>?
     private var rolloverTask: Task<Void, Never>?
+    private var inputWatchdog: Task<Void, Never>?
     private var interruptionObserver: NSObjectProtocol?
 
     init() {
@@ -54,10 +62,15 @@ final class PhoneDictation: PhoneDictationService {
         rolloverTimer?.cancel()
         quietTimer?.cancel()
         rolloverTask?.cancel()
+        inputWatchdog?.cancel()
     }
 
     func start() async throws {
-        guard state == .idle else { return }
+        guard state == .idle else {
+            DictationDiagnostics.record("speech_start_ignored", ["state": state.rawValue]); return
+        }
+        captureNumber += 1; segmentNumber = 0
+        DictationDiagnostics.record("speech_start", ["capture": captureNumber])
         sessionID = UUID(); let active = sessionID
         transcript = DictationTranscript()
         state = .authorizing
@@ -70,6 +83,7 @@ final class PhoneDictation: PhoneDictationService {
         }
         guard active == sessionID else { return }
         guard speechPermission == .authorized, microphone else {
+            DictationDiagnostics.record("speech_permission_denied", ["speech": speechPermission.rawValue, "mic": microphone ? 1 : 0])
             finish(); throw DictationError.permissions
         }
         let recognizer = SFSpeechRecognizer(locale: Locale.current)
@@ -77,19 +91,27 @@ final class PhoneDictation: PhoneDictationService {
             finish(); throw DictationError.unavailable
         }
         self.recognizer = recognizer
+        audioRelay.resetCounts()
         do {
             let audio = AVAudioSession.sharedInstance()
             try audio.setCategory(.playAndRecord, mode: .measurement, options: [.defaultToSpeaker, .allowBluetoothHFP])
             try audio.setActive(true)
-            let input = engine.inputNode, format = input.outputFormat(forBus: 0)
-            guard format.sampleRate > 0, format.channelCount > 0 else { throw DictationError.unavailable }
             try beginRecognition(active: active)
-            let relay = audioRelay
-            input.installTap(onBus: 0, bufferSize: 1024, format: format) { buffer, _ in relay.append(buffer) }
-            tapInstalled = true
-            engine.prepare(); try engine.start(); state = .recording
+            let relay = audioRelay, capture = captureNumber
+            try inputLifecycle.start { buffer in
+                let count = relay.noteInputBuffer()
+                relay.append(buffer)
+                if count == 1 {
+                    DictationDiagnostics.record("input_first_buffer", ["capture": capture, "frames": Int(buffer.frameLength), "rate": Int(buffer.format.sampleRate)])
+                }
+            }
+            state = .recording
+            scheduleInputWatchdog(active: active)
             scheduleRollover(active: active)
-        } catch { cancel(); throw error }
+        } catch {
+            DictationDiagnostics.record("speech_start_error", ["capture": captureNumber, "code": (error as NSError).code])
+            cancel(); throw error
+        }
     }
 
     private func beginRecognition(active: UUID) throws {
@@ -102,12 +124,19 @@ final class PhoneDictation: PhoneDictationService {
         segmentID = UUID(); let segment = segmentID
         transcript.beginSegment(segment)
         finalReceived = false
+        hasResult = false; segmentNumber += 1
+        DictationDiagnostics.record("recognition_start", ["capture": captureNumber, "segment": segmentNumber])
         segmentStartedAt = Date()
         task = recognizer.recognitionTask(with: request) { [weak self] result, error in
             Task { @MainActor [weak self] in
                 guard let self, active == self.sessionID, segment == self.segmentID,
                       self.state != .idle else { return }
                 if let result {
+                    if !self.hasResult {
+                        self.hasResult = true
+                        DictationDiagnostics.record("recognition_first_result", ["capture": self.captureNumber, "segment": self.segmentNumber,
+                            "empty": result.bestTranscription.formattedString.isEmpty ? 1 : 0])
+                    }
                     let words = result.bestTranscription.segments
                     let first = words.first?.timestamp
                     let last = words.last.map { $0.timestamp + $0.duration }
@@ -116,9 +145,16 @@ final class PhoneDictation: PhoneDictationService {
                         self.onText?(text)
                         self.scheduleQuietRollover(active: active, segment: segment)
                     }
-                    if result.isFinal { self.finalReceived = true }
+                    if result.isFinal {
+                        self.finalReceived = true
+                        DictationDiagnostics.record("recognition_final", ["capture": self.captureNumber, "segment": self.segmentNumber])
+                    }
                 }
-                if error != nil { self.finalReceived = true }
+                if let error {
+                    self.finalReceived = true
+                    DictationDiagnostics.record("recognition_error", ["capture": self.captureNumber, "segment": self.segmentNumber,
+                        "code": (error as NSError).code])
+                }
                 guard self.state == .recording, self.rolloverTask == nil else { return }
                 if result?.isFinal == true {
                     // A recognizer can finish during a long pause while the user
@@ -137,6 +173,18 @@ final class PhoneDictation: PhoneDictationService {
             }
         }
         guard audioRelay.attach(request) else { throw DictationError.audioBuffer }
+    }
+
+    private func scheduleInputWatchdog(active: UUID) {
+        inputWatchdog?.cancel()
+        inputWatchdog = Task { [weak self] in
+            do { try await Task.sleep(nanoseconds: 3_000_000_000) } catch { return }
+            guard let self, self.sessionID == active, self.state == .recording,
+                  self.audioRelay.inputBufferCount == 0 else { return }
+            DictationDiagnostics.record("input_no_buffers", ["capture": self.captureNumber])
+            self.cancel()
+            self.onError?("The microphone did not start delivering audio. Your draft is saved. Release, then hold Talk again to retry.")
+        }
     }
 
     private func scheduleRollover(active: UUID) {
@@ -191,6 +239,7 @@ final class PhoneDictation: PhoneDictationService {
     func stop() async {
         if state == .authorizing { cancel(); return }
         guard state == .recording else { return }
+        DictationDiagnostics.record("speech_stop", ["capture": captureNumber, "buffers": audioRelay.inputBufferCount])
         let active = sessionID
         state = .finalizing
         rolloverTimer?.cancel(); rolloverTimer = nil
@@ -213,6 +262,7 @@ final class PhoneDictation: PhoneDictationService {
     }
 
     func cancel() {
+        DictationDiagnostics.record("speech_cancel", ["capture": captureNumber, "state": state.rawValue, "buffers": audioRelay.inputBufferCount])
         // Revoke callbacks before cancelling; Speech can deliver one more result
         // after cancellation, which must not overwrite the user's reviewed draft.
         sessionID = UUID()
@@ -223,12 +273,14 @@ final class PhoneDictation: PhoneDictationService {
     }
 
     private func stopInput() {
-        if engine.isRunning { engine.stop() }
-        if tapInstalled { engine.inputNode.removeTap(onBus: 0); tapInstalled = false }
+        inputWatchdog?.cancel(); inputWatchdog = nil
+        inputLifecycle.stop()
     }
 
     private func finish() {
+        DictationDiagnostics.record("speech_finish", ["capture": captureNumber, "buffers": audioRelay.inputBufferCount, "final": finalReceived ? 1 : 0])
         sessionID = UUID()
+        stopInput()
         transcript.endSegment(segmentID)
         rolloverTimer?.cancel(); rolloverTimer = nil
         quietTimer?.cancel(); quietTimer = nil
@@ -261,6 +313,17 @@ private final class DictationAudioRelay: @unchecked Sendable {
     private var buffered: [AVAudioPCMBuffer] = []
     private var bufferedDuration: TimeInterval = 0
     private var overflowed = false
+    private var inputBuffers = 0
+
+    var inputBufferCount: Int {
+        lock.lock(); defer { lock.unlock() }; return inputBuffers
+    }
+    func resetCounts() {
+        lock.lock(); defer { lock.unlock() }; inputBuffers = 0
+    }
+    func noteInputBuffer() -> Int {
+        lock.lock(); defer { lock.unlock() }; inputBuffers += 1; return inputBuffers
+    }
 
     func append(_ buffer: AVAudioPCMBuffer) {
         lock.lock(); defer { lock.unlock() }

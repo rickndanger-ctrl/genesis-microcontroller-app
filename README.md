@@ -47,6 +47,8 @@ sh genesis-iphone/tools/test-host.sh
 sh genesis-mapper/test-codex-queue.sh
 ```
 
+For input restart regressions, boot an iOS 26+ simulator and run `GENESIS_TEST_SIMULATOR=<simulator-udid> sh genesis-iphone/tests/core/run-dictation-input.sh`. This uses synthetic audio buffers to test repeated capture lifetimes; it does not exercise physical speech recognition.
+
 For the iOS HTTP integration suite, boot an iOS 26+ simulator and run `GENESIS_TEST_SIMULATOR=<simulator-udid> sh genesis-iphone/tests/core/run-integration.sh`. The Codex queue integration uses temporary local state and a loopback test model. Run it with `python3 genesis-iphone/tools/test-codex-queue-isolated.py --codex /path/to/codex`.
 
 The simulator UI suite covers phone and tablet layouts, all slot and quick-key editors, microphone gestures, draft isolation, menus, and artifact browsing. See [UI test instructions](genesis-iphone/tests/ui/README.md) and [the app audit](genesis-iphone/docs/APP-AUDIT-2026-11-14.md).

@@ -67,6 +67,9 @@ final class ControllerStore: ObservableObject {
             guard let self else { return }
             self.isRecording = state == .authorizing || state == .recording
             self.isFinalizing = state == .finalizing
+            let phase: Int
+            switch state { case .idle: phase = 0; case .authorizing: phase = 1; case .recording: phase = 2; case .finalizing: phase = 3 }
+            DictationDiagnostics.record("store_state", ["phase": phase, "intent": self.dictationIntent])
             if state == .idle {
                 self.captureRoute = nil
                 self.sendReady = !self.draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
@@ -552,16 +555,27 @@ final class ControllerStore: ObservableObject {
     }
 
     func startDictation() async {
-        guard canDictate, !isRecording else { return }
+        guard canDictate, !isRecording else {
+            DictationDiagnostics.record("store_start_blocked", ["recording": isRecording ? 1 : 0,
+                "finalizing": isFinalizing ? 1 : 0, "busy": isBusy ? 1 : 0, "paired": isPaired ? 1 : 0,
+                "chat": hasDictationChat ? 1 : 0, "capable": providerInfo?.supportsPhoneDictation == true ? 1 : 0])
+            return
+        }
         dictationIntent &+= 1; let intent = dictationIntent
         guard let route = currentRoute else { return }
         captureRoute = route; let base = draft.trimmingCharacters(in: .whitespacesAndNewlines)
         sendReady = false; lastError = nil
         if isDemo { isRecording = true; return }
+        DictationDiagnostics.record("store_start", ["intent": intent])
+        var sawTranscript = false
         speech.onText = { [weak self] text in
             guard let self, self.dictationIntent == intent, self.captureRoute == route else { return }
             let text = text.trimmingCharacters(in: .whitespacesAndNewlines)
             guard !text.isEmpty else { return }
+            if !sawTranscript {
+                sawTranscript = true
+                DictationDiagnostics.record("store_first_transcript", ["intent": intent])
+            }
             let full = base.isEmpty ? text : base + "\n" + text
             self.settings.ledger.set(full, for: route)
             if self.currentRoute == route { self.draft = full } else { self.persist() }
@@ -579,6 +593,7 @@ final class ControllerStore: ObservableObject {
         }
     }
     func stopDictation() async {
+        if !isDemo { DictationDiagnostics.record("store_stop", ["intent": dictationIntent, "finalizing": isFinalizing ? 1 : 0]) }
         if isDemo {
             isRecording = false
             if draft.isEmpty { draft = "Show me the latest changes and what still needs attention." }

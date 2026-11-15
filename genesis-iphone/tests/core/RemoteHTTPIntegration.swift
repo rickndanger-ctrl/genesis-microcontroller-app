@@ -1010,6 +1010,46 @@ final class FixtureCredentials: ControllerCredentialVault {
                demoStore.profile.quickActionIDs[2] == "nativeVoice",
                "Claude retains its model control and independently mapped quick keys")
 
+        // Independent holds append to one draft; release/pause is not a new chat
+        // and a late callback from an earlier hold cannot replace the new words.
+        let repeatFixture = HTTPFixture(name:"fixture-repeat-holds")
+        try await repeatFixture.start(); defer { repeatFixture.stop() }
+        try credentials.save(repeatFixture.token, for:repeatFixture.name)
+        var repeatSettings = LocalControllerSettings()
+        repeatSettings.hosts = [repeatFixture.host]; repeatSettings.selectedHostID = repeatFixture.name
+        repeatSettings.selectedProvider = .claude
+        let repeatChat = ChatRecord(id:"chat-\(repeatFixture.name)",title:"Repeat hold fixture",state:"Idle")
+        repeatSettings.selectedChats["\(repeatFixture.hostID).claude"] = repeatChat
+        let repeatPersistence = ControllerPersistence(directory:temporary.appendingPathComponent("repeat-holds"))
+        try repeatPersistence.save(repeatSettings)
+        let repeatSpeech = FixtureDictation()
+        let repeatStore = ControllerStore(client:client,credentials:credentials,persistence:repeatPersistence,speech:repeatSpeech)
+        await repeatStore.refresh()
+        var expectedPhrases: [String] = []
+        var retiredTranscript: ((String) -> Void)?
+        for index in 1...4 {
+            expect(repeatStore.canDictate && !repeatStore.isRecording && !repeatStore.isFinalizing,
+                   "Hold \(index) is ready after the previous release")
+            await repeatStore.startDictation()
+            expect(repeatStore.isRecording && repeatSpeech.recordings == index,
+                   "Hold \(index) starts a fresh capture")
+            retiredTranscript?("Stale previous hold")
+            expect(repeatStore.draft == expectedPhrases.joined(separator:"\n"),
+                   "Old hold cannot overwrite the current draft")
+            repeatSpeech.emit("Phrase \(index)")
+            repeatSpeech.finalText = "Phrase \(index)."
+            retiredTranscript = repeatSpeech.onText
+            await repeatStore.stopDictation()
+            expectedPhrases.append("Phrase \(index).")
+            expect(repeatStore.draft == expectedPhrases.joined(separator:"\n") && repeatStore.canSend && repeatStore.sendReady,
+                   "Release \(index) preserves every preceding phrase for explicit Send")
+        }
+        let repeatRestored = ControllerStore(client:client,credentials:credentials,persistence:repeatPersistence,speech:FixtureDictation())
+        expect(repeatRestored.draft == expectedPhrases.joined(separator:"\n"),
+               "Repeated holds persist the complete draft across app restart")
+        expect(!repeatFixture.received.contains(where:{$0.0.hasPrefix("POST /v1/commands")}),
+               "Repeated hold/release never sends a remote prompt")
+
         // Regression: .task + scenePhase both reported active while the third Mac
         // was still answering. Polling cancellation must not cancel provisioning.
         let third = HTTPFixture(name:"fixture-c"); try await third.start(); defer { third.stop() }

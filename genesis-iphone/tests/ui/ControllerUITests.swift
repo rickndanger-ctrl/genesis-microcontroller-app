@@ -351,4 +351,33 @@ final class ControllerUITests: XCTestCase {
         app.buttons["Cancel"].tap()
     }
 
+    @MainActor
+    func testRepeatedHoldReleaseAfterReview() {
+        // Demo proves the gesture resets between captures. Real speech restart,
+        // audio buffers, and appended recognition require service/device tests.
+        continueAfterFailure = false
+        let app = XCUIApplication(); app.launchArguments = ["--demo"]
+        XCUIDevice.shared.orientation = .portrait; app.launch()
+        let talk = app.buttons["Start dictation"]
+        let field = app.textFields["Draft for selected chat"]
+        XCTAssertTrue(talk.waitForExistence(timeout: 8))
+        for capture in 1...3 {
+            talk.press(forDuration: 1.1)
+            XCTAssertTrue(talk.waitForExistence(timeout: 5), "Release resets capture \(capture)")
+            XCTAssertTrue(field.isEnabled)
+            XCTAssertEqual(field.value as? String, "Show me the latest changes and what still needs attention.")
+            XCTAssertFalse(app.alerts["Controller update"].exists)
+            app.buttons["Send"].tap() // --demo never sends a host command.
+            let cleared = NSPredicate { _, _ in
+                (field.value as? String) == "Hold the microphone, or type a draft…" || (field.value as? String) == ""
+            }
+            expectation(for: cleared, evaluatedWith: field); waitForExpectations(timeout: 3)
+            if capture < 3 {
+                let review = expectation(description: "Review interval between holds")
+                DispatchQueue.main.asyncAfter(deadline: .now() + 5) { review.fulfill() }
+                waitForExpectations(timeout: 6)
+            }
+        }
+    }
+
 }
