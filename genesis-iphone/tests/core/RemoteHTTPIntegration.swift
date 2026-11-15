@@ -965,6 +965,14 @@ final class FixtureCredentials: ControllerCredentialVault {
         let setupURL = setupDirectory.appendingPathComponent("GenesisPairing.json")
         let payloads = [first,second,third].map { PairingPayload(v:1,name:$0.name,hostID:$0.hostID,baseURL:$0.baseURL,token:$0.token) }
         try JSONEncoder().encode(payloads).write(to:setupURL)
+        let freshProvisioningStore = ControllerStore(client:client, credentials:FixtureCredentials(),
+            persistence:ControllerPersistence(directory:temporary.appendingPathComponent("fresh-provisioning")),
+            provisioningDirectory:setupDirectory)
+        await freshProvisioningStore.importProvisioningIfPresent()
+        expect(freshProvisioningStore.isPaired && freshProvisioningStore.selectedHost?.hostID == first.hostID &&
+               freshProvisioningStore.hosts.count == 3 && !FileManager.default.fileExists(atPath:setupURL.path),
+               "First private provisioning selects the first verified Mac and consumes the provisioning file")
+        try JSONEncoder().encode(payloads).write(to:setupURL)
         var setupSettings = LocalControllerSettings()
         setupSettings.hosts = [first,second,third].map { .init(id:$0.name,name:$0.name,baseURL:$0.baseURL,hostID:nil) }
         setupSettings.selectedHostID = second.name
@@ -972,9 +980,10 @@ final class FixtureCredentials: ControllerCredentialVault {
         try setupPersistence.save(setupSettings)
         let setupVault = FixtureCredentials()
         let setupStore = ControllerStore(client:client,credentials:setupVault,persistence:setupPersistence,provisioningDirectory:setupDirectory)
+        let priorThirdStatusReads = third.received.filter { $0.0.hasPrefix("GET /v1/status ") }.count
         setupStore.setForeground(true)
         for _ in 0..<50 {
-            if third.received.contains(where:{$0.0.hasPrefix("GET /v1/status ")}) { break }
+            if third.received.filter({ $0.0.hasPrefix("GET /v1/status ") }).count > priorThirdStatusReads { break }
             try? await Task.sleep(nanoseconds:20_000_000)
         }
         expect(!FileManager.default.fileExists(atPath:setupURL.path), "Plaintext provisioning removed before delayed third verification")

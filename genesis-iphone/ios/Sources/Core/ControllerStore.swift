@@ -300,9 +300,9 @@ final class ControllerStore: ObservableObject {
         if let existing { paired.id = hosts[existing].id; paired.name = hosts[existing].name }
         try credentials.save(payload.token, for: paired.id)
         if let existing { hosts[existing] = paired } else { hosts.append(paired) }
-        if activate {
+        if activate || selectedHostID.isEmpty {
             invalidateSelection(); selectedHostID = paired.id; restoreSelection(); applyStatus(remote); persist()
-            await refresh()
+            if activate { await refresh() }
         } else {
             if paired.id == selectedHostID { invalidateSelection(); restoreSelection(); applyStatus(remote) }
             persist()
@@ -478,7 +478,8 @@ final class ControllerStore: ObservableObject {
         selectedSlotIndex = profile.slots.first { $0.kind == "chat" && $0.targetID == chat.id }?.index
         sendReady = !draft.isEmpty; artifacts = []; persist()
         navigation = .inactive; navigationGeneration = nil
-        Task { await refreshArtifacts() }
+        if isDemo { loadDemoArtifacts() }
+        else { Task { await refreshArtifacts() } }
     }
 
     func refreshNavigation() async {
@@ -762,6 +763,14 @@ final class ControllerStore: ObservableObject {
         }
         if selectedChat == nil { selectedChat = chats[0]; settings.selectedChats[scope] = chats[0]; selectedSlotIndex = 0 }
         connectionMessage = "Interactive preview · no Mac connected"
-        artifacts = [.init(id: "demo-preview", title: "Your artifacts appear here", kind: "text", url: nil, mimeType: "text/plain", hostID: identity, provider: selectedProvider.rawValue, chatID: selectedChat?.id ?? "")]
+        loadDemoArtifacts()
+    }
+
+    private func loadDemoArtifacts() {
+        artifacts = ["Build notes", "Design review", "Test report"].enumerated().map {
+            .init(id: "demo-artifact-\($0.offset)", title: $0.element, kind: "text", url: nil,
+                  mimeType: "text/plain", hostID: status?.hostID ?? "", provider: selectedProvider.rawValue,
+                  chatID: selectedChat?.id ?? "")
+        }
     }
 }

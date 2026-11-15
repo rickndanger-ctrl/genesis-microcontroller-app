@@ -14,7 +14,33 @@ import Foundation
     static func rejects(_ url: URL, localhost: Bool = false) -> Bool {
         (try? PairingPayload.decode(url, allowLocalhost: localhost)) == nil
     }
+    static func dialTrackingChecks() {
+        let center = CGPoint(x: 50, y: 50)
+        func facePoint(_ degrees: Double) -> CGPoint {
+            let angle = degrees * .pi / 180
+            return CGPoint(x: center.x + 40 * cos(angle), y: center.y + 40 * sin(angle))
+        }
+
+        var dial = DialTracking(start: facePoint(165), center: center, radius: 50)
+        expect(dial.move(to: facePoint(195)) == 1 && abs(dial.degrees - 30) < 0.01,
+               "A clockwise turn across the angle seam advances one step")
+        expect(dial.move(to: facePoint(249)) == 2 && dial.steps == 3,
+               "Continuing the same drag advances only the new steps")
+        expect(dial.move(to: facePoint(190)) == -2 && dial.steps == 1,
+               "Reversing a turn moves back across the same steps")
+        expect(dial.move(to: center) == 0 && dial.move(to: facePoint(10)) == 0,
+               "Crossing the center cannot jump the selection")
+        expect(dial.move(to: facePoint(-20)) == -1 && dial.steps == 0,
+               "Circular tracking resumes after crossing the center")
+
+        var swipe = DialTracking(start: center, center: center, radius: 50)
+        expect(swipe.move(to: CGPoint(x: 74, y: 57)) == 1, "A center swipe advances the dial")
+        expect(swipe.move(to: CGPoint(x: 22, y: 73)) == -2 && swipe.steps == -1,
+               "An off-axis movement does not change the swipe direction")
+    }
+
     static func main() throws {
+        dialTrackingChecks()
         let valid = PairingPayload(v: 1, name: "Test Mac", hostID: "CFC99A4B-34EB-4E90-8413-97BE5866FE84",
             baseURL: "https://test-mac.example.ts.net:8451", token: String(repeating: "t", count: 64))
         let restored = try PairingPayload.decode(pairingURL(valid))

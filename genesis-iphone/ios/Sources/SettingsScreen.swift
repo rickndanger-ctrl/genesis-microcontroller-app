@@ -5,6 +5,7 @@ import UIKit
 struct SettingsScreen: View {
     @ObservedObject var store: ControllerStore
     @Environment(\.dismiss) private var dismiss
+    @AppStorage("controllerSoundsEnabled") private var controllerSoundsEnabled = true
     @State private var pairingLink = ""
     @State private var scanning = false
     @State private var pairing = false
@@ -16,6 +17,9 @@ struct SettingsScreen: View {
                 Section {
                     Label("Genesis Agent Micro Controller", systemImage: "circle.grid.3x2.fill")
                     Text("Your controller, wherever you work.").foregroundStyle(.secondary)
+                }
+                Section("Controller") {
+                    Toggle("Controller sounds", isOn: $controllerSoundsEnabled)
                 }
                 Section("Pair a Mac") {
                     Text("On the Mac, click the Genesis dial in the menu bar, then Pair iPhone / Artifacts. Scan its private pairing code while both devices are connected to Tailscale.")

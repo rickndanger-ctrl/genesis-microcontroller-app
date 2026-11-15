@@ -58,7 +58,8 @@ struct ActionBrowser: View {
                         if success { dismiss() }
                     }
                 }
-            }.disabled(saving).searchable(text: $query, prompt: "Search actions, menus, and panels")
+            }.disabled(saving)
+                .searchable(text: $query, placement: .navigationBarDrawer(displayMode: .always), prompt: "Search actions, menus, and panels")
                 .navigationTitle(quickKey.map { "Map quick key \($0 + 1)" } ?? "\(store.selectedProvider.name) actions")
                 .toolbar { ToolbarItem(placement: .cancellationAction) { Button("Done") { dismiss() } } }
                 .alert("Controller update", isPresented: Binding(get: { store.lastError != nil }, set: { if !$0 { store.lastError = nil } })) {

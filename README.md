@@ -2,11 +2,11 @@
 
 **Muse hasn’t been connected yet.**
 
-Genesis is an iPhone controller for Codex and Claude Code sessions on a paired Mac. It provides six assignable keys, chat switching, Hold to Talk, draft review, and Send. The Mac companion handles chat navigation and sends the reviewed draft to the selected session. This app is a separate project from the [Genesis Mini hardware and firmware](https://github.com/rickndanger-ctrl/genesis-agent-micro-controller).
+Genesis is an iPhone and iPad controller for Codex and Claude Code sessions on a paired Mac. It provides six assignable keys, chat switching, Hold to Talk, draft review, and Send. The iPad layout adapts to portrait and landscape. Turn the dials to browse chats or artifacts, then press to select. You can mute the dial ticks and key clicks under **Settings → Controller sounds**. The Mac companion handles chat navigation and sends the reviewed draft to the selected session. This app is a separate project from the [Genesis Mini hardware and firmware](https://github.com/rickndanger-ctrl/genesis-agent-micro-controller).
 
 ## Build
 
-The iPhone project targets iOS 26 or later and uses Xcode and XcodeGen. Generate the project, then open it in Xcode:
+The mobile project targets iOS and iPadOS 26 or later and uses Xcode and XcodeGen. Generate the project, then open it in Xcode:
 
 ```sh
 cd genesis-iphone
@@ -14,7 +14,7 @@ xcodegen generate --spec project.yml
 open GenesisController.xcodeproj
 ```
 
-For a physical iPhone, select your Apple development team in Xcode and choose a unique bundle identifier if needed. The `--demo` launch argument shows an offline preview.
+For a physical iPhone or iPad, select your Apple development team in Xcode and choose a unique bundle identifier if needed. The `--demo` launch argument shows an offline preview.
 
 Build the companion from the repository root on macOS 14 or later with Xcode:
 
@@ -27,10 +27,10 @@ The Mac build uses an ad hoc signature by default. Set `CLAUDE_CONTROLLER_SIGN_I
 
 ## Pair and use
 
-1. Connect the Mac and iPhone to the same Tailscale network. On the Mac, give the companion Accessibility access if you use Claude Code or native desktop menu controls.
+1. Connect the Mac and your iPhone or iPad to the same Tailscale network. On the Mac, give the companion Accessibility access if you use Claude Code or native desktop menu controls.
 2. From the menu-bar dial, open **Pair iPhone / Artifacts** and enable private remote access. The companion listens on loopback port 18765. On the Mac, `tailscale serve --bg --https=8451 http://127.0.0.1:18765` makes the service available on a private HTTPS port to the tailnet. If you already use that port, choose a free port and enter its HTTPS URL in the pairing panel.
-3. In the iPhone app, open **Settings → Scan pairing code** and scan the QR code from the companion. Pair each Mac separately. The pairing code contains a private credential.
-4. Choose a provider and chat. Hold **Talk**, release to review the draft, then tap **Send**. Grant iPhone microphone and speech recognition access when prompted.
+3. In the Genesis app, open **Settings → Scan pairing code** and scan the QR code from the companion. Pair each Mac separately. The pairing code contains a private credential.
+4. Choose a provider and chat. Hold **Talk**, release to review the draft, then tap **Send**. Grant microphone and speech recognition access when prompted.
 
 Codex Send uses the [bundled Codex queue command](https://learn.chatgpt.com/docs/developer-commands#codex-queue) to target the exact selected chat. **Queued** means Codex accepted the message. If the chat is busy, it can process the draft after the current turn. Open the chat on the Mac if it is unloaded. Claude Code uses the Mac composer and presents its own delivery status.
 
