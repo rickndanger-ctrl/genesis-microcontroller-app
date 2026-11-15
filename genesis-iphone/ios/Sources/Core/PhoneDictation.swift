@@ -33,13 +33,13 @@ final class PhoneDictation: PhoneDictationService {
     private var captureNumber = 0
     private var segmentNumber = 0
     private var hasResult = false
+    private var lastResultShape: [String: Int]?
     private var sessionID = UUID()
     private var segmentID = UUID()
     private var transcript = DictationTranscript()
     private var finalReceived = false
     private var segmentStartedAt = Date()
     private var rolloverTimer: Task<Void, Never>?
-    private var quietTimer: Task<Void, Never>?
     private var rolloverTask: Task<Void, Never>?
     private var inputWatchdog: Task<Void, Never>?
     private var interruptionObserver: NSObjectProtocol?
@@ -60,7 +60,6 @@ final class PhoneDictation: PhoneDictationService {
     deinit {
         if let interruptionObserver { NotificationCenter.default.removeObserver(interruptionObserver) }
         rolloverTimer?.cancel()
-        quietTimer?.cancel()
         rolloverTask?.cancel()
         inputWatchdog?.cancel()
     }
@@ -125,6 +124,7 @@ final class PhoneDictation: PhoneDictationService {
         transcript.beginSegment(segment)
         finalReceived = false
         hasResult = false; segmentNumber += 1
+        lastResultShape = nil
         DictationDiagnostics.record("recognition_start", ["capture": captureNumber, "segment": segmentNumber])
         segmentStartedAt = Date()
         task = recognizer.recognitionTask(with: request) { [weak self] result, error in
@@ -140,10 +140,18 @@ final class PhoneDictation: PhoneDictationService {
                     let words = result.bestTranscription.segments
                     let first = words.first?.timestamp
                     let last = words.last.map { $0.timestamp + $0.duration }
-                    if let text = self.transcript.receive(result.bestTranscription.formattedString,
-                                                        segment: segment, firstTimestamp: first, lastTimestamp: last) {
+                    let beforeCount = self.transcript.text.count
+                    let received = self.transcript.receive(result.bestTranscription.formattedString,
+                                                           segment: segment, firstTimestamp: first, lastTimestamp: last)
+                    let shape = ["capture": self.captureNumber, "segment": self.segmentNumber,
+                        "incoming": result.bestTranscription.formattedString.count, "before": beforeCount,
+                        "after": self.transcript.text.count, "published": received == nil ? 0 : 1, "final": result.isFinal ? 1 : 0]
+                    if shape != self.lastResultShape {
+                        DictationDiagnostics.record("recognition_text_shape", shape)
+                        self.lastResultShape = shape
+                    }
+                    if let text = received {
                         self.onText?(text)
-                        self.scheduleQuietRollover(active: active, segment: segment)
                     }
                     if result.isFinal {
                         self.finalReceived = true
@@ -198,23 +206,9 @@ final class PhoneDictation: PhoneDictationService {
         }
     }
 
-    private func scheduleQuietRollover(active: UUID, segment: UUID) {
-        quietTimer?.cancel()
-        quietTimer = Task { [weak self] in
-            // Close a quiet utterance before Apple's next partial result can
-            // replace it. This also covers OS versions with zeroed timestamps.
-            // Audio remains captured and queued while the old task finalizes.
-            do { try await Task.sleep(nanoseconds: 4_000_000_000) } catch { return }
-            guard let self, self.sessionID == active, self.segmentID == segment,
-                  self.state == .recording else { return }
-            self.beginRollover(active: active)
-        }
-    }
-
     private func beginRollover(active: UUID) {
         guard active == sessionID, state == .recording, rolloverTask == nil else { return }
         rolloverTimer?.cancel(); rolloverTimer = nil
-        quietTimer?.cancel(); quietTimer = nil
         audioRelay.beginBuffering()
         request?.endAudio()
         rolloverTask = Task { [weak self] in
@@ -243,7 +237,6 @@ final class PhoneDictation: PhoneDictationService {
         let active = sessionID
         state = .finalizing
         rolloverTimer?.cancel(); rolloverTimer = nil
-        quietTimer?.cancel(); quietTimer = nil
         stopInput()
         if let rolloverTask { await rolloverTask.value }
         guard active == sessionID else { return }
@@ -258,6 +251,10 @@ final class PhoneDictation: PhoneDictationService {
         for _ in 0..<20 {
             if finalReceived || sessionID != active || Task.isCancelled { break }
             do { try await Task.sleep(nanoseconds: 100_000_000) } catch { break }
+        }
+        if !finalReceived, sessionID == active, !Task.isCancelled {
+            DictationDiagnostics.record("recognition_final_timeout", ["capture": captureNumber, "segment": segmentNumber,
+                "state": state.rawValue, "buffers": audioRelay.inputBufferCount])
         }
     }
 
@@ -283,7 +280,6 @@ final class PhoneDictation: PhoneDictationService {
         stopInput()
         transcript.endSegment(segmentID)
         rolloverTimer?.cancel(); rolloverTimer = nil
-        quietTimer?.cancel(); quietTimer = nil
         rolloverTask?.cancel(); rolloverTask = nil
         task?.cancel(); task = nil; request = nil; recognizer = nil
         audioRelay.stop()

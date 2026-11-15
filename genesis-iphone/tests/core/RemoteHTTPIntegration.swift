@@ -1050,6 +1050,44 @@ final class FixtureCredentials: ControllerCredentialVault {
         expect(!repeatFixture.received.contains(where:{$0.0.hasPrefix("POST /v1/commands")}),
                "Repeated hold/release never sends a remote prompt")
 
+        // The real accumulator and store must preserve words for both providers,
+        // including nonempty shortened/reset partials in the same held recording.
+        repeatFixture.setProviders([
+            .init(id:"claude",name:"Claude",installed:true,readiness:"ready",capabilities:["openChat","sendPrompt","artifacts"],reason:nil),
+            .init(id:"codex",name:"Codex",installed:true,readiness:"ready",capabilities:["openChat","sendPrompt","artifacts"],reason:nil)
+        ])
+        for provider in [ProviderID.claude, .codex] {
+            var lossSettings = repeatSettings
+            lossSettings.selectedProvider = provider
+            let chatID = provider == .codex ? repeatFixture.codexChatID : repeatChat.id
+            lossSettings.selectedChats["\(repeatFixture.hostID).\(provider.rawValue)"] = .init(id:chatID,title:"Text retention fixture",state:"Idle")
+            let lossPersistence = ControllerPersistence(directory:temporary.appendingPathComponent("loss-\(provider.rawValue)"))
+            try lossPersistence.save(lossSettings)
+            let lossSpeech = FixtureDictation()
+            let lossStore = ControllerStore(client:client,credentials:credentials,persistence:lossPersistence,speech:lossSpeech)
+            await lossStore.refresh()
+            lossStore.draft = "Already saved."
+            await lossStore.startDictation()
+            expect(lossStore.isRecording, "\(provider.rawValue) starts real store capture for partial-reset regression")
+            var accumulator = DictationTranscript()
+            let segment = UUID(); accumulator.beginSegment(segment)
+            let firstSentence = "Please keep the beginning and the ending of my message."
+            let secondSentence = "Add this detail after a pause."
+            for incoming in [firstSentence, "Please keep", "my message.", secondSentence] {
+                if let merged = accumulator.receive(incoming,segment:segment,firstTimestamp:0,lastTimestamp:0) { lossSpeech.emit(merged) }
+                expect(lossStore.draft.contains(firstSentence), "\(provider.rawValue) keeps the earlier sentence through a partial/reset result")
+            }
+            lossSpeech.finalText = accumulator.text
+            await lossStore.stopDictation()
+            let expected = "Already saved.\n" + firstSentence + " " + secondSentence
+            expect(lossStore.draft == expected && lossStore.canSend && lossStore.sendReady,
+                   "\(provider.rawValue) release retains both full sentences for review")
+            let restored = ControllerStore(client:client,credentials:credentials,persistence:lossPersistence,speech:FixtureDictation())
+            expect(restored.draft == expected, "\(provider.rawValue) complete recognized draft survives restart")
+        }
+        expect(!repeatFixture.received.contains(where:{$0.0.hasPrefix("POST /v1/commands")}),
+               "Text-retention regressions never send an agent message")
+
         // Regression: .task + scenePhase both reported active while the third Mac
         // was still answering. Polling cancellation must not cancel provisioning.
         let third = HTTPFixture(name:"fixture-c"); try await third.start(); defer { third.stop() }

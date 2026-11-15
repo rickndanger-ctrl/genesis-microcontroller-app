@@ -62,6 +62,120 @@ struct DictationTranscriptTests {
         zeroTimes.receive("A word.", segment: zeroID, firstTimestamp: 0.5, lastTimestamp: 1)
         expect(zeroTimes.text == "A word.", "unknown partial timing does not create duplicate final text")
 
+        var shortened = DictationTranscript()
+        let shortID = UUID()
+        shortened.beginSegment(shortID)
+        shortened.receive("Please keep the beginning of this sentence.", segment: shortID)
+        shortened.receive("Please keep", segment: shortID)
+        expect(shortened.text == "Please keep the beginning of this sentence.",
+               "a shorter nonempty prefix cannot erase earlier recognized words")
+        shortened.receive("this sentence.", segment: shortID)
+        expect(shortened.text == "Please keep the beginning of this sentence.",
+               "a shorter suffix callback cannot discard the beginning")
+
+        var unknownTimes = DictationTranscript()
+        let unknownID = UUID()
+        unknownTimes.beginSegment(unknownID)
+        unknownTimes.receive("First sentence.", segment: unknownID)
+        unknownTimes.receive("Second sentence.", segment: unknownID)
+        expect(unknownTimes.text == "First sentence. Second sentence.",
+               "disjoint speech without timestamps appends rather than erases")
+        unknownTimes.receive("Second sentence. More detail.", segment: unknownID)
+        expect(unknownTimes.text == "First sentence. Second sentence. More detail.",
+               "unknown-timing corrections extend their own phrase without duplication")
+
+        var resetTimes = DictationTranscript()
+        let resetID = UUID()
+        resetTimes.beginSegment(resetID)
+        resetTimes.receive("First sentence.", segment: resetID, firstTimestamp: 0, lastTimestamp: 0)
+        resetTimes.receive("Second sentence.", segment: resetID, firstTimestamp: 0, lastTimestamp: 0)
+        expect(resetTimes.text == "First sentence. Second sentence.",
+               "zero-timestamp reset preserves both sentences")
+        resetTimes.receive("First sentence! Second sentence.", segment: resetID, firstTimestamp: 0, lastTimestamp: 0)
+        expect(resetTimes.text == "First sentence! Second sentence.",
+               "textual coverage recognizes cumulative results even without timing")
+
+        var falseCumulative = DictationTranscript()
+        let falseID = UUID()
+        falseCumulative.beginSegment(falseID)
+        falseCumulative.receive("First sentence.", segment: falseID, firstTimestamp: 0.2, lastTimestamp: 2)
+        falseCumulative.receive("Second sentence.", segment: falseID, firstTimestamp: 10, lastTimestamp: 12)
+        falseCumulative.receive("Second sentence.", segment: falseID, firstTimestamp: 0, lastTimestamp: 12)
+        expect(falseCumulative.text == "First sentence. Second sentence.",
+               "wide/reset timestamps alone cannot erase committed words")
+
+        var correctedCumulative = DictationTranscript()
+        let correctedID = UUID()
+        correctedCumulative.beginSegment(correctedID)
+        correctedCumulative.receive("Call Jon.", segment: correctedID, firstTimestamp: 0.2, lastTimestamp: 2)
+        correctedCumulative.receive("Ask about tomorrow.", segment: correctedID, firstTimestamp: 8, lastTimestamp: 10)
+        correctedCumulative.receive("Call John. Ask about tomorrow.", segment: correctedID, firstTimestamp: 0.2, lastTimestamp: 10)
+        expect(correctedCumulative.text == "Call John. Ask about tomorrow.",
+               "strongly aligned cumulative name correction does not duplicate task fragments")
+
+        var correctedFirstWord = DictationTranscript()
+        let firstWordID = UUID()
+        correctedFirstWord.beginSegment(firstWordID)
+        correctedFirstWord.receive("Not yet", segment: firstWordID, firstTimestamp: 0.2, lastTimestamp: 1)
+        correctedFirstWord.receive("Now yet", segment: firstWordID, firstTimestamp: 0.2, lastTimestamp: 1.1)
+        expect(correctedFirstWord.text == "Now yet", "same-audio initial-word correction keeps its unchanged anchor")
+        correctedFirstWord.receive("Not yet", segment: firstWordID, firstTimestamp: 5, lastTimestamp: 6)
+        expect(correctedFirstWord.text == "Now yet Not yet", "a later audio range remains new speech despite lexical similarity")
+
+        var earlierTask = DictationTranscript()
+        let earlierID = UUID(), correctedLaterID = UUID()
+        earlierTask.beginSegment(earlierID)
+        earlierTask.receive("Keep the earlier recording.", segment: earlierID)
+        earlierTask.endSegment(earlierID)
+        earlierTask.beginSegment(correctedLaterID)
+        earlierTask.receive("Call Jon.", segment: correctedLaterID, firstTimestamp: 0.2, lastTimestamp: 2)
+        earlierTask.receive("Ask about tomorrow.", segment: correctedLaterID, firstTimestamp: 8, lastTimestamp: 10)
+        earlierTask.receive("Call John. Ask about tomorrow.", segment: correctedLaterID, firstTimestamp: 0.2, lastTimestamp: 10)
+        expect(earlierTask.text == "Keep the earlier recording. Call John. Ask about tomorrow.",
+               "aligned cumulative correction cannot replace any earlier recognition task")
+
+        var overlapping = DictationTranscript()
+        let overlapID = UUID()
+        overlapping.beginSegment(overlapID)
+        overlapping.receive("Please open the report", segment: overlapID)
+        overlapping.receive("the report and explain the changes.", segment: overlapID)
+        expect(overlapping.text == "Please open the report and explain the changes.",
+               "overlapping reset merges the shared words without duplication")
+
+        var revised = DictationTranscript()
+        let revisedID = UUID()
+        revised.beginSegment(revisedID)
+        revised.receive("Call Jon tomorrow", segment: revisedID, firstTimestamp: 0.2, lastTimestamp: 3)
+        revised.receive("Call John tomorrow.", segment: revisedID, firstTimestamp: 0.2, lastTimestamp: 3.1)
+        expect(revised.text == "Call John tomorrow.", "same-audio lexical correction remains possible")
+        revised.receive("Call John tomorrow, please.", segment: revisedID, firstTimestamp: 0, lastTimestamp: 0)
+        expect(revised.text == "Call John tomorrow, please.", "longer zero-timing partial can extend a corrected phrase")
+
+        var missingMiddle = DictationTranscript()
+        let middleID = UUID()
+        missingMiddle.beginSegment(middleID)
+        missingMiddle.receive("First sentence. Second sentence. Third sentence.", segment: middleID)
+        missingMiddle.receive("First sentence. Third sentence.", segment: middleID)
+        expect(missingMiddle.text == "First sentence. Second sentence. Third sentence.",
+               "incomplete cumulative result cannot remove a recognized middle phrase")
+
+        var shortNew = DictationTranscript()
+        let shortNewID = UUID()
+        shortNew.beginSegment(shortNewID)
+        shortNew.receive("This first sentence is quite a bit longer.", segment: shortNewID)
+        shortNew.receive("Yes.", segment: shortNewID)
+        expect(shortNew.text == "This first sentence is quite a bit longer. Yes.",
+               "a genuinely new short phrase is appended rather than ignored as shorter")
+
+        var punctuation = DictationTranscript()
+        let punctuationID = UUID()
+        punctuation.beginSegment(punctuationID)
+        punctuation.receive("Don't delete these words", segment: punctuationID)
+        punctuation.receive("DON’T delete these words.", segment: punctuationID)
+        expect(punctuation.text == "DON’T delete these words.", "case and apostrophe refinements do not duplicate text")
+        punctuation.receive("...", segment: punctuationID)
+        expect(punctuation.text == "DON’T delete these words.", "punctuation-only callbacks cannot erase words")
+
         var repeated = DictationTranscript()
         let repeatID = UUID()
         repeated.beginSegment(repeatID)
