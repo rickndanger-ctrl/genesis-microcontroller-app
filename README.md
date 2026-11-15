@@ -36,6 +36,16 @@ Codex Send uses the [bundled Codex queue command](https://learn.chatgpt.com/docs
 
 Under **Codex → Actions → Change model**, open the model and reasoning picker for the current Codex view on the paired Mac. You can also hold an A key or a quick key to assign **Change model**. Codex must be open, with Accessibility enabled for the companion, and its **Select effort** keyboard shortcut set to the default **Control–Shift–M**. The app offers menu navigation when macOS exposes the picker. After choosing a model, select your chat again if the controller returns to chat selection.
 
+## Even Realities G2 glasses
+
+Native version **0.2.1 / build 18** supports **Follow this controller** on both iPhone and iPad. The separate [Genesis G2 app](https://github.com/rickndanger-ctrl/genesis-g2) displays the selected Codex conversation above a dedicated draft box. The native app handles dictation and explicit Send; the glasses never submit a message themselves.
+
+Open Genesis G2 inside Even on the paired iPhone, then enable **Follow this controller** in this app and tap an assigned chat. **Conversation** and **Draft** choose which area the page arrows navigate. The right arrow shows older text; the left returns toward the latest. One native device controls the display at a time, and taking over from another device requires an explicit choice.
+
+You can use this controller on an iPad while Even remains open on iPhone. For control from that same iPhone, use the installed Genesis G2 Beta and enable **Try background relay — Even Beta only** in it first. Keep native Genesis foreground; leaving it pauses Follow. Select a chat again after returning if the glasses show Home. The initial same-iPhone flow, conversation paging, and separate draft review are user-confirmed on the tested Mini 2 setup. Locked-phone relay and long-duration reliability remain unverified.
+
+Claude chat selection, drafts, and native Send status can follow, but **Claude replies are not readable on G2 yet**. G2 installation, pairing, build instructions, and validation are maintained in its separate repository. This integration does not require changing Genesis Mini firmware.
+
 ## Verify
 
 From the repository root:
@@ -45,6 +55,8 @@ sh genesis-iphone/tests/core/run.sh
 sh genesis-iphone/tests/core/run-dictation.sh
 sh genesis-iphone/tools/test-host.sh
 sh genesis-mapper/test-codex-queue.sh
+sh genesis-iphone/tests/core/run-follow.sh
+sh genesis-mapper/test-display-session.sh
 ```
 
 For input restart regressions, boot an iOS 26+ simulator and run `GENESIS_TEST_SIMULATOR=<simulator-udid> sh genesis-iphone/tests/core/run-dictation-input.sh`. This uses synthetic audio buffers to test repeated capture lifetimes; it does not exercise physical speech recognition.
