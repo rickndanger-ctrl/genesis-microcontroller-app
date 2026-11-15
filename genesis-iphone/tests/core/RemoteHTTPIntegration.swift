@@ -276,6 +276,11 @@ final class FixtureCredentials: ControllerCredentialVault {
         if !value { fatalError("FAIL: \(label)") }
     }
     @MainActor static func main() async throws {
+        if ProcessInfo.processInfo.arguments.contains("--duplicate-slots") {
+            try await duplicateSlotRegression()
+            print("Duplicate slot identity: \(count) integration checks passed")
+            return
+        }
         let first = HTTPFixture(name: "fixture-a"), second = HTTPFixture(name: "fixture-b")
         try await first.start(); try await second.start(); defer { first.stop(); second.stop() }
         let client = RemoteClient()
@@ -1224,6 +1229,83 @@ final class FixtureCredentials: ControllerCredentialVault {
         followStore.setForeground(false)
         let normalWithPreviewFlag = ControllerStore(client:client,credentials:followVault,persistence:followPersistence,speech:FixtureDictation(),demoFollow:true)
         expect(!normalWithPreviewFlag.glasses.enabled && !normalWithPreviewFlag.isDemo, "--demo-follow alone cannot activate a fixture in the real app")
+        try await duplicateSlotRegression()
         print("Remote HTTP + ControllerStore: \(count) integration checks passed")
+    }
+
+    @MainActor static func duplicateSlotRegression() async throws {
+        let temporary = FileManager.default.temporaryDirectory.appendingPathComponent("genesis-duplicate-slot-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: temporary) }
+        for provider in [ProviderID.codex, .claude] {
+            let mac = HTTPFixture(name:"duplicate-\(provider.rawValue)")
+            try await mac.start(); defer { mac.stop() }
+            let focus = RemoteAction(id:"focusPrompt",title:"Focus prompt",group:"Compose",detail:"Fixture only",requiresChat:true,changesChat:false)
+            mac.setProviders([.init(id:provider.rawValue,name:provider.name,installed:true,readiness:"ready",
+                                    capabilities:["openChat","sendPrompt","focusPrompt"],actions:[focus])])
+            let vault = FixtureCredentials(); try vault.save(mac.token, for:mac.name)
+            var settings = LocalControllerSettings()
+            settings.hosts = [mac.host]; settings.selectedHostID = mac.name; settings.selectedProvider = provider
+            let persistence = ControllerPersistence(directory:temporary.appendingPathComponent(provider.rawValue))
+            try persistence.save(settings)
+            let display = GlassesFollowFixture()
+            let store = ControllerStore(client:RemoteClient(),credentials:vault,persistence:persistence,
+                                        speech:FixtureDictation(),glassesTransport:display)
+            store.setForeground(true)
+            defer { store.setForeground(false) }
+            for _ in 0..<100 { if !store.chats.isEmpty { break }; try? await Task.sleep(nanoseconds:10_000_000) }
+            let chat = ChatRecord(id: provider == .codex ? mac.codexChatID : "chat-\(mac.name)", title:"Duplicate fixture",state:"Idle")
+            let saved = await store.saveSlot(.init(index:4,kind:"chat",title:chat.title,targetID:chat.id))
+            expect(saved, "\(provider.rawValue) fixture assigns same chat to first and fifth slots")
+            await store.openSlot(0)
+            store.enableGlassesFollow()
+            for _ in 0..<4 { await store.glasses.waitForWrites(); await Task.yield() }
+            expect(store.selectedSlotIndex == 0 && display.current(mac.host).state?.slotIndex == 0,
+                   "\(provider.rawValue) first slot is initially confirmed on native and G2")
+
+            mac.hold("/v1/commands/openChat")
+            let openingFifth = Task { await store.openSlot(4) }
+            for _ in 0..<100 { if mac.heldCount("/v1/commands/openChat") > 0 { break }; try? await Task.sleep(nanoseconds:10_000_000) }
+            expect(mac.heldCount("/v1/commands/openChat") == 1 && store.selectedSlotIndex == 0 && display.current(mac.host).state?.slotIndex == 0,
+                   "\(provider.rawValue) pending duplicate-slot open waits for its receipt")
+            mac.release("/v1/commands/openChat"); await openingFifth.value
+            for _ in 0..<4 { await store.glasses.waitForWrites(); await Task.yield() }
+            expect(store.selectedSlotIndex == 4 && store.glasses.desired.slotIndex == 4 && display.current(mac.host).state?.slotIndex == 4,
+                   "\(provider.rawValue) fifth-slot receipt preserves the exact tapped slot through G2 publication")
+            let updates = display.requests.compactMap { $0.1.state }
+            expect(updates.last?.chatID == chat.id && updates.last?.slotIndex == 4,
+                   "\(provider.rawValue) duplicate identity changes slot but retains the same exact chat")
+
+            mac.setActionResult("focusPrompt",chat:chat)
+            _ = await store.runAction("focusPrompt")
+            for _ in 0..<4 { await store.glasses.waitForWrites(); await Task.yield() }
+            expect(store.selectedSlotIndex == 4 && display.current(mac.host).state?.slotIndex == 4,
+                   "\(provider.rawValue) confirmed action reporting same active chat preserves fifth slot")
+            await store.selectChat(chat)
+            for _ in 0..<4 { await store.glasses.waitForWrites(); await Task.yield() }
+            expect(store.selectedSlotIndex == 4 && display.current(mac.host).state?.slotIndex == 4,
+                   "\(provider.rawValue) generic same-chat reopen does not collapse duplicate identity")
+
+            for status in ["failed", "uncertain", "queued"] {
+                mac.setActionResult("openChat",status:status)
+                await store.openSlot(0)
+                for _ in 0..<4 { await store.glasses.waitForWrites(); await Task.yield() }
+                expect(store.selectedSlotIndex == 4 && display.current(mac.host).state?.slotIndex == 4,
+                       "\(provider.rawValue) \(status) open cannot falsely select another duplicate slot")
+            }
+            mac.setActionResult("openChat",status:"confirmed")
+            await store.openSlot(0)
+            for _ in 0..<4 { await store.glasses.waitForWrites(); await Task.yield() }
+            expect(store.selectedSlotIndex == 0 && display.current(mac.host).state?.slotIndex == 0,
+                   "\(provider.rawValue) confirmed tap can switch back to first duplicate slot")
+            let distinctID = UUID().uuidString
+            _ = await store.saveSlot(.init(index:5,kind:"chat",title:"Distinct sixth slot",targetID:distinctID))
+            await store.openSlot(5)
+            for _ in 0..<4 { await store.glasses.waitForWrites(); await Task.yield() }
+            expect(store.selectedChat?.id == distinctID && store.selectedSlotIndex == 5 && display.current(mac.host).state?.slotIndex == 5,
+                   "\(provider.rawValue) distinct sixth slot still publishes its own target")
+            expect(mac.sendCount == 0, "\(provider.rawValue) slot regression never sends a prompt")
+            store.setForeground(false)
+            for _ in 0..<4 { await store.glasses.waitForWrites(); await Task.yield() }
+        }
     }
 }

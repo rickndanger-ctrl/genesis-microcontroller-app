@@ -444,8 +444,7 @@ final class ControllerStore: ObservableObject {
         lastError = nil
         if slot.kind == "chat" {
             let chat = chats.first { $0.id == slot.targetID } ?? ChatRecord(id: slot.targetID, title: slot.title, state: "Unknown")
-            await selectChat(chat)
-            if selectedChat?.id == chat.id { selectedSlotIndex = index }
+            await selectChat(chat, preferredSlotIndex: index)
         } else if slot.kind == "action" {
             await runAction(slot.targetID)
         }
@@ -504,14 +503,14 @@ final class ControllerStore: ObservableObject {
         glasses.confirmedChat(provider: selectedProvider, chatID: nil, slotIndex: nil, draft: "")
     }
 
-    func selectChat(_ chat: ChatRecord) async {
+    func selectChat(_ chat: ChatRecord, preferredSlotIndex: Int? = nil) async {
         guard !isBusy else { return }
         if isDemo {
-            changeChat(chat); return
+            changeChat(chat, preferredSlotIndex: preferredSlotIndex); return
         }
         guard providerInfo?.supports("openChat") == true else { lastError = RemoteError.capability("Open chat").localizedDescription; return }
         let receipt = await execute(action: "openChat", chatID: chat.id)
-        if receipt?.isConfirmed == true { changeChat(chat) }
+        if receipt?.isConfirmed == true { changeChat(chat, preferredSlotIndex: preferredSlotIndex) }
     }
     private func historyDestination(_ id: String) -> (Int, ChatRecord)? {
         guard let history = settings.chatHistory?[scope],
@@ -524,12 +523,16 @@ final class ControllerStore: ObservableObject {
         else { history.record(chat) }
         histories[scope] = history; settings.chatHistory = histories
     }
-    private func changeChat(_ chat: ChatRecord, historyIndex: Int? = nil) {
+    private func changeChat(_ chat: ChatRecord, historyIndex: Int? = nil, preferredSlotIndex: Int? = nil) {
+        // Multiple keys may target the same chat. Resolve the exact confirmed
+        // key before publishing, and retain it for same-chat action receipts.
+        let slotToPreserve = preferredSlotIndex ?? (selectedChat?.id == chat.id ? selectedSlotIndex : nil)
         persistDraft(); dictationIntent &+= 1; speech.cancel(); captureRoute = nil; gate.advance()
         selectedChat = chat; settings.selectedChats[scope] = chat
         recordHistory(chat,index:historyIndex)
         loadingDraft = true; draft = currentRoute.map { settings.ledger.text(for: $0) } ?? ""; loadingDraft = false
-        selectedSlotIndex = profile.slots.first { $0.kind == "chat" && $0.targetID == chat.id }?.index
+        let matchingSlots = profile.slots.filter { $0.kind == "chat" && $0.targetID == chat.id }
+        selectedSlotIndex = matchingSlots.first { $0.index == slotToPreserve }?.index ?? matchingSlots.first?.index
         sendReady = !draft.isEmpty; artifacts = []; persist()
         navigation = .inactive; navigationGeneration = nil
         glassesConfirmedChatID = chat.id
