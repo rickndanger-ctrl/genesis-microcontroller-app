@@ -46,6 +46,9 @@ struct GlassesDisplaySnapshot: Codable, Equatable {
     var feedback: GlassesDisplayFeedback?
     var leaseID: String?
     var chatTitle: String?
+    var supportsKeepReading: Bool?
+    var keepReading: Bool?
+    var readingOnly: Bool?
 
     var acknowledged: Bool {
         guard active, let feedback, feedback.revision == revision,
@@ -70,6 +73,7 @@ struct GlassesDisplayRequest: Encodable, Equatable {
     var leaseID: String?
     var sequence: Int?
     var state: GlassesDisplayState?
+    var enabled: Bool?
 }
 
 @MainActor

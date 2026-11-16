@@ -68,6 +68,24 @@ import Foundation
         let sidebar=Fixture()
         guard case .ready(let show)=await resolve([sample(),sample(sidebar:["show sidebar"])],sidebar) else {fatalError("fresh sidebar control should be returned to caller once")}
         precondition(show.sidebarControls.count==1 && sidebar.reads==2);checks+=1
+        func inventory(_ observations:[ClaudeInventoryRead.Result<String>],_ fixture:Fixture=Fixture(),scanDuration:Double=0) async ->ClaudeInventoryRead.Result<String> {
+            await ClaudeInventoryRead.resolve(deadline:2.5,now:{fixture.time},contextIsCurrent:{fixture.context},read:{_ in
+                let result=observations[min(fixture.reads,observations.count-1)];fixture.reads+=1;fixture.time+=scanDuration;return result
+            },sleep:{ns in fixture.sleeps+=1;fixture.time+=Double(ns)/1_000_000_000;fixture.afterSleep?()})
+        }
+        let inventoryFresh=Fixture()
+        guard case .found("exact ID")=await inventory([.missing,.found("exact ID")],inventoryFresh) else {fatalError("missing fresh full inventory should recover")}
+        precondition(inventoryFresh.reads==2);checks+=1
+        let inventoryAmbiguous=Fixture()
+        guard case .ambiguous=await inventory([.ambiguous,.found("guessed fork")],inventoryAmbiguous) else {fatalError("ambiguous inventory must fail immediately")}
+        precondition(inventoryAmbiguous.reads==1);checks+=1
+        let inventoryMissing=Fixture()
+        guard case .missing=await inventory([.missing],inventoryMissing) else {fatalError("missing inventory must remain unavailable")}
+        precondition(inventoryMissing.reads==3 && inventoryMissing.sleeps==2);checks+=1
+        guard case .missing=await inventory([.found("late")],scanDuration:3) else {fatalError("inventory result after deadline cannot authorize")};checks+=1
+        let inventoryChanged=Fixture();inventoryChanged.afterSleep={inventoryChanged.context=false}
+        guard case .contextChanged=await inventory([.missing,.found("new process")],inventoryChanged) else {fatalError("inventory retries must preserve process and context")}
+        precondition(inventoryChanged.reads==1);checks+=1
 
         enum Cancelled:Error {case fixture}
         let cancelled=await ClaudeNavigationRead.resolve(mode:.destination,deadline:2.5,now:{0},contextIsCurrent:{true},read:{_ in sample()},sleep:{_ in throw Cancelled.fixture})

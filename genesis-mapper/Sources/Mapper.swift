@@ -17,6 +17,13 @@ final class ClaudeAccess {
     private var scanReadFailed=false
     private let scanCache=ReadSnapshotCache<String,(AXUIElement,AnyObject?)>()
     func readSnapshot<Result>(_ read:()->Result)->Result {scanCache.withSnapshot(read)}
+    func readSnapshot<Result>(deadline:Double,_ read:()->Result)->Result? {
+        let previousDeadline=scanDeadline,previousExpired=scanExpired,previousFailure=scanReadFailed
+        scanDeadline=min(scanDeadline,deadline);scanExpired=false;scanReadFailed=false
+        defer {scanDeadline=previousDeadline;scanExpired=previousExpired;scanReadFailed=previousFailure}
+        let result=readSnapshot(read)
+        return scanExpired || scanReadFailed ? nil:result
+    }
     func sessionSnapshot()->[Session]? {
         scanExpired=false;scanDeadline=ProcessInfo.processInfo.systemUptime+2
         defer {scanDeadline = .infinity}

@@ -83,6 +83,9 @@ enum RemoteDisplayRequest: Decodable {
     case claim(sourceID: UUID, sourceName: String, takeover: Bool, state: RemoteDisplayState)
     case update(sourceID: UUID, leaseID: UUID, sequence: Int, state: RemoteDisplayState)
     case release(sourceID: UUID, leaseID: UUID)
+    case setReading(sourceID: UUID, leaseID: UUID, enabled: Bool)
+    case park(sourceID: UUID, leaseID: UUID)
+    case resume(sourceID: UUID, leaseID: UUID)
 
     init(from decoder: Decoder) throws {
         let initial = try decoder.container(keyedBy: DisplayCodingKey.self)
@@ -92,6 +95,8 @@ enum RemoteDisplayRequest: Decodable {
         case "claim": keys = ["operation", "sourceID", "sourceName", "takeover", "state"]
         case "update": keys = ["operation", "sourceID", "leaseID", "sequence", "state"]
         case "release": keys = ["operation", "sourceID", "leaseID"]
+        case "setReading": keys = ["operation", "sourceID", "leaseID", "enabled"]
+        case "park", "resume": keys = ["operation", "sourceID", "leaseID"]
         default: throw RemoteDisplayFault.invalid
         }
         let c = try displayContainer(decoder, keys: keys)
@@ -105,6 +110,12 @@ enum RemoteDisplayRequest: Decodable {
             let sequence = try c.decode(Int.self, forKey: .init("sequence"))
             guard (1...RemoteDisplayState.maximumInteger).contains(sequence) else { throw RemoteDisplayFault.invalid }
             self = .update(sourceID: sourceID, leaseID: try c.decode(UUID.self, forKey: .init("leaseID")), sequence: sequence, state: try c.decode(RemoteDisplayState.self, forKey: .init("state")))
+        case "setReading":
+            self = .setReading(sourceID: sourceID, leaseID: try c.decode(UUID.self, forKey: .init("leaseID")), enabled: try c.decode(Bool.self, forKey: .init("enabled")))
+        case "park":
+            self = .park(sourceID: sourceID, leaseID: try c.decode(UUID.self, forKey: .init("leaseID")))
+        case "resume":
+            self = .resume(sourceID: sourceID, leaseID: try c.decode(UUID.self, forKey: .init("leaseID")))
         default:
             self = .release(sourceID: sourceID, leaseID: try c.decode(UUID.self, forKey: .init("leaseID")))
         }
@@ -115,7 +126,7 @@ enum RemoteDisplayRequest: Decodable {
         catch { throw RemoteDisplayFault.invalid }
     }
     var state: RemoteDisplayState? {
-        switch self { case .claim(_, _, _, let state), .update(_, _, _, let state): return state; case .release: return nil }
+        switch self { case .claim(_, _, _, let state), .update(_, _, _, let state): return state; case .release, .setReading, .park, .resume: return nil }
     }
 }
 
@@ -156,6 +167,7 @@ struct RemoteDisplayFeedback: Encodable, Equatable {
 
 struct RemoteDisplaySnapshot: Encodable {
     let version = 1
+    let supportsKeepReading = true
     let hostID: String
     let active: Bool
     let revision: Int
@@ -165,6 +177,8 @@ struct RemoteDisplaySnapshot: Encodable {
     var chatTitle: String? = nil
     var state: RemoteDisplayState? = nil
     var feedback: RemoteDisplayFeedback? = nil
+    var keepReading: Bool? = nil
+    var readingOnly: Bool? = nil
     // Only an accepted owner POST may set this. GET/feedback never expose it.
     var leaseID: UUID? = nil
 }
@@ -176,7 +190,7 @@ struct RemoteDisplaySession {
     struct ValidatedTarget { let target: Target; let title: String }
     private struct Lease {
         let sourceID: UUID
-        let leaseID: UUID
+        var leaseID: UUID
         let sourceName: String
         var expiresAt: TimeInterval
         var sequence = 0
@@ -184,24 +198,48 @@ struct RemoteDisplaySession {
         var chatTitle: String?
         var feedback: RemoteDisplayFeedback?
         var feedbackReceivedAt: TimeInterval?
+        var keepReading = false
+        var readingOnly = false
+        var lastObservedAt: TimeInterval
     }
     static let lifetime: TimeInterval = 45
     static let feedbackLifetime: TimeInterval = 15
+    static let readingLifetime: TimeInterval = 3600
     private var lease: Lease?
     private(set) var revision = 0
+    var nextExpiry: TimeInterval? {lease?.expiresAt}
 
     mutating func invalidate() {
         if lease != nil { revision += 1 }
         lease = nil // Includes the transient private draft and feedback.
     }
     mutating func expire(now: TimeInterval) {
-        if let lease, !now.isFinite || now >= lease.expiresAt || now < lease.expiresAt - Self.lifetime { invalidate(); return }
-        if let receivedAt = lease?.feedbackReceivedAt, now >= receivedAt + Self.feedbackLifetime || now < receivedAt {
+        guard var current = lease else {return}
+        guard now.isFinite, now >= current.lastObservedAt else {invalidate();return}
+        current.lastObservedAt = now
+        if now >= current.expiresAt {
+            guard current.keepReading, !current.readingOnly,
+                  current.state.chatID != nil, current.chatTitle != nil,
+                  now < current.expiresAt + Self.readingLifetime else {invalidate();return}
+            // A missing background park request must not grant an hour starting
+            // at an arbitrarily late poll. Anchor fallback to the prior lease.
+            makeReadingOnly(&current, expiresAt: current.expiresAt + Self.readingLifetime)
+        }
+        if let receivedAt = current.feedbackReceivedAt, now >= receivedAt + Self.feedbackLifetime || now < receivedAt {
             // Ownership heartbeats do not prove the glasses remain connected.
             // Clearing an old ACK requests a new native render without changing
             // the controller's revision, page, draft, or ownership lease.
-            lease?.feedback = nil; lease?.feedbackReceivedAt = nil
+            current.feedback = nil; current.feedbackReceivedAt = nil
         }
+        lease = current
+    }
+    private mutating func makeReadingOnly(_ current: inout Lease, expiresAt: TimeInterval) {
+        let state = current.state
+        current.state = RemoteDisplayState(provider: state.provider, chatID: state.chatID, slotIndex: state.slotIndex,
+            view: "reply", page: 0, draft: "", recording: false, sendState: "none", refreshNonce: state.refreshNonce)
+        current.readingOnly = true; current.expiresAt = expiresAt
+        current.feedback = nil; current.feedbackReceivedAt = nil
+        revision += 1
     }
     mutating func snapshot(hostID: String, now: TimeInterval) -> RemoteDisplaySnapshot {
         expire(now: now)
@@ -209,7 +247,7 @@ struct RemoteDisplaySession {
         let expiry = ISO8601DateFormatter().string(from: Date(timeIntervalSince1970: lease.expiresAt))
         return RemoteDisplaySnapshot(hostID: hostID, active: true, revision: revision, sourceID: lease.sourceID,
                                      sourceName: lease.sourceName, expiresAt: expiry, chatTitle: lease.chatTitle,
-                                     state: lease.state, feedback: lease.feedback)
+                                     state: lease.state, feedback: lease.feedback, keepReading: lease.keepReading, readingOnly: lease.readingOnly)
     }
     private mutating func preflight(_ request: RemoteDisplayRequest, now: TimeInterval) throws {
         expire(now: now)
@@ -221,9 +259,15 @@ struct RemoteDisplaySession {
             if let lease, lease.sourceID != source, !takeover { throw RemoteDisplayFault.conflict }
         case .update(let source, let id, let sequence, _):
             guard (1...RemoteDisplayState.maximumInteger).contains(sequence) else { throw RemoteDisplayFault.invalid }
-            guard let lease, lease.sourceID == source, lease.leaseID == id, sequence > lease.sequence else { throw RemoteDisplayFault.conflict }
-        case .release(let source, let id):
+            guard let lease, !lease.readingOnly, lease.sourceID == source, lease.leaseID == id, sequence > lease.sequence else { throw RemoteDisplayFault.conflict }
+        case .release(let source, let id), .setReading(let source, let id, _), .park(let source, let id), .resume(let source, let id):
             guard let lease, lease.sourceID == source, lease.leaseID == id else { throw RemoteDisplayFault.conflict }
+            if case .setReading(_, _, true) = request {
+                guard lease.state.chatID != nil, lease.chatTitle != nil else {throw RemoteDisplayFault.invalid}
+            }
+            if case .park = request {
+                guard lease.keepReading, lease.state.chatID != nil, lease.chatTitle != nil else {throw RemoteDisplayFault.conflict}
+            }
         }
     }
     /// Call before awaiting an inventory read. Heartbeats and draft edits return nil.
@@ -245,7 +289,7 @@ struct RemoteDisplaySession {
         switch request {
         case .claim(let source, let name, _, let state):
             revision += 1
-            lease = Lease(sourceID: source, leaseID: UUID(), sourceName: name, expiresAt: now + Self.lifetime, state: state, chatTitle: title)
+            lease = Lease(sourceID: source, leaseID: UUID(), sourceName: name, expiresAt: now + Self.lifetime, state: state, chatTitle: title, lastObservedAt: now)
         case .update(_, _, let sequence, var state):
             var current = lease!
             let paginationMatches = current.state.samePagination(as: state)
@@ -256,7 +300,30 @@ struct RemoteDisplaySession {
                 current.feedback = nil; current.feedbackReceivedAt = nil
             }
             current.state = state; current.sequence = sequence; current.expiresAt = now + Self.lifetime; current.chatTitle = title
+            if state.chatID == nil {current.keepReading = false}
             lease = current
+        case .setReading(_, _, let enabled):
+            var current = lease!
+            if !enabled, current.readingOnly {invalidate();break}
+            if current.keepReading != enabled {
+                current.keepReading = enabled; current.feedback = nil; current.feedbackReceivedAt = nil
+                revision += 1; lease = current
+            }
+        case .park:
+            var current = lease!
+            if !current.readingOnly {
+                makeReadingOnly(&current, expiresAt: now + Self.readingLifetime)
+                lease = current
+            }
+        case .resume:
+            var current = lease!
+            // Rotate even if park has not arrived: a timed-out old park or
+            // update must not mutate resumed control. If this response is lost,
+            // the owner must explicitly claim again instead of replaying it.
+            current.leaseID = UUID(); current.sequence = 0; current.readingOnly = false
+            current.expiresAt = now + Self.lifetime
+            current.feedback = nil; current.feedbackReceivedAt = nil
+            revision += 1; lease = current
         case .release:
             invalidate()
         }

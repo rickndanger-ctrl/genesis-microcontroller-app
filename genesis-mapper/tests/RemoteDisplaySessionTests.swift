@@ -128,6 +128,134 @@ import Foundation
         pagination.invalidate()
         check(!pagination.snapshot(hostID: host, now: 407).active, "disable and lock can clear session immediately")
 
+        check(initialJSON["supportsKeepReading"] as? Bool == true, "inactive bridge advertises keep-reading support")
+        check(initialJSON["keepReading"] == nil && initialJSON["readingOnly"] == nil, "inactive bridge has no reading owner flags")
+        check(claimed.keepReading == false && claimed.readingOnly == false, "reading persistence defaults off")
+        func readingFixture(provider:String="codex") throws ->(RemoteDisplaySession,UUID) {
+            var value=RemoteDisplaySession()
+            let state=RemoteDisplayState(provider:provider,chatID:"reading",slotIndex:2,view:"draft",page:9,
+                draft:"Private speech must not persist",recording:true,sendState:"confirmed",refreshNonce:7)
+            let target=RemoteDisplaySession.ValidatedTarget(target:.init(provider:provider,chatID:"reading"),title:"Exact selected chat")
+            let owner=try value.apply(.claim(sourceID:phone,sourceName:"iPhone",takeover:false,state:state),hostID:host,now:1000,validated:target)
+            return (value,owner.leaseID!)
+        }
+        for provider in ["codex","claude"] {
+            var (reading,readingLease)=try readingFixture(provider:provider)
+            rejects(409,"unarmed park \(provider)") {_ = try reading.apply(.park(sourceID:phone,leaseID:readingLease),hostID:host,now:1001)}
+            let armed=try reading.apply(.setReading(sourceID:phone,leaseID:readingLease,enabled:true),hostID:host,now:1002)
+            check(armed.keepReading==true && armed.readingOnly==false && armed.leaseID==readingLease,"armed normal lease \(provider)")
+            check(armed.expiresAt==ISO8601DateFormatter().string(from:Date(timeIntervalSince1970:1045)),"arming does not renew heartbeat \(provider)")
+            let parked=try reading.apply(.park(sourceID:phone,leaseID:readingLease),hostID:host,now:1003)
+            check(parked.active && parked.keepReading==true && parked.readingOnly==true,"explicit park stays display-active \(provider)")
+            check(parked.state?.provider==provider && parked.state?.chatID=="reading" && parked.state?.slotIndex==2 && parked.chatTitle=="Exact selected chat","park preserves only exact selection \(provider)")
+            check(parked.state?.view=="reply" && parked.state?.page==0 && parked.state?.draft=="" && parked.state?.recording==false && parked.state?.sendState=="none","park sanitizes private/live state \(provider)")
+            check(parked.revision==armed.revision+1 && parked.feedback==nil,"park requires a fresh display ACK \(provider)")
+            check(parked.expiresAt==ISO8601DateFormatter().string(from:Date(timeIntervalSince1970:4603)),"explicit park bound starts at accepted park \(provider)")
+            let repeated=try reading.apply(.park(sourceID:phone,leaseID:readingLease),hostID:host,now:1004)
+            check(repeated.revision==parked.revision && repeated.expiresAt==parked.expiresAt,"lost park response retry is idempotent \(provider)")
+            let rearmed=try reading.apply(.setReading(sourceID:phone,leaseID:readingLease,enabled:true),hostID:host,now:1005)
+            check(rearmed.expiresAt==parked.expiresAt && rearmed.revision==parked.revision,"rearming parked session never extends deadline \(provider)")
+            rejects(409,"late update while parked \(provider)") {_ = try reading.apply(.update(sourceID:phone,leaseID:readingLease,sequence:99,state:a),hostID:host,now:1006)}
+            rejects(409,"other owner cannot resume \(provider)") {_ = try reading.apply(.resume(sourceID:pad,leaseID:readingLease),hostID:host,now:1007)}
+            rejects(409,"wrong lease cannot disable reading \(provider)") {_ = try reading.apply(.setReading(sourceID:phone,leaseID:UUID(),enabled:false),hostID:host,now:1008)}
+            let resumed=try reading.apply(.resume(sourceID:phone,leaseID:readingLease),hostID:host,now:1009)
+            check(resumed.active && resumed.readingOnly==false && resumed.keepReading==true && resumed.leaseID != readingLease,"resume rotates lease and restores control \(provider)")
+            check(resumed.state?.draft=="" && resumed.state?.recording==false && resumed.state?.sendState=="none","resume never restores discarded transient input \(provider)")
+            check(resumed.expiresAt==ISO8601DateFormatter().string(from:Date(timeIntervalSince1970:1054)),"resumed normal lease lasts45 seconds \(provider)")
+            rejects(409,"late pre-park update fenced after resume \(provider)") {_ = try reading.apply(.update(sourceID:phone,leaseID:readingLease,sequence:999,state:a),hostID:host,now:1010)}
+            rejects(409,"old parked lease cannot resume twice \(provider)") {_ = try reading.apply(.resume(sourceID:phone,leaseID:readingLease),hostID:host,now:1011)}
+            rejects(409,"late park fenced after resume \(provider)") {_ = try reading.apply(.park(sourceID:phone,leaseID:readingLease),hostID:host,now:1012)}
+            let beat=try reading.apply(.update(sourceID:phone,leaseID:resumed.leaseID!,sequence:1,state:resumed.state!),hostID:host,now:1013)
+            check(beat.active && beat.keepReading==true,"new resume lease accepts sequence1 \(provider)")
+        }
+        var (fallback,fallbackLease)=try readingFixture()
+        _ = try fallback.apply(.setReading(sourceID:phone,leaseID:fallbackLease,enabled:true),hostID:host,now:1001)
+        let beforeFallback=fallback.snapshot(hostID:host,now:1044.99)
+        check(beforeFallback.readingOnly==false && beforeFallback.state?.draft.isEmpty==false,"normal lease retains draft until exact expiry")
+        let atFallback=fallback.snapshot(hostID:host,now:1045)
+        check(atFallback.active && atFallback.readingOnly==true && atFallback.state?.draft=="","lost park falls back at exact normal expiry")
+        check(atFallback.expiresAt==ISO8601DateFormatter().string(from:Date(timeIntervalSince1970:4645)),"fallback anchors reading expiry to last normal expiry")
+        _ = try fallback.applyFeedback(feedback(atFallback.revision,chat:"reading",count:1),hostID:host,now:4644)
+        check(fallback.snapshot(hostID:host,now:4644.99).active,"park alive just before fixed deadline")
+        check(!fallback.snapshot(hostID:host,now:4645).active,"feedback never extends parked deadline")
+        rejects(409,"expired parked resume cannot revive ownership") {_ = try fallback.apply(.resume(sourceID:phone,leaseID:fallbackLease),hostID:host,now:4646)}
+
+        var (latePoll,lateLease)=try readingFixture()
+        _ = try latePoll.apply(.setReading(sourceID:phone,leaseID:lateLease,enabled:true),hostID:host,now:1001)
+        let late=latePoll.snapshot(hostID:host,now:4000)
+        check(late.active && late.readingOnly==true && late.expiresAt==ISO8601DateFormatter().string(from:Date(timeIntervalSince1970:4645)),"late poll cannot start a fresh hour")
+        var (tooLate,tooLateLease)=try readingFixture()
+        _ = try tooLate.apply(.setReading(sourceID:phone,leaseID:tooLateLease,enabled:true),hostID:host,now:1001)
+        check(!tooLate.snapshot(hostID:host,now:4645).active,"first poll after both stages expires without revival")
+
+        var (off,offLease)=try readingFixture()
+        _ = try off.apply(.setReading(sourceID:phone,leaseID:offLease,enabled:true),hostID:host,now:1001)
+        let unarmed=try off.apply(.setReading(sourceID:phone,leaseID:offLease,enabled:false),hostID:host,now:1002)
+        check(unarmed.active && unarmed.keepReading==false && unarmed.readingOnly==false,"off during normal Follow retains ordinary control")
+        check(!off.snapshot(hostID:host,now:1045).active,"off restores ordinary45 second expiry")
+        var (offParked,offParkedLease)=try readingFixture()
+        _ = try offParked.apply(.setReading(sourceID:phone,leaseID:offParkedLease,enabled:true),hostID:host,now:1001)
+        _ = try offParked.apply(.park(sourceID:phone,leaseID:offParkedLease),hostID:host,now:1002)
+        let ended=try offParked.apply(.setReading(sourceID:phone,leaseID:offParkedLease,enabled:false),hostID:host,now:1003)
+        check(!ended.active && ended.state==nil && ended.leaseID==nil,"off while parked ends and clears reading session")
+
+        var (readingTakeover,takeoverLease)=try readingFixture()
+        _ = try readingTakeover.apply(.setReading(sourceID:phone,leaseID:takeoverLease,enabled:true),hostID:host,now:1001)
+        _ = try readingTakeover.apply(.park(sourceID:phone,leaseID:takeoverLease),hostID:host,now:1002)
+        rejects(409,"parked owner still requires explicit takeover") {_ = try readingTakeover.apply(.claim(sourceID:pad,sourceName:"iPad",takeover:false,state:a),hostID:host,now:1003,validated:ta)}
+        let newReadingOwner=try readingTakeover.apply(.claim(sourceID:pad,sourceName:"iPad",takeover:true,state:a),hostID:host,now:1004,validated:ta)
+        check(newReadingOwner.keepReading==false && newReadingOwner.readingOnly==false && newReadingOwner.leaseID != takeoverLease,"takeover never inherits reading permission")
+        rejects(409,"old owner cannot resume taken lease") {_ = try readingTakeover.apply(.resume(sourceID:phone,leaseID:takeoverLease),hostID:host,now:1005)}
+
+        var (rollback,rollbackLease)=try readingFixture()
+        _ = try rollback.apply(.setReading(sourceID:phone,leaseID:rollbackLease,enabled:true),hostID:host,now:1001)
+        _ = try rollback.apply(.park(sourceID:phone,leaseID:rollbackLease),hostID:host,now:1002)
+        _ = rollback.snapshot(hostID:host,now:2000)
+        check(!rollback.snapshot(hostID:host,now:1999.99).active,"clock rollback within reading stage clears ownership")
+        var (heartbeatFallback,heartbeatLease)=try readingFixture()
+        _ = try heartbeatFallback.apply(.setReading(sourceID:phone,leaseID:heartbeatLease,enabled:true),hostID:host,now:1001)
+        let heartbeatState=heartbeatFallback.snapshot(hostID:host,now:1010).state!
+        _ = try heartbeatFallback.apply(.update(sourceID:phone,leaseID:heartbeatLease,sequence:1,state:heartbeatState),hostID:host,now:1010)
+        check(heartbeatFallback.snapshot(hostID:host,now:1055).expiresAt==ISO8601DateFormatter().string(from:Date(timeIntervalSince1970:4655)),"fallback anchor follows last accepted heartbeat")
+
+        let noChat=RemoteDisplayState(provider:"claude",chatID:nil,slotIndex:nil,view:"home",page:0,draft:"",recording:false,sendState:"none",refreshNonce:0)
+        var noTarget=RemoteDisplaySession()
+        let noTargetOwner=try noTarget.apply(.claim(sourceID:phone,sourceName:"iPhone",takeover:false,state:noChat),hostID:host,now:1000)
+        rejects(422,"arming Home without a confirmed target") {_ = try noTarget.apply(.setReading(sourceID:phone,leaseID:noTargetOwner.leaseID!,enabled:true),hostID:host,now:1001)}
+        let normalResume=try noTarget.apply(.resume(sourceID:phone,leaseID:noTargetOwner.leaseID!),hostID:host,now:1002)
+        check(normalResume.leaseID != noTargetOwner.leaseID && normalResume.expiresAt==ISO8601DateFormatter().string(from:Date(timeIntervalSince1970:1047)),"resume before parking rotates lease and grants normal45 second control")
+        var (quickResume,quickLease)=try readingFixture()
+        _ = try quickResume.apply(.setReading(sourceID:phone,leaseID:quickLease,enabled:true),hostID:host,now:1001)
+        let quick=try quickResume.apply(.resume(sourceID:phone,leaseID:quickLease),hostID:host,now:1002)
+        check(quick.leaseID != quickLease && quick.readingOnly==false,"quick foreground rotates even when park has not arrived")
+        rejects(409,"timed-out late park cannot park resumed foreground") {_ = try quickResume.apply(.park(sourceID:phone,leaseID:quickLease),hostID:host,now:1003)}
+        rejects(409,"old heartbeat cannot mutate quick foreground lease") {_ = try quickResume.apply(.update(sourceID:phone,leaseID:quickLease,sequence:999,state:a),hostID:host,now:1004)}
+        let quickBeat=try quickResume.apply(.update(sourceID:phone,leaseID:quick.leaseID!,sequence:1,state:quick.state!),hostID:host,now:1005)
+        check(quickBeat.active && quickBeat.keepReading==true,"quick resume accepts sequence1 on its new lease")
+        var (homeClear,homeLease)=try readingFixture()
+        _ = try homeClear.apply(.setReading(sourceID:phone,leaseID:homeLease,enabled:true),hostID:host,now:1001)
+        let homeCleared=try homeClear.apply(.update(sourceID:phone,leaseID:homeLease,sequence:1,state:noChat),hostID:host,now:1002)
+        check(homeCleared.keepReading==false,"clearing selected chat disarms persistence")
+        var (awaitingTarget,awaitingLease)=try readingFixture()
+        _ = try awaitingTarget.apply(.setReading(sourceID:phone,leaseID:awaitingLease,enabled:true),hostID:host,now:1001)
+        let delayedTarget=RemoteDisplayRequest.update(sourceID:phone,leaseID:awaitingLease,sequence:1,state:b)
+        check(try awaitingTarget.requiredTarget(for:delayedTarget,now:1044)==tb.target,"new target awaits exact inventory before normal lease ends")
+        rejects(409,"target read finishing after parking cannot rewrite selected chat") {_ = try awaitingTarget.apply(delayedTarget,hostID:host,now:1045,validated:tb)}
+        check(awaitingTarget.snapshot(hostID:host,now:1045).state?.chatID=="reading","late validated target cannot replace parked selection")
+        awaitingTarget.invalidate()
+        check(!awaitingTarget.snapshot(hostID:host,now:1046).active,"Mac lock invalidation ends parked reading immediately")
+        var restartedReading=RemoteDisplaySession()
+        check(!restartedReading.snapshot(hostID:host,now:1046).active,"process restart cannot restore parked private context")
+
+        for operation in ["setReading","park","resume"] {
+            var body:[String:Any]=["operation":operation,"sourceID":phone.uuidString,"leaseID":UUID().uuidString]
+            if operation=="setReading" {body["enabled"]=true}
+            check(try RemoteDisplayRequest.decode(json(body)).state==nil,"reading request carries no display state: \(operation)")
+            body["action"]="sendPrompt"
+            rejects(422,"reading operation cannot carry action: \(operation)") {_ = try RemoteDisplayRequest.decode(json(body))}
+        }
+        rejects(422,"reading enabled flag requires a real Boolean") {_ = try RemoteDisplayRequest.decode(json(["operation":"setReading","sourceID":phone.uuidString,"leaseID":UUID().uuidString,"enabled":1]))}
+
         let stateJSON = try object(a)
         let claimJSON: [String: Any] = ["operation": "claim", "sourceID": phone.uuidString.lowercased(), "sourceName": "iPhone", "takeover": false, "state": stateJSON]
         let decoded = try RemoteDisplayRequest.decode(json(claimJSON))

@@ -49,3 +49,29 @@ enum ClaudeNavigationReadResult<Element> {
         return .unavailable
     }
 }
+
+// Full inventory remains the display target authority. Only a missing fresh
+// observation may retry; duplicate identity evidence always fails immediately.
+@MainActor enum ClaudeInventoryRead {
+    enum Result<Value> {case found(Value),missing,ambiguous,contextChanged}
+    static func resolve<Value>(deadline:Double,now:()->Double={ProcessInfo.processInfo.systemUptime},
+        contextIsCurrent:()->Bool,read:(Double)->Result<Value>,
+        sleep:(UInt64) async throws ->Void={try await Task.sleep(nanoseconds:$0)}) async ->Result<Value> {
+        for attempt in 0..<3 {
+            guard !Task.isCancelled,contextIsCurrent() else{return .contextChanged}
+            guard now()<deadline else{return .missing}
+            let result=read(deadline)
+            guard !Task.isCancelled,contextIsCurrent() else{return .contextChanged}
+            if case .ambiguous=result {return .ambiguous}
+            guard now()<deadline else{return .missing}
+            switch result {
+            case .found,.contextChanged:return result
+            case .ambiguous:return .ambiguous
+            case .missing:break
+            }
+            guard attempt<2,deadline-now()>0.1 else{return .missing}
+            do {try await sleep(100_000_000)} catch{return .contextChanged}
+        }
+        return .missing
+    }
+}

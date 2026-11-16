@@ -21,6 +21,7 @@ import CoreImage.CIFilterBuiltins
     private var registrations:[NSObjectProtocol]=[]
     private var screenLocked=false
     private var recentChats:[String:RemoteChat]=[:]
+    private var ambiguousClaudeIDs=Set<String>()
     private var codexChats:[RemoteChat]=[]
     private var codexInventoryAvailable=false
     private var codexInventoryCheckedAt:Date?
@@ -125,16 +126,22 @@ import CoreImage.CIFilterBuiltins
         }
     }
     func refreshChats() {Task {chats=loadChats("claude")}}
-    func loadChats(_ provider:String)->[RemoteChat] {
+    func loadChats(_ provider:String,deadline:Double?=nil)->[RemoteChat] {
+        ambiguousClaudeIDs.removeAll(keepingCapacity:true)
         guard provider=="claude",!isLocked,AXIsProcessTrusted() else{return []}
-        let records=access.readSnapshot { ()->[RemoteChat] in
+        func read()->[RemoteChat] {
             let all=access.nodes(),sessions=access.sessions(all)
             // Reuse attribute reads only within this synchronous snapshot.
             return Dictionary(grouping:sessions,by:{$0.title}).compactMap { title,values -> RemoteChat? in
-                guard !RemoteClaudeLookup.isAmbiguous(sidebarDestinationCount:access.sidebarTargets(title,in:all).count) else{return nil}
+                guard !RemoteClaudeLookup.isAmbiguous(sidebarDestinationCount:access.sidebarTargets(title,in:all).count) else {
+                    ambiguousClaudeIDs.insert(RemotePolicy.chatID(provider,title));return nil
+                }
                 return RemoteChat(id:RemotePolicy.chatID(provider,title),title:title,state:values.last?.state ?? "Open")
             }.sorted{$0.title.localizedCaseInsensitiveCompare($1.title) == .orderedAscending}
         }
+        let records:[RemoteChat]
+        if let deadline {records=access.readSnapshot(deadline:deadline,read) ?? []}
+        else {records=access.readSnapshot(read)}
         recentChats=Dictionary(uniqueKeysWithValues:records.map{($0.id,$0)})
         chats=records;return records
     }
@@ -229,13 +236,26 @@ import CoreImage.CIFilterBuiltins
                 if let target {
                     // Inventory reads only on a changed target. Draft updates and
                     // heartbeats never perform an accessibility traversal.
-                    let inventory=target.provider=="codex" ? await loadCodexChats():loadChats(target.provider)
-                    let matches=inventory.filter{$0.id==target.chatID}
-                    if matches.count==1 {validated = .init(target:target,title:matches[0].title)}
+                    if target.provider=="claude" {
+                        if let pid=NSRunningApplication.runningApplications(withBundleIdentifier:access.bundle).first?.processIdentifier {
+                            let observed=await ClaudeInventoryRead.resolve(deadline:ProcessInfo.processInfo.systemUptime+2.5,
+                                contextIsCurrent:{self.enabled && !self.isLocked && AXIsProcessTrusted() && NSRunningApplication.runningApplications(withBundleIdentifier:self.access.bundle).first?.processIdentifier==pid},
+                                read:{deadline ->ClaudeInventoryRead.Result<RemoteChat> in
+                                    let matches=self.loadChats("claude",deadline:deadline).filter{$0.id==target.chatID}
+                                    if self.ambiguousClaudeIDs.contains(target.chatID) || matches.count>1 {return .ambiguous}
+                                    return matches.first.map{.found($0)} ?? .missing
+                                })
+                            if case .ambiguous=observed {throw RemoteDisplayFault(status:409,message:"This Claude title resolves to more than one sidebar chat. Rename one before following it.")}
+                            if case .found(let match)=observed {validated = .init(target:target,title:match.title)}
+                        }
+                    } else {
+                        let matches=await loadCodexChats().filter{$0.id==target.chatID}
+                        if matches.count==1 {validated = .init(target:target,title:matches[0].title)}
+                    }
                 }
                 guard enabled,!isLocked else {clearDisplaySession();return .error(423,"Unlock this Mac to follow a controller.")}
                 let result=try displaySession.apply(operation,hostID:store.hostID,now:Date().timeIntervalSince1970,validated:validated)
-                scheduleDisplayExpiry(active:result.active)
+                scheduleDisplayExpiry()
                 return .json(result)
             }
             if request.method=="POST",path=="/v1/display-feedback" {
@@ -297,13 +317,16 @@ import CoreImage.CIFilterBuiltins
     private func clearDisplaySession() {
         displayExpiryTask?.cancel();displayExpiryTask=nil;displaySession.invalidate()
     }
-    private func scheduleDisplayExpiry(active:Bool) {
+    private func scheduleDisplayExpiry() {
         displayExpiryTask?.cancel();displayExpiryTask=nil
-        guard active else{return}
+        guard let expiry=displaySession.nextExpiry else{return}
+        let delay=max(0,expiry-Date().timeIntervalSince1970)
         displayExpiryTask=Task { @MainActor [weak self] in
-            do {try await Task.sleep(nanoseconds:UInt64(RemoteDisplaySession.lifetime * 1_000_000_000))} catch{return}
+            do {try await Task.sleep(nanoseconds:UInt64(delay * 1_000_000_000)+10_000_000)} catch{return}
             // Delete transient drafts even when every display client disconnects.
-            self?.displaySession.expire(now:Date().timeIntervalSince1970)
+            guard let self else{return}
+            self.displaySession.expire(now:Date().timeIntervalSince1970)
+            self.scheduleDisplayExpiry()
         }
     }
     private func navigationContextIsCurrent(provider:String,chatID:String?)->Bool {

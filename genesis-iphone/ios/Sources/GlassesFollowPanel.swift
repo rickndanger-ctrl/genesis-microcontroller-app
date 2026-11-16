@@ -18,6 +18,7 @@ struct GlassesFollowPanel: View {
 
             Label(follow.message, systemImage: follow.acknowledged ? "checkmark.circle.fill" : follow.unsupported ? "arrow.down.app" : "info.circle")
                 .font(.caption)
+
                 .foregroundStyle(follow.acknowledged ? Color.green : Color.secondary)
                 .fixedSize(horizontal: false, vertical: true)
 
@@ -33,6 +34,21 @@ struct GlassesFollowPanel: View {
                     if follow.connecting { ProgressView().controlSize(.small) }
                 }
                 .font(.caption)
+
+                Toggle("Keep reading when \(follow.sourceName) locks", isOn: Binding(
+                    get: { follow.keepReadingPreference }, set: { follow.setKeepReading($0) }))
+                    .disabled(!follow.canSetKeepReading)
+                    .accessibilityIdentifier("glasses.keepReading")
+                Text(follow.supportsKeepReading
+                     ? "The Mac keeps this conversation readable for up to one hour. Your microphone stops and your unsent draft stays private on this device."
+                     : "Update Genesis on the selected Mac to enable reading after lock.")
+                    .font(.caption).foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                if !follow.readingMessage.isEmpty {
+                    Label(follow.readingMessage, systemImage: follow.readingChangePending ? "hourglass" : follow.readingArmed ? "checkmark.circle" : "info.circle")
+                        .font(.caption).foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
 
                 if !follow.hasChat {
                     Text("Open an assigned chat to show it on the glasses.")
@@ -52,7 +68,7 @@ struct GlassesFollowPanel: View {
                 HStack(spacing: 12) {
                     Button { follow.page(-1) } label: { Image(systemName: "chevron.left").frame(minWidth: 28, minHeight: 28) }
                         .accessibilityIdentifier("glasses.previous")
-                        .disabled(follow.desired.page == 0 || follow.desired.view == .home)
+                        .disabled(!follow.controlsAvailable || follow.desired.page == 0 || follow.desired.view == .home)
                         .accessibilityLabel("Previous glasses page")
                     Text(follow.pageLabel).font(.caption.monospacedDigit()).frame(maxWidth: .infinity)
                     Button { follow.page(1) } label: { Image(systemName: "chevron.right").frame(minWidth: 28, minHeight: 28) }
@@ -66,6 +82,7 @@ struct GlassesFollowPanel: View {
                     Button { follow.refresh() } label: { Label("Refresh", systemImage: "arrow.clockwise") }
                         .accessibilityIdentifier("glasses.refresh")
                         .buttonStyle(.bordered)
+                        .disabled(!follow.controlsAvailable)
                     Spacer(minLength: 8)
                     Button { Task { await store.sendDraft() } } label: { Label("Send draft", systemImage: "arrow.up.circle.fill") }
                         .accessibilityIdentifier("glasses.send")
@@ -80,7 +97,7 @@ struct GlassesFollowPanel: View {
                     Text("Glasses show the first 16,000 characters. Your complete draft stays here for review and Send.")
                         .font(.caption).foregroundStyle(.secondary)
                 }
-                Text("This screen stays awake while Follow is on. Leaving Genesis pauses Follow. For same-iPhone control, enable background relay in the Even Beta first.")
+                Text("This screen stays awake while Follow is on. Enable background relay in the Even Beta on your connected iPhone for reading while it is locked. Without Keep reading, leaving Genesis pauses Follow.")
                     .font(.caption).foregroundStyle(.secondary)
             } else {
                 Text("G2 · Use your iPad with Even open on iPhone, or enable background relay in the Even Beta for same-iPhone control.")
@@ -101,16 +118,17 @@ struct GlassesFollowPanel: View {
     @ViewBuilder private var viewButtons: some View {
         Button { follow.show(.reply) } label: { Label("Conversation", systemImage: "text.bubble") }
             .accessibilityIdentifier("glasses.reply")
-            .disabled(!follow.hasChat)
+            .disabled(!follow.controlsAvailable || !follow.hasChat)
             .buttonStyle(.bordered)
             .tint(follow.desired.view == .reply ? .blue : .secondary)
         Button { follow.show(.draft) } label: { Label("Draft", systemImage: "square.and.pencil") }
             .accessibilityIdentifier("glasses.draft")
-            .disabled(!follow.hasChat)
+            .disabled(!follow.controlsAvailable || !follow.hasChat)
             .buttonStyle(.bordered)
             .tint(follow.desired.view == .draft ? .blue : .secondary)
         Button { follow.show(.home) } label: { Label("Home", systemImage: "square.grid.2x2") }
             .accessibilityIdentifier("glasses.home")
+            .disabled(!follow.controlsAvailable)
             .buttonStyle(.bordered)
             .tint(follow.desired.view == .home ? .blue : .secondary)
     }

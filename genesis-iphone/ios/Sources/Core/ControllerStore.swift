@@ -54,10 +54,11 @@ final class ControllerStore: ObservableObject {
     init(demo: Bool = false, client: RemoteClient = RemoteClient(),
          credentials: any ControllerCredentialVault = GenesisCredentials(), persistence: ControllerPersistence = ControllerPersistence(),
          provisioningDirectory: URL? = nil, speech: (any PhoneDictationService)? = nil,
-         glassesTransport: (any GlassesDisplayTransport)? = nil, demoFollow: Bool = false) {
+         glassesTransport: (any GlassesDisplayTransport)? = nil, demoFollow: Bool = false,
+         glassesPreferences: UserDefaults? = .standard) {
         self.client = client; self.credentials = credentials; self.persistence = persistence
         glasses = GlassesFollowController(transport: glassesTransport ?? RemoteGlassesDisplayTransport(client: client),
-                                          previewOnly: demo && demoFollow)
+                                          previewOnly: demo && demoFollow, preferences: glassesPreferences)
         self.speech = speech ?? PhoneDictation()
         self.provisioningDirectory = provisioningDirectory
         isDemo = demo
@@ -229,13 +230,15 @@ final class ControllerStore: ObservableObject {
         foreground = active
         polling?.cancel(); polling = nil
         if !active {
-            glasses.stop("Follow paused in the background. Turn it on when you return.")
-            glassesConfirmedChatID = nil
+            // Suspend display publishing before speech cancellation's callback;
+            // the reviewed local draft remains on this device while parked.
+            if !glasses.enterBackground() { glassesConfirmedChatID = nil }
             dictationIntent &+= 1; speech.cancel(); captureRoute = nil
             gate.advance(); isBusy = false; isRefreshingChats = false; persistDraft()
             navigation = .inactive; navigationGeneration = nil
             return
         }
+        glasses.returnToForeground { [weak self] in self?.draft ?? "" }
         guard !isDemo else { return }
         if provisioningTask == nil {
             // Provisioning owns its lifetime separately from foreground polling.

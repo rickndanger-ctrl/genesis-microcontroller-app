@@ -1179,7 +1179,7 @@ final class FixtureCredentials: ControllerCredentialVault {
         try followPersistence.save(followSettings)
         let followDisplay = GlassesFollowFixture()
         let followSpeech = FixtureDictation()
-        let followStore = ControllerStore(client:client,credentials:followVault,persistence:followPersistence,speech:followSpeech,glassesTransport:followDisplay)
+        let followStore = ControllerStore(client:client,credentials:followVault,persistence:followPersistence,speech:followSpeech,glassesTransport:followDisplay,glassesPreferences:nil)
         followStore.setForeground(true)
         for _ in 0..<100 { if followStore.status != nil { break }; try? await Task.sleep(nanoseconds:20_000_000) }
         followStore.enableGlassesFollow()
@@ -1225,7 +1225,24 @@ final class FixtureCredentials: ControllerCredentialVault {
                "Background releases G2 draft while preserving the native draft ledger")
         followStore.setForeground(true)
         expect(!followStore.glasses.enabled, "Foreground return does not silently reclaim or steal Follow")
+        for _ in 0..<100 { if followStore.providerInfo?.supports("openChat") == true { break }; try? await Task.sleep(nanoseconds:20_000_000) }
+        await followStore.selectChat(followChat)
         followStore.enableGlassesFollow()
+        for _ in 0..<4 { await followStore.glasses.waitForWrites(); await Task.yield() }
+        expect(followStore.glasses.canSetKeepReading, "Refreshed and confirmed chat enables reading preference")
+        followStore.glasses.setKeepReading(true)
+        for _ in 0..<4 { await followStore.glasses.waitForWrites(); await Task.yield() }
+        await followStore.startDictation(); followSpeech.emit("Kept while locking.")
+        let lockedDraft = followStore.draft
+        followStore.setForeground(false); followStore.setForeground(false)
+        for _ in 0..<4 { await followStore.glasses.waitForWrites(); await Task.yield() }
+        expect(!followStore.isRecording && followStore.draft == lockedDraft && followDisplay.current(followMac.host).readingOnly == true && followDisplay.current(followMac.host).state?.draft == "",
+               "Armed background stops microphone and keeps the local draft while Mac displays only conversation")
+        followStore.setForeground(true); followStore.setForeground(true)
+        for _ in 0..<4 { await followStore.glasses.waitForWrites(); await Task.yield() }
+        expect(followStore.glasses.controlsAvailable && followStore.draft == lockedDraft && followDisplay.current(followMac.host).state?.draft == lockedDraft && followMac.sendCount == 1,
+               "Foreground resumes exact display lease and restores saved draft without restarting microphone or sending")
+        followStore.setForeground(false)
         for _ in 0..<4 { await followStore.glasses.waitForWrites(); await Task.yield() }
         followStore.selectHost(second.name)
         for _ in 0..<4 { await followStore.glasses.waitForWrites(); await Task.yield() }
