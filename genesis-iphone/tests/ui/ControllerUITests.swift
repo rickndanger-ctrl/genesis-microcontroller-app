@@ -2,6 +2,324 @@ import XCTest
 
 final class ControllerUITests: XCTestCase {
     @MainActor
+    func testFullscreenPreservesDraftRouteAndFollow() {
+        continueAfterFailure = false
+        let app = XCUIApplication()
+        app.launchArguments = ["--demo", "--demo-follow"]
+        XCUIDevice.shared.orientation = UIDevice.current.userInterfaceIdiom == .pad ? .landscapeLeft : .portrait
+        app.launch()
+        let enter = app.buttons["controller.fullscreen"]
+        XCTAssertTrue(enter.waitForExistence(timeout: 8))
+        // Changing the host intentionally stops Follow. Keep its current route
+        // here; the separate menu test exercises actual route changes.
+        let selectedComputer = ["Mini 1", "Mini 2", "Neo"].first { app.buttons[$0].isSelected } ?? "missing"
+        XCTAssertNotEqual(selectedComputer, "missing")
+        XCTAssertTrue(app.buttons["Claude"].isSelected)
+        app.buttons["Start dictation"].press(forDuration: 1.0)
+        let draft = app.textFields["controller.draft"]
+        XCTAssertTrue(draft.waitForExistence(timeout: 3))
+        let retainedDraft = draft.value as? String
+        XCTAssertEqual(retainedDraft, "Show me the latest changes and what still needs attention.")
+
+        let chat = app.descendants(matching: .any).matching(identifier: "Chat dial").firstMatch
+        let beforeBrowse = chat.value as? String
+        let top = chat.coordinate(withNormalizedOffset: CGVector(dx: 0.50, dy: 0.17))
+        let right = chat.coordinate(withNormalizedOffset: CGVector(dx: 0.82, dy: 0.45))
+        top.press(forDuration: 0.10, thenDragTo: right)
+        let browsed = chat.value as? String
+        XCTAssertNotEqual(browsed, beforeBrowse)
+        XCTAssertEqual(app.buttons[browsed ?? "missing"].value as? String, "Dial selection")
+        saveFullscreenScreenshot("Before full screen, browsed dial")
+
+        enter.tap()
+        let exit = app.buttons["controller.exitFullscreen"]
+        XCTAssertTrue(exit.waitForExistence(timeout: 3))
+        assertFullscreenGeometry(app)
+        XCTAssertEqual(app.buttons["controller.chooseComputer"].value as? String, selectedComputer)
+        XCTAssertEqual(app.buttons["controller.chooseProvider"].value as? String, "Claude")
+        XCTAssertEqual(chat.value as? String, browsed, "Entering full screen preserves an unopened dial selection")
+        XCTAssertEqual(app.buttons[browsed ?? "missing"].value as? String, "Dial selection")
+        XCTAssertTrue(app.buttons["controller.sendDraft"].isEnabled, "The reviewed Claude draft remains ready without sending it")
+        saveFullscreenScreenshot("Full screen, retained dial and draft")
+
+        app.buttons["controller.reviewDraft"].tap()
+        XCTAssertTrue(app.navigationBars["Review draft"].waitForExistence(timeout: 3))
+        XCTAssertEqual(draft.value as? String, retainedDraft)
+        app.navigationBars["Review draft"].buttons["Done"].tap()
+        XCTAssertTrue(exit.waitForExistence(timeout: 3))
+        XCTAssertTrue(exit.isHittable, "Done closes the draft drawer without leaving full screen")
+
+        app.buttons["controller.glasses"].tap()
+        XCTAssertTrue(app.navigationBars["Glasses"].waitForExistence(timeout: 3))
+        let follow = app.switches["glasses.enabled"]
+        XCTAssertTrue(follow.exists)
+        XCTAssertEqual(follow.value as? String, "1", "Opening a drawer does not stop existing Follow")
+        app.navigationBars["Glasses"].buttons["Done"].tap()
+        XCTAssertTrue(exit.waitForExistence(timeout: 3))
+        XCTAssertTrue(exit.isHittable, "Done closes the glasses drawer")
+        XCTAssertEqual(chat.value as? String, browsed)
+
+        exit.tap()
+        XCTAssertTrue(enter.waitForExistence(timeout: 3))
+        XCTAssertTrue(app.buttons[selectedComputer].isSelected)
+        XCTAssertTrue(app.buttons["Claude"].isSelected)
+        XCTAssertEqual(draft.value as? String, retainedDraft, "Exiting never clears or sends the draft")
+        XCTAssertEqual(chat.value as? String, browsed)
+        XCTAssertEqual(app.buttons[browsed ?? "missing"].value as? String, "Dial selection")
+        saveFullscreenScreenshot("After full screen, same dial angle and draft")
+
+        // Reentering exercises both branches a second time; Follow is the same
+        // observed controller, not a newly created presentation-only session.
+        enter.tap()
+        XCTAssertTrue(exit.waitForExistence(timeout: 3))
+        app.buttons["controller.glasses"].tap()
+        XCTAssertTrue(app.navigationBars["Glasses"].waitForExistence(timeout: 3))
+        XCTAssertEqual(follow.value as? String, "1")
+        app.navigationBars["Glasses"].buttons["Done"].tap()
+        app.buttons["controller.reviewDraft"].tap()
+        XCTAssertTrue(app.navigationBars["Review draft"].waitForExistence(timeout: 3))
+        XCTAssertEqual(draft.value as? String, retainedDraft)
+        app.navigationBars["Review draft"].buttons["Done"].tap()
+        exit.tap()
+    }
+
+    @MainActor
+    func testFullscreenRouteMenusKeepDraftsSeparate() {
+        continueAfterFailure = false
+        let app = XCUIApplication()
+        app.launchArguments = ["--demo"]
+        XCUIDevice.shared.orientation = UIDevice.current.userInterfaceIdiom == .pad ? .landscapeLeft : .portrait
+        app.launch()
+        XCTAssertTrue(app.buttons["controller.fullscreen"].waitForExistence(timeout: 8))
+        app.buttons["controller.fullscreen"].tap()
+        XCTAssertTrue(app.buttons["controller.chooseComputer"].waitForExistence(timeout: 3))
+        chooseFullscreenRoute(app, menu: "controller.chooseComputer", option: "Mini 1")
+        XCTAssertEqual(app.buttons["controller.chooseProvider"].value as? String, "Claude")
+        app.buttons["Start dictation"].press(forDuration: 1.0)
+        let retained = "Show me the latest changes and what still needs attention."
+        assertFullscreenDraft(app, expected: retained)
+
+        for computer in ["Mini 2", "Neo"] {
+            chooseFullscreenRoute(app, menu: "controller.chooseComputer", option: computer)
+            XCTAssertEqual(app.buttons["controller.chooseProvider"].value as? String, "Claude")
+            assertFullscreenDraft(app, expected: nil)
+            XCTAssertFalse(app.buttons["controller.sendDraft"].isEnabled, "A different Mac cannot inherit a ready draft")
+        }
+        chooseFullscreenRoute(app, menu: "controller.chooseComputer", option: "Mini 1")
+        assertFullscreenDraft(app, expected: retained)
+        XCTAssertTrue(app.buttons["controller.sendDraft"].isEnabled)
+
+        chooseFullscreenRoute(app, menu: "controller.chooseProvider", option: "Codex")
+        XCTAssertEqual(app.buttons["controller.chooseComputer"].value as? String, "Mini 1")
+        assertFullscreenDraft(app, expected: nil)
+        XCTAssertFalse(app.buttons["controller.sendDraft"].isEnabled, "Demo Codex remains draft-only")
+        chooseFullscreenRoute(app, menu: "controller.chooseProvider", option: "Claude")
+        assertFullscreenDraft(app, expected: retained)
+        XCTAssertTrue(app.buttons["controller.sendDraft"].isEnabled)
+        XCTAssertFalse(app.alerts["Controller update"].exists)
+        app.buttons["controller.exitFullscreen"].tap()
+        XCTAssertTrue(app.buttons["controller.fullscreen"].waitForExistence(timeout: 3))
+        XCTAssertTrue(app.buttons["Mini 1"].isSelected)
+        XCTAssertTrue(app.buttons["Claude"].isSelected)
+        XCTAssertEqual(app.textFields["controller.draft"].value as? String, retained)
+    }
+
+    @MainActor
+    private func chooseFullscreenRoute(_ app: XCUIApplication, menu: String, option: String) {
+        let control = app.buttons[menu]
+        control.tap()
+        let item = app.buttons.matching(identifier: option).firstMatch
+        XCTAssertTrue(item.waitForExistence(timeout: 3), "\(option) is a selectable menu item")
+        item.tap()
+        let selected = NSPredicate { _, _ in (control.value as? String) == option }
+        expectation(for: selected, evaluatedWith: control)
+        waitForExpectations(timeout: 3)
+        XCTAssertTrue(app.buttons["controller.exitFullscreen"].isHittable, "Routing keeps the controller in full screen")
+    }
+
+    @MainActor
+    private func assertFullscreenDraft(_ app: XCUIApplication, expected: String?) {
+        app.buttons["controller.reviewDraft"].tap()
+        XCTAssertTrue(app.navigationBars["Review draft"].waitForExistence(timeout: 3))
+        let field = app.textFields["controller.draft"]
+        XCTAssertTrue(field.exists)
+        if let expected {
+            XCTAssertEqual(field.value as? String, expected, "Returning to the exact route restores its unsent draft")
+        } else {
+            let value = field.value as? String ?? ""
+            XCTAssertTrue(value.isEmpty || value == field.placeholderValue, "An untouched route has an empty draft, not text from another Mac or provider")
+        }
+        app.navigationBars["Review draft"].buttons["Done"].tap()
+        XCTAssertTrue(app.buttons["controller.exitFullscreen"].isHittable)
+    }
+
+    @MainActor
+    func testFullscreenIPadRotationPreservesDraft() throws {
+        guard UIDevice.current.userInterfaceIdiom == .pad else {
+            throw XCTSkip("Fullscreen rotation coverage requires the iPad layout")
+        }
+        continueAfterFailure = false
+        let app = XCUIApplication()
+        app.launchArguments = ["--demo"]
+        XCUIDevice.shared.orientation = .landscapeLeft
+        app.launch()
+        XCTAssertTrue(app.buttons["controller.fullscreen"].waitForExistence(timeout: 8))
+        waitForObservedOrientation(app, landscape: true)
+        app.buttons["controller.fullscreen"].tap()
+        XCTAssertTrue(app.buttons["controller.exitFullscreen"].waitForExistence(timeout: 3))
+        let computer = app.buttons["controller.chooseComputer"].value as? String
+        let provider = app.buttons["controller.chooseProvider"].value as? String
+        app.buttons["Start dictation"].press(forDuration: 1.0)
+        let retained = "Show me the latest changes and what still needs attention."
+        assertFullscreenDraft(app, expected: retained)
+        assertFullscreenGeometry(app)
+        saveFullscreenScreenshot("Full screen before rotation")
+
+        XCUIDevice.shared.orientation = .portrait
+        waitForObservedOrientation(app, landscape: false)
+        XCTAssertTrue(app.buttons["controller.exitFullscreen"].exists, "Rotation keeps full screen active")
+        XCTAssertEqual(app.buttons["controller.chooseComputer"].value as? String, computer)
+        XCTAssertEqual(app.buttons["controller.chooseProvider"].value as? String, provider)
+        assertFullscreenGeometry(app)
+        assertFullscreenDraft(app, expected: retained)
+        saveFullscreenScreenshot("Full screen after portrait rotation")
+
+        XCUIDevice.shared.orientation = .landscapeLeft
+        waitForObservedOrientation(app, landscape: true)
+        XCTAssertEqual(app.buttons["controller.chooseComputer"].value as? String, computer)
+        XCTAssertEqual(app.buttons["controller.chooseProvider"].value as? String, provider)
+        assertFullscreenGeometry(app)
+        assertFullscreenDraft(app, expected: retained)
+        saveFullscreenScreenshot("Full screen after return to landscape")
+        let exit = app.buttons["controller.exitFullscreen"]
+        XCTAssertTrue(exit.isEnabled, "Rotation cannot leave layout transitions locked")
+        exit.tap()
+        XCTAssertTrue(app.buttons["controller.fullscreen"].waitForExistence(timeout: 3))
+        XCTAssertEqual(app.textFields["controller.draft"].value as? String, retained)
+    }
+
+    @MainActor
+    private func waitForObservedOrientation(_ app: XCUIApplication, landscape: Bool) {
+        // Check actual app bounds, not only the orientation requested from the
+        // simulator: a rejected rotation must not count as portrait coverage.
+        let observed = NSPredicate { _, _ in
+            landscape ? app.frame.width > app.frame.height : app.frame.height > app.frame.width
+        }
+        expectation(for: observed, evaluatedWith: app)
+        waitForExpectations(timeout: 8)
+    }
+
+    @MainActor
+    func testFullscreenRecordingAndSendGuards() {
+        continueAfterFailure = false
+        let app = XCUIApplication()
+        app.launchArguments = ["--demo"]
+        XCUIDevice.shared.orientation = UIDevice.current.userInterfaceIdiom == .pad ? .landscapeLeft : .portrait
+        app.launch()
+        let enter = app.buttons["controller.fullscreen"]
+        XCTAssertTrue(enter.waitForExistence(timeout: 8))
+        // Remapping the physical-style Send key must not remove the separate,
+        // guarded draft Send button from full screen.
+        mapDemoQuickKey(app, key: "Send", index: 1, action: "Model & effort")
+        mapDemoQuickKey(app, key: "Voice", index: 3, action: "Hold to talk")
+        XCTAssertTrue(app.buttons["Model"].exists)
+        let dictate = app.buttons["Hold to talk"]
+        XCTAssertTrue(dictate.exists)
+
+        enter.tap()
+        let exit = app.buttons["controller.exitFullscreen"]
+        let send = app.buttons["controller.sendDraft"]
+        XCTAssertTrue(exit.waitForExistence(timeout: 3))
+        XCTAssertFalse(send.isEnabled, "An empty draft cannot be sent")
+        assertFullscreenGeometry(app)
+        exit.tap()
+        XCTAssertTrue(enter.waitForExistence(timeout: 3))
+
+        // A mapped Dictate toggle lets the test inspect the live capture gate
+        // without using a real microphone or holding two simulator touches.
+        dictate.tap()
+        XCTAssertTrue(app.buttons["Stop dictation"].waitForExistence(timeout: 3))
+        XCTAssertFalse(enter.isEnabled, "Layout changes are blocked while recording")
+        dictate.tap()
+        XCTAssertTrue(app.buttons["Start dictation"].waitForExistence(timeout: 3))
+        XCTAssertTrue(enter.isEnabled)
+        enter.tap()
+        XCTAssertTrue(exit.waitForExistence(timeout: 3))
+        XCTAssertTrue(send.isEnabled, "Dedicated Send survives remapping the quick key")
+
+        dictate.tap()
+        XCTAssertTrue(app.buttons["Stop dictation"].waitForExistence(timeout: 3))
+        XCTAssertFalse(exit.isEnabled, "Leaving full screen cannot interrupt a capture")
+        XCTAssertFalse(send.isEnabled, "A changing speech draft cannot be sent")
+        XCTAssertFalse(app.buttons["controller.reviewDraft"].isEnabled)
+        dictate.tap()
+        XCTAssertTrue(app.buttons["Start dictation"].waitForExistence(timeout: 3))
+        XCTAssertTrue(exit.isEnabled)
+        XCTAssertTrue(send.isEnabled)
+        app.buttons["controller.reviewDraft"].tap()
+        XCTAssertTrue(app.navigationBars["Review draft"].waitForExistence(timeout: 3))
+        XCTAssertEqual(app.textFields["controller.draft"].value as? String,
+                       "Show me the latest changes and what still needs attention.")
+        app.navigationBars["Review draft"].buttons["Done"].tap()
+        send.tap() // --demo never sends a host command.
+        let disabled = NSPredicate { _, _ in send.exists && !send.isEnabled }
+        expectation(for: disabled, evaluatedWith: send)
+        waitForExpectations(timeout: 3)
+        XCTAssertTrue(app.staticTexts["Demo only — no prompt sent."].exists)
+        XCTAssertTrue(app.buttons["Model"].exists)
+        saveFullscreenScreenshot("Full screen, guarded Send after demo receipt")
+    }
+
+    @MainActor
+    private func mapDemoQuickKey(_ app: XCUIApplication, key: String, index: Int, action: String) {
+        app.buttons[key].press(forDuration: 0.8)
+        XCTAssertTrue(app.navigationBars["Map quick key \(index)"].waitForExistence(timeout: 3))
+        let search = app.searchFields.firstMatch
+        XCTAssertTrue(search.waitForExistence(timeout: 3))
+        search.tap()
+        search.typeText(action)
+        let option = app.staticTexts[action]
+        XCTAssertTrue(option.waitForExistence(timeout: 3))
+        option.tap()
+        XCTAssertTrue(app.buttons["controller.fullscreen"].waitForExistence(timeout: 3))
+    }
+
+    @MainActor
+    private func assertFullscreenGeometry(_ app: XCUIApplication) {
+        let ids = ["controller.exitFullscreen", "controller.chooseComputer", "controller.chooseProvider",
+                   "controller.reviewDraft", "controller.sendDraft", "controller.glasses"]
+        for id in ids {
+            let control = app.buttons[id]
+            XCTAssertTrue(control.exists, "\(id) is present")
+            XCTAssertTrue(control.isHittable, "\(id) is reachable without scrolling on this layout")
+            XCTAssertGreaterThanOrEqual(control.frame.minX, app.frame.minX - 1, "\(id) stays inside the left edge")
+            XCTAssertLessThanOrEqual(control.frame.maxX, app.frame.maxX + 1, "\(id) stays inside the right edge")
+            XCTAssertGreaterThanOrEqual(control.frame.minY, app.frame.minY - 1, "\(id) stays inside the top edge")
+            XCTAssertLessThanOrEqual(control.frame.maxY, app.frame.maxY + 1, "\(id) stays inside the bottom edge")
+        }
+        for id in ["Chat dial", "Artifact dial"] {
+            let dial = app.descendants(matching: .any).matching(identifier: id).firstMatch
+            XCTAssertTrue(dial.isHittable, "\(id) remains directly usable")
+            XCTAssertGreaterThanOrEqual(dial.frame.width, 44)
+            XCTAssertGreaterThanOrEqual(dial.frame.height, 44)
+            XCTAssertGreaterThanOrEqual(dial.frame.minX, app.frame.minX - 1)
+            XCTAssertLessThanOrEqual(dial.frame.maxX, app.frame.maxX + 1)
+            XCTAssertGreaterThanOrEqual(dial.frame.minY, app.frame.minY - 1)
+            XCTAssertLessThanOrEqual(dial.frame.maxY, app.frame.maxY + 1)
+        }
+    }
+
+    @MainActor
+    private func saveFullscreenScreenshot(_ name: String) {
+        let image = XCTAttachment(screenshot: XCUIScreen.main.screenshot())
+        let device = UIDevice.current.userInterfaceIdiom == .pad ? "iPad" : "iPhone"
+        let orientation = XCUIDevice.shared.orientation.isLandscape ? "landscape" : "portrait"
+        image.name = "\(device) \(orientation) · \(name)"
+        image.lifetime = .keepAlways
+        add(image)
+    }
+
+    @MainActor
     func testGlassesFollowPanel() {
         continueAfterFailure = false
         let app = XCUIApplication()

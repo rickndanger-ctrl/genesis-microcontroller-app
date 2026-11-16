@@ -27,6 +27,13 @@ struct ControllerScreen: View {
     @State private var artifactID: String?
     @State private var dialArtifactPreview: ArtifactRecord?
     @State private var resolvingSend = false
+    @State private var fullScreenController = false
+    @State private var showDraftReview = false
+    @State private var showGlassesControls = false
+    @State private var chatDialRotation = 0.0
+    @State private var artifactDialRotation = 0.0
+    @State private var chatDialActive = false
+    @State private var artifactDialActive = false
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @Environment(\.dynamicTypeSize) private var dynamicTypeSize
 
@@ -43,11 +50,16 @@ struct ControllerScreen: View {
     private var codexDraftOnly: Bool { store.selectedProvider == .codex && store.providerInfo?.supports("sendPrompt") != true }
     private var codexQueuesPrompt: Bool { store.selectedProvider == .codex && store.providerInfo?.supports("sendPrompt") == true }
     private var slotPrefix: String { store.selectedProvider == .claude ? "C" : store.selectedProvider == .muse ? "M" : "A" }
+    private var canChangeLayout: Bool {
+        !heldTalk && !talkGestureActive && !store.isRecording && !store.isFinalizing && !chatDialActive && !artifactDialActive
+    }
+    private var selectedComputerName: String { store.hosts.first { $0.id == store.selectedHostID }?.name ?? "Pair a Mac" }
 
     var body: some View {
         GeometryReader { geometry in
             ScrollView {
-                controllerLayout(in: geometry.size)
+                if fullScreenController { focusedLayout(in: geometry.size) }
+                else { controllerLayout(in: geometry.size) }
             }
             .background(Color(red: 0.94, green: 0.95, blue: 0.96).ignoresSafeArea())
             .foregroundStyle(GenesisPalette.ink)
@@ -57,6 +69,8 @@ struct ControllerScreen: View {
         .sheet(item: $dialArtifactPreview) { ArtifactPreview(store: store, artifact: $0) }
         .sheet(isPresented: $showActions, onDismiss: routeRequestedPanel) { ActionBrowser(store:store) }
         .sheet(isPresented: $showNavigation) { MenuNavigationScreen(store:store) }
+        .sheet(isPresented: $showDraftReview) { draftReview }
+        .sheet(isPresented: $showGlassesControls) { glassesControls }
         .sheet(item: Binding(get: { quickMappingIndex.map { MappingSelection(id:$0) } }, set: { quickMappingIndex = $0?.id })) { selection in
             ActionBrowser(store:store,quickKey:selection.id)
         }
@@ -82,11 +96,195 @@ struct ControllerScreen: View {
         .onChange(of: store.requestedPanel) { _, panel in
             if !showActions { routeRequestedPanel() }
         }
-        .confirmationDialog("Check this exact chat on your Mac first", isPresented: $resolvingSend, titleVisibility: .visible) {
-            Button("I checked — the prompt arrived") { ControllerSound.shared.keyClick(); store.acknowledgeUncertainSend(wasSent: true) }
-            Button("I checked — it did not arrive") { ControllerSound.shared.keyClick(); store.acknowledgeUncertainSend(wasSent: false) }
-            Button("Keep waiting", role: .cancel) { ControllerSound.shared.keyClick() }
-        } message: { Text("This only resolves the saved receipt. Nothing is sent by choosing an answer.") }
+    }
+
+    private func setFullScreen(_ enabled: Bool) {
+        guard canChangeLayout else { return }
+        ControllerSound.shared.keyClick()
+        fullScreenController = enabled
+    }
+
+    @ViewBuilder private func focusedLayout(in size: CGSize) -> some View {
+        let wide = isPad && size.width >= 930 && size.width > size.height && !dynamicTypeSize.isAccessibilitySize
+        if wide {
+            let rail: CGFloat = 310
+            let deckSize = max(300, min(size.height - 32, size.width - rail - 56))
+            HStack(alignment: .center, spacing: 20) {
+                deck(size: deckSize)
+                VStack(spacing: 18) {
+                    focusedRoute
+                    focusedChat
+                    connection
+                    focusedDraft
+                    focusedTools
+                }.frame(width: rail)
+            }
+            .padding(16)
+            .frame(maxWidth: .infinity, minHeight: size.height)
+        } else {
+            // Keep real key targets when height shrinks (keyboard, large type,
+            // or a small iPad window). The enclosing scroll view is the fallback.
+            let deckSize = max(0, min(size.width - 16, max(300, size.height - 310)))
+            VStack(spacing: 12) {
+                focusedRoute.padding(.horizontal, 8)
+                focusedChat.padding(.horizontal, 12)
+                connection.padding(.horizontal, 8)
+                deck(size: deckSize)
+                focusedDraft.padding(.horizontal, 8)
+                focusedTools.padding(.horizontal, 8)
+            }
+            .padding(.horizontal, 8)
+            .padding(.vertical, 12)
+            .frame(maxWidth: .infinity, minHeight: size.height)
+        }
+    }
+
+    private var focusedRoute: some View {
+        HStack(spacing: 6) {
+            Button { setFullScreen(false) } label: {
+                Image(systemName: "arrow.down.right.and.arrow.up.left")
+                    .frame(width: 44, height: 44)
+                    .background(.white.opacity(0.85), in: RoundedRectangle(cornerRadius: 14))
+            }
+            .accessibilityLabel("Exit full screen")
+            .accessibilityIdentifier("controller.exitFullscreen")
+            .disabled(!canChangeLayout)
+            Menu {
+                ForEach(store.hosts) { host in
+                    Button { ControllerSound.shared.keyClick(); store.selectHost(host.id) } label: {
+                        Label(host.name, systemImage: host.id == store.selectedHostID ? "checkmark" : "desktopcomputer")
+                    }
+                }
+                Button("Pair a Mac", systemImage: "plus") { ControllerSound.shared.keyClick(); showSettings = true }
+            } label: {
+                routeLabel(selectedComputerName)
+            }
+            .accessibilityLabel("Choose computer").accessibilityValue(selectedComputerName)
+            .accessibilityIdentifier("controller.chooseComputer")
+            Menu {
+                ForEach([ProviderID.codex, .claude, .muse], id: \.rawValue) { provider in
+                    Button {
+                        ControllerSound.shared.keyClick(); store.selectProvider(provider)
+                    } label: {
+                        Label(provider == .codex ? "Codex" : provider.rawValue.capitalized,
+                              systemImage: provider == store.selectedProvider ? "checkmark" : "bubble.left")
+                    }
+                }
+            } label: { routeLabel(providerName) }
+            .accessibilityLabel("Choose provider").accessibilityValue(providerName)
+            .accessibilityIdentifier("controller.chooseProvider")
+        }.font(.system(size: 13, weight: .semibold))
+    }
+
+    private func routeLabel(_ title: String) -> some View {
+        HStack(spacing: 4) {
+            Text(title).lineLimit(1)
+            Image(systemName: "chevron.down").font(.system(size: 9, weight: .bold))
+        }
+        .frame(maxWidth: .infinity, minHeight: 44)
+        .padding(.horizontal, 6)
+        .background(.white.opacity(0.85), in: RoundedRectangle(cornerRadius: 14))
+    }
+
+    private var focusedChat: some View {
+        HStack(spacing: 8) {
+            Circle().fill(slotColor).frame(width: 8, height: 8).shadow(color: slotColor.opacity(0.65), radius: 5)
+            Text(store.selectedChat?.title ?? "Choose a chat")
+                .font(.system(size: isPad ? 19 : 16, weight: .semibold, design: .rounded))
+                .lineLimit(2)
+            Spacer(minLength: 0)
+        }.accessibilityIdentifier("controller.currentChat")
+    }
+
+    private var focusedDraft: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(alignment: .center, spacing: 10) {
+                Button { ControllerSound.shared.keyClick(); showDraftReview = true } label: {
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text(store.isRecording ? "Listening…" : store.isFinalizing ? "Finishing…" : "Review draft")
+                            .font(.caption.weight(.semibold)).foregroundStyle(slotColor)
+                        Text(store.draft.isEmpty ? "Hold Talk, then release to review." : store.draft)
+                            .font(.system(size: isPad ? 16 : 14)).lineLimit(2)
+                            .foregroundStyle(GenesisPalette.ink)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                    }.frame(minHeight: 58, alignment: .leading)
+                }
+                .buttonStyle(.plain).disabled(!canChangeLayout)
+                .accessibilityLabel("Review draft").accessibilityIdentifier("controller.reviewDraft")
+                sendDraftButton
+            }
+            if store.hasUnresolvedSend {
+                Text("Delivery unconfirmed · Open Review draft to check")
+                    .font(.caption).foregroundStyle(.orange)
+            } else if let receipt = store.lastReceipt {
+                Text(receipt.message).font(.caption).foregroundStyle(.secondary).lineLimit(2)
+            }
+        }
+        .padding(14)
+        .background(.white.opacity(0.88), in: RoundedRectangle(cornerRadius: 20))
+    }
+
+    private var sendDraftButton: some View {
+        Button { ControllerSound.shared.keyClick(); Task { await store.sendDraft() } } label: {
+            Label("Send", systemImage: "arrow.up")
+                .font(.system(size: 14, weight: .semibold))
+                .frame(minWidth: 52, minHeight: 44)
+        }
+        .buttonStyle(.borderedProminent).tint(slotColor)
+        .disabled(!store.canSend)
+        .accessibilityIdentifier("controller.sendDraft")
+        .accessibilityHint("Send the reviewed draft to the selected Mac chat once.")
+    }
+
+    private var focusedTools: some View {
+        HStack(spacing: 8) {
+            Button { ControllerSound.shared.keyClick(); showActions = true } label: {
+                Label("Actions", systemImage: "square.grid.2x2").frame(minHeight: 44)
+            }
+            .buttonStyle(.bordered)
+            FocusedGlassesAccess(follow: store.glasses) {
+                ControllerSound.shared.keyClick(); showGlassesControls = true
+            }
+            Button { ControllerSound.shared.keyClick(); showSettings = true } label: {
+                Image(systemName: "slider.horizontal.3").frame(width: 44, height: 44)
+            }.accessibilityLabel("Settings and Mac pairing")
+        }.font(.system(size: 13, weight: .semibold)).disabled(!canChangeLayout)
+    }
+
+    private var draftReview: some View {
+        NavigationStack {
+            ScrollView {
+                VStack(alignment: .leading, spacing: 16) {
+                    composer
+                    sendDraftButton
+                    if let error = store.lastError {
+                        Text(error).font(.callout).foregroundStyle(.red)
+                            .accessibilityIdentifier("controller.draftError")
+                    }
+                }.padding()
+            }
+            .navigationTitle("Review draft").navigationBarTitleDisplayMode(.inline)
+            .toolbar { ToolbarItem(placement: .confirmationAction) {
+                Button("Done") { ControllerSound.shared.keyClick(); showDraftReview = false }
+            } }
+        }.presentationDetents([.medium, .large]).presentationDragIndicator(.visible)
+    }
+
+    private var glassesControls: some View {
+        NavigationStack {
+            ScrollView {
+                VStack(alignment: .leading, spacing: 12) {
+                    GlassesFollowPanel(store: store, follow: store.glasses)
+                    if let error = store.lastError {
+                        Text(error).font(.callout).foregroundStyle(.red)
+                    }
+                }.padding()
+            }
+                .navigationTitle("Glasses").navigationBarTitleDisplayMode(.inline)
+                .toolbar { ToolbarItem(placement: .confirmationAction) {
+                    Button("Done") { ControllerSound.shared.keyClick(); showGlassesControls = false }
+                } }
+        }.presentationDetents([.large]).presentationDragIndicator(.visible)
     }
 
     @ViewBuilder
@@ -172,6 +370,7 @@ struct ControllerScreen: View {
         dialSlot = nil; artifactID = nil; heldTalk = false; talkGestureID = nil; blockedTalkReason = nil
         showArtifacts = false; mappingIndex = nil; resolvingSend = false
         showActions = false; showNavigation = false; quickMappingIndex = nil; store.requestedPanel = nil
+        showDraftReview = false; showGlassesControls = false
     }
     private func routeRequestedPanel() {
         if store.requestedPanel == "artifacts" { showArtifacts = true }
@@ -198,6 +397,14 @@ struct ControllerScreen: View {
                 Text("Agent Micro Controller").font(.system(size: isPad ? 28 : 22, weight: .semibold, design: .rounded))
             }
             Spacer(minLength: 4)
+            Button { setFullScreen(true) } label: {
+                Image(systemName: "arrow.up.left.and.arrow.down.right")
+                    .font(.system(size: isPad ? 21 : 18)).frame(width: isPad ? 52 : 44, height: isPad ? 52 : 44)
+                    .background(.white.opacity(0.8), in: Circle())
+            }
+            .accessibilityLabel("Full screen controller")
+            .accessibilityIdentifier("controller.fullscreen")
+            .disabled(!canChangeLayout)
             Button { ControllerSound.shared.keyClick(); showSettings = true } label: {
                 Image(systemName: "slider.horizontal.3").font(.system(size: isPad ? 21 : 18)).frame(width: isPad ? 52 : 44, height: isPad ? 52 : 44)
                     .background(.white.opacity(0.8), in: Circle())
@@ -245,7 +452,7 @@ struct ControllerScreen: View {
             Text(store.connectionMessage).font(.system(size: isPad ? 14 : 11, weight: .medium)).lineLimit(1)
             Spacer()
             if store.isBusy { ProgressView().controlSize(.mini) }
-            Button { ControllerSound.shared.keyClick(); Task { await store.refresh() } } label: { Image(systemName: "arrow.clockwise").frame(width: isPad ? 44 : 32, height: isPad ? 44 : 30) }
+            Button { ControllerSound.shared.keyClick(); Task { await store.refresh() } } label: { Image(systemName: "arrow.clockwise").frame(width: isPad || fullScreenController ? 44 : 32, height: isPad || fullScreenController ? 44 : 30) }
                 .accessibilityLabel("Refresh connection and chats")
         }.foregroundStyle(.secondary).padding(.horizontal, 7)
     }
@@ -308,13 +515,15 @@ struct ControllerScreen: View {
             }
             VStack(spacing: gap) {
                 HStack(spacing: gap) {
-                    DialControl(silver: true, caption: "CHATS", color: GenesisPalette.color(browsedSlot), scale: scale,
+                    DialControl(silver: true, caption: "CHATS", color: GenesisPalette.color(browsedSlot), restingRotation: $chatDialRotation, scale: scale,
+                                interactionChanged: { chatDialActive = $0 },
                                 selectionDescription: "\(slotPrefix)\(browsedSlot + 1), \(slotTitle(browsedSlot))", turn: { delta in
                         dialSlot = ((browsedSlot + delta) % 6 + 6) % 6
                     }, press: { activateSlot(browsedSlot) }).frame(width: key, height: key)
                     slot(0, size: key, scale: scale)
                     slot(1, size: key, scale: scale)
-                    DialControl(silver: false, caption: "ARTIFACTS", color: slotColor, scale: scale,
+                    DialControl(silver: false, caption: "ARTIFACTS", color: slotColor, restingRotation: $artifactDialRotation, scale: scale,
+                                interactionChanged: { artifactDialActive = $0 },
                                 selectionDescription: artifactSelectionLabel,
                                 visibleSelection: artifactID.flatMap { id in store.artifacts.first { $0.id == id }?.title },
                                 turn: turnArtifactDial, press: {
@@ -529,6 +738,7 @@ struct ControllerScreen: View {
             TextField(codexDraftOnly ? "Local draft — Send is not connected yet" : "Hold the microphone, or type a draft…", text: $store.draft, axis: .vertical)
                 .font(.system(size: isPad ? 17 : 14)).lineLimit(isPad ? 3...8 : 2...5).disabled(store.selectedChat == nil || store.isRecording || store.isFinalizing)
                 .accessibilityLabel("Draft for selected chat")
+                .accessibilityIdentifier("controller.draft")
             HStack {
                 Text(codexDraftOnly ? (store.isRecording ? "Listening on iPhone · draft only" : "Saved on iPhone · Send is not available for \(providerName) yet") : store.isRecording ? "Listening on iPhone" : codexQueuesPrompt ? "Send queues this draft for the selected Codex chat" : "Only sent when you press Send")
                     .font(.system(size: isPad ? 13 : 10)).foregroundStyle(.secondary)
@@ -549,6 +759,29 @@ struct ControllerScreen: View {
                 }.font(isPad ? .subheadline : .caption)
             }
         }.padding(isPad ? 20 : 16).background(.white.opacity(0.8), in: RoundedRectangle(cornerRadius: 20))
+            .confirmationDialog("Check this exact chat on your Mac first", isPresented: $resolvingSend, titleVisibility: .visible) {
+                Button("I checked — the prompt arrived") { ControllerSound.shared.keyClick(); store.acknowledgeUncertainSend(wasSent: true) }
+                Button("I checked — it did not arrive") { ControllerSound.shared.keyClick(); store.acknowledgeUncertainSend(wasSent: false) }
+                Button("Keep waiting", role: .cancel) { ControllerSound.shared.keyClick() }
+            } message: { Text("This only resolves the saved receipt. Nothing is sent by choosing an answer.") }
+    }
+}
+
+private struct FocusedGlassesAccess: View {
+    @ObservedObject var follow: GlassesFollowController
+    let open: () -> Void
+    var body: some View {
+        Button(action: open) {
+            HStack(spacing: 5) {
+                Image(systemName: "eyeglasses")
+                Text(follow.acknowledged ? "Synced" : follow.connecting ? "Connecting" : follow.enabled ? "Waiting" : "Glasses").lineLimit(1)
+            }.frame(maxWidth: .infinity, minHeight: 44)
+        }
+        .buttonStyle(.bordered)
+        .tint(follow.acknowledged ? .green : .secondary)
+        .accessibilityIdentifier("controller.glasses")
+        .accessibilityLabel("Glasses controls")
+        .accessibilityValue(follow.message)
     }
 }
 
@@ -566,24 +799,25 @@ private struct FrostedControlSurface: View {
     @Environment(\.colorSchemeContrast) private var contrast
 
     private var shape: RoundedRectangle { RoundedRectangle(cornerRadius: 15 * scale, style: .continuous) }
-    private var light: Double { illuminated ? 0.54 : tinted ? 0.28 : 0 }
+    private var light: Double { illuminated ? 0.88 : tinted ? 0.58 : 0 }
 
     var body: some View {
         ZStack {
             shape.fill(Color(white: 0.86))
                 .shadow(color: .black.opacity(0.14), radius: 2 * scale, x: 0, y: 3 * scale)
-                .shadow(color: color.opacity(illuminated ? 0.32 : tinted ? 0.10 : 0), radius: 8 * scale, x: 0, y: 1 * scale)
+                .shadow(color: color.opacity(illuminated ? 0.62 : tinted ? 0.30 : 0), radius: 10 * scale, x: 0, y: 2 * scale)
             if reduceTransparency {
                 shape.fill(Color(white: 0.97))
             } else {
                 shape.fill(.ultraThinMaterial)
                 shape.fill(.white.opacity(0.35))
             }
-            shape.fill(RadialGradient(colors: [color.opacity(light), color.opacity(light * 0.24), .clear],
-                                      center: .bottom, startRadius: 0, endRadius: 68 * scale))
-            shape.fill(LinearGradient(colors: [.white.opacity(0.65), .white.opacity(0.10), .clear],
+            shape.fill(color.opacity(illuminated ? 0.10 : tinted ? 0.05 : 0))
+            shape.fill(RadialGradient(colors: [color.opacity(light), color.opacity(light * 0.52), .clear],
+                                      center: .bottom, startRadius: 0, endRadius: 78 * scale))
+            shape.fill(LinearGradient(colors: [.white.opacity(0.55), .white.opacity(0.06), .clear],
                                       startPoint: .topLeading, endPoint: .bottomTrailing))
-            shape.strokeBorder(LinearGradient(colors: [.white.opacity(0.95), .white.opacity(0.35), color.opacity(tinted || illuminated ? 0.30 : 0.10)],
+            shape.strokeBorder(LinearGradient(colors: [.white.opacity(0.95), .white.opacity(0.45), color.opacity(illuminated ? 0.85 : tinted ? 0.62 : 0.10)],
                                                startPoint: .topLeading, endPoint: .bottomTrailing), lineWidth: 1.2 * scale)
             shape.inset(by: 2.5 * scale).strokeBorder(.white.opacity(0.35), lineWidth: 0.6 * scale)
             if contrast == .increased {
@@ -608,11 +842,11 @@ struct KeySurface: View {
             FrostedControlSurface(color: color, illuminated: illuminated, scale: scale, tinted: tinted)
             if let artwork = UIImage(named: "ControllerKey") {
                 Image(uiImage: artwork).renderingMode(.original).resizable().scaledToFit()
-                    .scaleEffect(1.15).opacity(reduceTransparency ? 0.36 : 0.22)
+                    .scaleEffect(1.15).opacity(reduceTransparency ? 0.30 : tinted || illuminated ? 0.14 : 0.22)
                     .allowsHitTesting(false)
             }
         }
-        .overlay(RoundedRectangle(cornerRadius: 15 * scale).strokeBorder(color.opacity(illuminated ? 0.58 : 0), lineWidth: 1.4 * scale))
+        .overlay(RoundedRectangle(cornerRadius: 15 * scale).strokeBorder(color.opacity(illuminated ? 0.90 : 0), lineWidth: 1.5 * scale))
         .accessibilityHidden(true)
     }
 }
@@ -631,7 +865,9 @@ struct DialControl: View {
     let silver: Bool
     let caption: String
     let color: Color
+    @Binding var restingRotation: Double
     var scale: CGFloat = 1
+    var interactionChanged: (Bool) -> Void = { _ in }
     var selectionDescription: String = ""
     var visibleSelection: String?
     let turn: (Int) -> Void
@@ -641,7 +877,6 @@ struct DialControl: View {
     @Environment(\.scenePhase) private var scenePhase
     @GestureState private var isDragging = false
     @State private var tracking: DialTracking?
-    @State private var restingRotation = 0.0
 
     var body: some View {
         VStack(spacing: 0) {
@@ -669,7 +904,14 @@ struct DialControl: View {
                 .minimumScaleFactor(0.7)
                 .foregroundStyle(.secondary)
         }
-        .onChange(of: isDragging) { _, active in if !active { finishDrag() } }
+        .onChange(of: isDragging) { _, active in
+            interactionChanged(active)
+            if !active { finishDrag() }
+        }
+        .onDisappear {
+            finishDrag()
+            interactionChanged(false)
+        }
         .accessibilityElement(children: .ignore)
         .accessibilityLabel(silver ? "Chat dial" : "Artifact dial")
         .accessibilityValue(selectionDescription)
@@ -707,22 +949,22 @@ struct DialControl: View {
         GeometryReader { geometry in
             let diameter = min(geometry.size.width, geometry.size.height) * 0.82
             ZStack {
-                Circle().fill(color.opacity(0.17 + breath * 0.07))
-                    .blur(radius: 5 * scale).padding(-2 * scale)
+                Circle().fill(color.opacity(0.40 + breath * 0.14))
+                    .blur(radius: 8 * scale).padding(-3 * scale)
                 Circle().fill(Color(white: reduceTransparency ? 0.97 : 0.91))
                     .shadow(color: .black.opacity(0.16), radius: 2 * scale, y: 2 * scale)
-                Circle().fill(RadialGradient(colors: [color.opacity(0.44 + breath * 0.09), color.opacity(0.18), .white.opacity(0.30)],
-                                             center: .bottomTrailing, startRadius: 0, endRadius: diameter * 0.85))
-                Circle().fill(LinearGradient(colors: [.white.opacity(0.85), .white.opacity(0.12), .clear], startPoint: .topLeading, endPoint: .bottomTrailing))
+                Circle().fill(RadialGradient(colors: [color.opacity(0.80 + breath * 0.12), color.opacity(0.42), .white.opacity(0.22)],
+                                             center: .bottomTrailing, startRadius: 0, endRadius: diameter * 0.95))
+                Circle().fill(LinearGradient(colors: [.white.opacity(0.72), .white.opacity(0.08), .clear], startPoint: .topLeading, endPoint: .bottomTrailing))
                 Circle().strokeBorder(.white.opacity(0.85), lineWidth: 1.3 * scale)
-                Circle().inset(by: 2 * scale).strokeBorder(color.opacity(0.22), lineWidth: 0.6 * scale)
+                Circle().inset(by: 2 * scale).strokeBorder(color.opacity(0.55), lineWidth: 0.9 * scale)
             }
             .frame(width: diameter, height: diameter)
             .overlay {
                 if let artwork = UIImage(named: "ControllerDialSilver") {
                     Image(uiImage: artwork).renderingMode(.original).resizable().scaledToFit()
                         .frame(width: diameter / 0.82, height: diameter / 0.82)
-                        .opacity(reduceTransparency ? 0.58 : 0.38)
+                        .opacity(reduceTransparency ? 0.50 : 0.30)
                 }
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)

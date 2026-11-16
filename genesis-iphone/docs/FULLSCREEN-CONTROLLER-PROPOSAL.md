@@ -1,6 +1,6 @@
 # Full-screen controller proposal
 
-Status: **proposal only; not implemented or physically validated**. This document describes a possible controller-focused layout, separate from the current visual and sound polish.
+Status: **implemented in native 0.2.4 / build 22**. This document retains the design and acceptance criteria. See [build 22 validation](FULLSCREEN-BUILD22.md) for what was tested and installed.
 
 ## Purpose and screen limits
 

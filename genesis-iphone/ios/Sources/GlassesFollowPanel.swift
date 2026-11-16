@@ -16,6 +16,7 @@ struct GlassesFollowPanel: View {
                     .font(.headline)
             }
             .disabled(store.isDemo || store.selectedProvider == .muse || !store.isPaired)
+            .accessibilityIdentifier("glasses.enabled")
             .accessibilityHint("Show this controller’s confirmed conversation and draft on your G2 glasses.")
 
             Label(follow.message, systemImage: follow.acknowledged ? "checkmark.circle.fill" : follow.unsupported ? "arrow.down.app" : "info.circle")
