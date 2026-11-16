@@ -1,4 +1,5 @@
 import SwiftUI
+import UIKit
 
 struct ActionCatalogSections: View {
     @ObservedObject var store: ControllerStore
@@ -14,7 +15,12 @@ struct ActionCatalogSections: View {
         ForEach(groups, id: \.self) { group in
             Section(group) {
                 ForEach(actions.filter { $0.group == group }) { action in
-                    Button { choose(action) } label: {
+                    Button {
+                        // Running Dictate may open the microphone immediately.
+                        // Assignment choices are ordinary buttons, not capture.
+                        if !executing || action.id != "dictate" { ControllerSound.shared.keyClick() }
+                        choose(action)
+                    } label: {
                         HStack(alignment: .top, spacing: 12) {
                             Image(systemName: action.icon).frame(width: 22).padding(.top, 2)
                             VStack(alignment: .leading, spacing: 4) {
@@ -46,24 +52,30 @@ struct ActionBrowser: View {
                     Text(quickKey == nil ? "Use any available action here. Long-press a controller key to change its assignment." : "Choose the action for quick key \((quickKey ?? 0) + 1). Your six chat slots stay as they are.").font(.subheadline).foregroundStyle(.secondary)
                     if let reason = store.providerInfo?.reason { Text(reason).font(.caption).foregroundStyle(.secondary) }
                     if quickKey == nil, store.providerInfo?.supports("menuNavigation") == true {
-                        Button { store.requestedPanel = "navigate"; dismiss() } label: { Label("Navigate an open menu or files", systemImage: "cursorarrow.motionlines") }
+                        Button { ControllerSound.shared.keyClick(); store.requestedPanel = "navigate"; dismiss() } label: { Label("Navigate an open menu or files", systemImage: "cursorarrow.motionlines") }
                     }
                 }
                 ActionCatalogSections(store: store, query: query, executing: quickKey == nil) { action in
+                    let dictation = quickKey == nil && action.id == "dictate"
+                    let stoppingDictation = dictation && store.isRecording
+                    if dictation && !stoppingDictation {
+                        UIImpactFeedbackGenerator(style: .soft).impactOccurred()
+                    }
                     Task {
                         saving = true; defer { saving = false }
                         let success: Bool
                         if let quickKey { success = await store.saveQuickAction(quickKey, actionID: action.id) }
                         else { success = await store.runAction(action.id) }
+                        if stoppingDictation && success { ControllerSound.shared.keyClick() }
                         if success { dismiss() }
                     }
                 }
             }.disabled(saving)
                 .searchable(text: $query, placement: .navigationBarDrawer(displayMode: .always), prompt: "Search actions, menus, and panels")
                 .navigationTitle(quickKey.map { "Map quick key \($0 + 1)" } ?? "\(store.selectedProvider.name) actions")
-                .toolbar { ToolbarItem(placement: .cancellationAction) { Button("Done") { dismiss() } } }
+                .toolbar { ToolbarItem(placement: .cancellationAction) { Button("Done") { ControllerSound.shared.keyClick(); dismiss() } } }
                 .alert("Controller update", isPresented: Binding(get: { store.lastError != nil }, set: { if !$0 { store.lastError = nil } })) {
-                    Button("OK", role: .cancel) { store.lastError = nil }
+                    Button("OK", role: .cancel) { ControllerSound.shared.keyClick(); store.lastError = nil }
                 } message: { Text(store.lastError ?? "") }
         }
     }
@@ -89,7 +101,7 @@ struct MenuNavigationScreen: View {
                 control("Select", icon: "checkmark", action: "menuSelect").buttonStyle(.borderedProminent)
                 HStack(spacing: 18) {
                     control("Back", icon: "arrow.uturn.backward", action: "menuBack")
-                    Button { Task { await store.navigate("menuHome"); if !store.navigation.active { store.returnHome(); dismiss() } } } label: {
+                    Button { ControllerSound.shared.keyClick(); Task { await store.navigate("menuHome"); if !store.navigation.active { store.returnHome(); dismiss() } } } label: {
                         Label("Close menus", systemImage: "house").frame(maxWidth: .infinity, minHeight: 44)
                     }.disabled(!enabled)
                 }
@@ -97,18 +109,18 @@ struct MenuNavigationScreen: View {
                 Spacer()
             }.padding(22).buttonStyle(.bordered).navigationTitle("Navigate")
                 .toolbar {
-                    ToolbarItem(placement: .cancellationAction) { Button("Done") { dismiss() } }
-                    ToolbarItem(placement: .primaryAction) { Button { Task { await store.refreshNavigation() } } label: { Image(systemName: "arrow.clockwise") } }
+                    ToolbarItem(placement: .cancellationAction) { Button("Done") { ControllerSound.shared.keyClick(); dismiss() } }
+                    ToolbarItem(placement: .primaryAction) { Button { ControllerSound.shared.keyClick(); Task { await store.refreshNavigation() } } label: { Image(systemName: "arrow.clockwise") } }
                 }
                 .task {
                     while !Task.isCancelled { await store.refreshNavigation(); try? await Task.sleep(nanoseconds: 1_000_000_000) }
                 }
                 .alert("Navigation update", isPresented: Binding(get: { store.lastError != nil }, set: { if !$0 { store.lastError = nil } })) {
-                    Button("OK", role: .cancel) { store.lastError = nil }
+                    Button("OK", role: .cancel) { ControllerSound.shared.keyClick(); store.lastError = nil }
                 } message: { Text(store.lastError ?? "") }
         }
     }
     private func control(_ title: String, icon: String, action: String) -> some View {
-        Button { Task { await store.navigate(action) } } label: { Label(title, systemImage: icon).frame(maxWidth: .infinity, minHeight: 44) }.disabled(!enabled)
+        Button { ControllerSound.shared.keyClick(); Task { await store.navigate(action) } } label: { Label(title, systemImage: icon).frame(maxWidth: .infinity, minHeight: 44) }.disabled(!enabled)
     }
 }

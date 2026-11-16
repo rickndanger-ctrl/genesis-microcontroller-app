@@ -8,6 +8,8 @@ struct GlassesFollowPanel: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
             Toggle(isOn: Binding(get: { follow.enabled }, set: { on in
+                guard on != follow.enabled else { return }
+                ControllerSound.shared.keyClick()
                 if on { store.enableGlassesFollow() } else { follow.stop() }
             })) {
                 Label("Follow this controller", systemImage: "eyeglasses")
@@ -23,7 +25,7 @@ struct GlassesFollowPanel: View {
                 .fixedSize(horizontal: false, vertical: true)
 
             if let owner = follow.otherOwner, !follow.enabled {
-                Button("Take over from \(owner)") { confirmTakeover = true }
+                Button("Take over from \(owner)") { ControllerSound.shared.keyClick(); confirmTakeover = true }
                     .buttonStyle(.bordered)
             }
 
@@ -36,7 +38,10 @@ struct GlassesFollowPanel: View {
                 .font(.caption)
 
                 Toggle("Keep reading when \(follow.sourceName) locks", isOn: Binding(
-                    get: { follow.keepReadingPreference }, set: { follow.setKeepReading($0) }))
+                    get: { follow.keepReadingPreference }, set: { enabled in
+                        guard enabled != follow.keepReadingPreference else { return }
+                        ControllerSound.shared.keyClick(); follow.setKeepReading(enabled)
+                    }))
                     .disabled(!follow.canSetKeepReading)
                     .accessibilityIdentifier("glasses.keepReading")
                 Text(follow.supportsKeepReading
@@ -66,12 +71,12 @@ struct GlassesFollowPanel: View {
                     .accessibilityIdentifier("glasses.pageHelp")
 
                 HStack(spacing: 12) {
-                    Button { follow.page(-1) } label: { Image(systemName: "chevron.left").frame(minWidth: 28, minHeight: 28) }
+                    Button { ControllerSound.shared.keyClick(); follow.page(-1) } label: { Image(systemName: "chevron.left").frame(minWidth: 28, minHeight: 28) }
                         .accessibilityIdentifier("glasses.previous")
                         .disabled(!follow.controlsAvailable || follow.desired.page == 0 || follow.desired.view == .home)
                         .accessibilityLabel("Previous glasses page")
                     Text(follow.pageLabel).font(.caption.monospacedDigit()).frame(maxWidth: .infinity)
-                    Button { follow.page(1) } label: { Image(systemName: "chevron.right").frame(minWidth: 28, minHeight: 28) }
+                    Button { ControllerSound.shared.keyClick(); follow.page(1) } label: { Image(systemName: "chevron.right").frame(minWidth: 28, minHeight: 28) }
                         .accessibilityIdentifier("glasses.next")
                         .disabled(!follow.canGoNext)
                         .accessibilityLabel("Next glasses page")
@@ -79,12 +84,12 @@ struct GlassesFollowPanel: View {
                 .buttonStyle(.bordered)
 
                 HStack {
-                    Button { follow.refresh() } label: { Label("Refresh", systemImage: "arrow.clockwise") }
+                    Button { ControllerSound.shared.keyClick(); follow.refresh() } label: { Label("Refresh", systemImage: "arrow.clockwise") }
                         .accessibilityIdentifier("glasses.refresh")
                         .buttonStyle(.bordered)
                         .disabled(!follow.controlsAvailable)
                     Spacer(minLength: 8)
-                    Button { Task { await store.sendDraft() } } label: { Label("Send draft", systemImage: "arrow.up.circle.fill") }
+                    Button { ControllerSound.shared.keyClick(); Task { await store.sendDraft() } } label: { Label("Send draft", systemImage: "arrow.up.circle.fill") }
                         .accessibilityIdentifier("glasses.send")
                         .buttonStyle(.borderedProminent)
                         .disabled(!store.canSend)
@@ -108,25 +113,25 @@ struct GlassesFollowPanel: View {
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(.white.opacity(0.78), in: RoundedRectangle(cornerRadius: 24))
         .confirmationDialog("Switch which device controls the glasses?", isPresented: $confirmTakeover, titleVisibility: .visible) {
-            Button("Follow this \(follow.sourceName)") { store.enableGlassesFollow(takeover: true) }
-            Button("Cancel", role: .cancel) {}
+            Button("Follow this \(follow.sourceName)") { ControllerSound.shared.keyClick(); store.enableGlassesFollow(takeover: true) }
+            Button("Cancel", role: .cancel) { ControllerSound.shared.keyClick() }
         } message: {
             Text("The other controller will stop publishing to the glasses. Its chat drafts are kept on that device.")
         }
     }
 
     @ViewBuilder private var viewButtons: some View {
-        Button { follow.show(.reply) } label: { Label("Conversation", systemImage: "text.bubble") }
+        Button { ControllerSound.shared.keyClick(); follow.show(.reply) } label: { Label("Conversation", systemImage: "text.bubble") }
             .accessibilityIdentifier("glasses.reply")
             .disabled(!follow.controlsAvailable || !follow.hasChat)
             .buttonStyle(.bordered)
             .tint(follow.desired.view == .reply ? .blue : .secondary)
-        Button { follow.show(.draft) } label: { Label("Draft", systemImage: "square.and.pencil") }
+        Button { ControllerSound.shared.keyClick(); follow.show(.draft) } label: { Label("Draft", systemImage: "square.and.pencil") }
             .accessibilityIdentifier("glasses.draft")
             .disabled(!follow.controlsAvailable || !follow.hasChat)
             .buttonStyle(.bordered)
             .tint(follow.desired.view == .draft ? .blue : .secondary)
-        Button { follow.show(.home) } label: { Label("Home", systemImage: "square.grid.2x2") }
+        Button { ControllerSound.shared.keyClick(); follow.show(.home) } label: { Label("Home", systemImage: "square.grid.2x2") }
             .accessibilityIdentifier("glasses.home")
             .disabled(!follow.controlsAvailable)
             .buttonStyle(.bordered)

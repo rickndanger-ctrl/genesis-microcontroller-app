@@ -19,20 +19,28 @@ struct SettingsScreen: View {
                     Text("Your controller, wherever you work.").foregroundStyle(.secondary)
                 }
                 Section("Controller") {
-                    Toggle("Controller sounds", isOn: $controllerSoundsEnabled)
+                    Toggle("Controller sounds", isOn: Binding(get: { controllerSoundsEnabled }, set: { enabled in
+                        guard enabled != controllerSoundsEnabled else { return }
+                        controllerSoundsEnabled = enabled
+                        // Enabling previews one click; disabling is immediately quiet.
+                        if enabled { ControllerSound.shared.keyClick() }
+                    }))
+                    Text("Quiet clicks for keys and dial detents. Muted while dictating.")
+                        .font(.caption).foregroundStyle(.secondary)
                 }
                 Section("Pair a Mac") {
                     Text("On the Mac, click the Genesis dial in the menu bar, then Pair iPhone / Artifacts. Scan its private pairing code while both devices are connected to Tailscale.")
                         .font(.subheadline).foregroundStyle(.secondary)
-                    Button { scanning = true } label: { Label("Scan pairing code", systemImage: "qrcode.viewfinder") }
+                    Button { ControllerSound.shared.keyClick(); scanning = true } label: { Label("Scan pairing code", systemImage: "qrcode.viewfinder") }
                     TextField("Or paste a private pairing link", text: $pairingLink).textInputAutocapitalization(.never).autocorrectionDisabled()
                         .privacySensitive()
-                    Button(pairing ? "Connecting…" : "Pair this Mac") { pair(pairingLink) }.disabled(pairing || pairingLink.isEmpty)
+                    Button(pairing ? "Connecting…" : "Pair this Mac") { ControllerSound.shared.keyClick(); pair(pairingLink) }.disabled(pairing || pairingLink.isEmpty)
                     if let message { Text(message).font(.caption).foregroundStyle(.secondary) }
                 }
                 Section("Your Macs") {
                     ForEach(store.hosts) { host in
                         Button {
+                            ControllerSound.shared.keyClick()
                             store.selectHost(host.id); dismiss()
                         } label: {
                             HStack {
@@ -52,7 +60,7 @@ struct SettingsScreen: View {
                     if let info = store.providerInfo {
                         Text(info.reason ?? "Select a mapped chat to begin.").font(.caption).foregroundStyle(.secondary)
                     }
-                    Button("Refresh") { Task { await store.refresh() } }
+                    Button("Refresh") { ControllerSound.shared.keyClick(); Task { await store.refresh() } }
                 }
                 Section("How it works") {
                     Label("Hold Talk, release to review, tap Send.", systemImage: "mic")
@@ -63,13 +71,13 @@ struct SettingsScreen: View {
                 }
             }
             .navigationTitle("Your controller")
-            .toolbar { ToolbarItem(placement: .confirmationAction) { Button("Done") { dismiss() } } }
+            .toolbar { ToolbarItem(placement: .confirmationAction) { Button("Done") { ControllerSound.shared.keyClick(); dismiss() } } }
             .sheet(isPresented: $scanning) {
                 NavigationStack {
                     QRScanner { code in scanning = false; pairingLink = code; pair(code) }
                         .navigationTitle("Scan pairing code")
                         .navigationBarTitleDisplayMode(.inline)
-                        .toolbar { ToolbarItem(placement: .cancellationAction) { Button("Cancel") { scanning = false } } }
+                        .toolbar { ToolbarItem(placement: .cancellationAction) { Button("Cancel") { ControllerSound.shared.keyClick(); scanning = false } } }
                 }
             }
         }
@@ -112,7 +120,7 @@ struct MappingScreen: View {
                             .font(.caption).foregroundStyle(.secondary)
                     }
                     ForEach(store.chats.filter { query.isEmpty || $0.title.localizedCaseInsensitiveContains(query) }) { chat in
-                        Button { save(kind: "chat", title: chat.title, id: chat.id) } label: {
+                        Button { ControllerSound.shared.keyClick(); save(kind: "chat", title: chat.title, id: chat.id) } label: {
                             Label(chat.title, systemImage: "bubble.left.and.bubble.right")
                         }.disabled(!store.canMapChats)
                     }
@@ -121,15 +129,15 @@ struct MappingScreen: View {
                     } else if !query.isEmpty && !store.chats.contains(where: { $0.title.localizedCaseInsensitiveContains(query) }) {
                         Text("No chats match your search.").font(.caption).foregroundStyle(.secondary)
                     }
-                    Button { Task { await store.refresh() } } label: {
+                    Button { ControllerSound.shared.keyClick(); Task { await store.refresh() } } label: {
                         Label(store.canMapChats ? "Refresh chats" : "Refresh connection", systemImage: "arrow.clockwise")
                     }.disabled(!store.isPaired || store.isRefreshingChats)
                 }
                 ActionCatalogSections(store: store, query: query) { action in save(kind:"action",title:action.title,id:action.id) }
-                Section { Button("Remove assignment", role: .destructive) { save(kind: "empty", title: "Unassigned", id: "") } }
+                Section { Button("Remove assignment", role: .destructive) { ControllerSound.shared.keyClick(); save(kind: "empty", title: "Unassigned", id: "") } }
             }.disabled(saving).searchable(text: $query, placement: .navigationBarDrawer(displayMode: .always), prompt: "Search chats and actions")
                 .navigationTitle("Map \(prefix)\(index + 1)")
-                .toolbar { ToolbarItem(placement: .cancellationAction) { Button("Cancel") { dismiss() } } }
+                .toolbar { ToolbarItem(placement: .cancellationAction) { Button("Cancel") { ControllerSound.shared.keyClick(); dismiss() } } }
         }
     }
 

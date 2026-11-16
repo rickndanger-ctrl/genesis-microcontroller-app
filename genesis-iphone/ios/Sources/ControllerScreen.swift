@@ -64,11 +64,16 @@ struct ControllerScreen: View {
             MappingScreen(store: store, index: selection.id)
         }
         .alert("Controller update", isPresented: Binding(get: { store.lastError != nil }, set: { if !$0 { store.lastError = nil } })) {
-            Button("OK", role: .cancel) { store.lastError = nil }
+            Button("OK", role: .cancel) { ControllerSound.shared.keyClick(); store.lastError = nil }
         } message: { Text(store.lastError ?? "") }
         .onChange(of: talkGestureActive) { _, active in
             // onEnded is not called when the system cancels a touch.
             if !active { finishTalkGesture() }
+        }
+        .onAppear { [store] in
+            ControllerSound.shared.captureIsActive = { [weak store] in
+                store?.isRecording == true || store?.isFinalizing == true
+            }
         }
         .onDisappear { finishTalkGesture() }
         .onChange(of: store.selectedProvider) { _, _ in clearPresentation() }
@@ -78,9 +83,9 @@ struct ControllerScreen: View {
             if !showActions { routeRequestedPanel() }
         }
         .confirmationDialog("Check this exact chat on your Mac first", isPresented: $resolvingSend, titleVisibility: .visible) {
-            Button("I checked — the prompt arrived") { store.acknowledgeUncertainSend(wasSent: true) }
-            Button("I checked — it did not arrive") { store.acknowledgeUncertainSend(wasSent: false) }
-            Button("Keep waiting", role: .cancel) {}
+            Button("I checked — the prompt arrived") { ControllerSound.shared.keyClick(); store.acknowledgeUncertainSend(wasSent: true) }
+            Button("I checked — it did not arrive") { ControllerSound.shared.keyClick(); store.acknowledgeUncertainSend(wasSent: false) }
+            Button("Keep waiting", role: .cancel) { ControllerSound.shared.keyClick() }
         } message: { Text("This only resolves the saved receipt. Nothing is sent by choosing an answer.") }
     }
 
@@ -135,7 +140,7 @@ struct ControllerScreen: View {
     private var controllerControls: some View {
         actionAccess
         if let summary = store.dictationControl.summary, let reason = store.dictationControl.explanation {
-            Button { store.lastError = reason } label: {
+            Button { ControllerSound.shared.keyClick(); store.lastError = reason } label: {
                 Label(summary, systemImage: "info.circle")
                     .font(isPad ? .subheadline : .caption)
                     .frame(maxWidth: .infinity, alignment: .leading)
@@ -175,14 +180,14 @@ struct ControllerScreen: View {
     }
     private var actionAccess: some View {
         HStack(spacing: 8) {
-            Button { Task { await store.runAction("previousControllerChat") } } label: { Label("Previous", systemImage:"arrow.left") }
+            Button { ControllerSound.shared.keyClick(); Task { await store.runAction("previousControllerChat") } } label: { Label("Previous", systemImage:"arrow.left") }
                 .disabled(!store.canRunAction("previousControllerChat"))
             if store.availableActions.contains(where: { $0.id == "newChat" }) {
-                Button { Task { await store.runAction("newChat") } } label: { Label("New chat", systemImage:"square.and.pencil") }
+                Button { ControllerSound.shared.keyClick(); Task { await store.runAction("newChat") } } label: { Label("New chat", systemImage:"square.and.pencil") }
                     .disabled(!store.canRunAction("newChat"))
             }
             Spacer(minLength: 0)
-            Button { showActions = true } label: { Label("Actions", systemImage:"square.grid.2x2") }
+            Button { ControllerSound.shared.keyClick(); showActions = true } label: { Label("Actions", systemImage:"square.grid.2x2") }
         }.font(.system(size: isPad ? 14 : 12, weight: .semibold)).buttonStyle(.bordered).controlSize(isPad ? .regular : .small)
     }
 
@@ -193,7 +198,7 @@ struct ControllerScreen: View {
                 Text("Agent Micro Controller").font(.system(size: isPad ? 28 : 22, weight: .semibold, design: .rounded))
             }
             Spacer(minLength: 4)
-            Button { showSettings = true } label: {
+            Button { ControllerSound.shared.keyClick(); showSettings = true } label: {
                 Image(systemName: "slider.horizontal.3").font(.system(size: isPad ? 21 : 18)).frame(width: isPad ? 52 : 44, height: isPad ? 52 : 44)
                     .background(.white.opacity(0.8), in: Circle())
             }.accessibilityLabel("Settings and Mac pairing")
@@ -204,7 +209,7 @@ struct ControllerScreen: View {
         VStack(spacing: 8) {
             HStack(spacing: 4) {
                 if store.hosts.isEmpty {
-                    Button { showSettings = true } label: {
+                    Button { ControllerSound.shared.keyClick(); showSettings = true } label: {
                         Label("Pair a Mac", systemImage: "plus.circle")
                             .font(.system(size: isPad ? 14 : 12, weight: .semibold))
                             .frame(maxWidth: .infinity, minHeight: isPad ? 48 : 42)
@@ -212,7 +217,7 @@ struct ControllerScreen: View {
                     }
                 }
                 ForEach(store.hosts) { host in
-                    Button { store.selectHost(host.id) } label: {
+                    Button { ControllerSound.shared.keyClick(); store.selectHost(host.id) } label: {
                         Label(host.name, systemImage: host.name.lowercased().contains("neo") ? "laptopcomputer" : "macmini")
                             .font(.system(size: isPad ? 14 : 12, weight: .semibold)).frame(maxWidth: .infinity).frame(minHeight: isPad ? 48 : 42)
                             .background(store.selectedHostID == host.id ? Color.white : Color.clear, in: RoundedRectangle(cornerRadius: 13))
@@ -221,7 +226,7 @@ struct ControllerScreen: View {
             }.padding(4).background(.black.opacity(0.045), in: RoundedRectangle(cornerRadius: 17))
             HStack(spacing: 6) {
                 ForEach([ProviderID.codex, .claude, .muse], id: \.rawValue) { provider in
-                    Button { store.selectProvider(provider) } label: {
+                    Button { ControllerSound.shared.keyClick(); store.selectProvider(provider) } label: {
                         HStack(spacing: 6) {
                             Image(systemName: provider == .codex ? "terminal" : provider == .claude ? "sun.max" : "sparkle")
                             Text(provider == .codex ? "Codex" : provider.rawValue.capitalized)
@@ -240,7 +245,7 @@ struct ControllerScreen: View {
             Text(store.connectionMessage).font(.system(size: isPad ? 14 : 11, weight: .medium)).lineLimit(1)
             Spacer()
             if store.isBusy { ProgressView().controlSize(.mini) }
-            Button { Task { await store.refresh() } } label: { Image(systemName: "arrow.clockwise").frame(width: isPad ? 44 : 32, height: isPad ? 44 : 30) }
+            Button { ControllerSound.shared.keyClick(); Task { await store.refresh() } } label: { Image(systemName: "arrow.clockwise").frame(width: isPad ? 44 : 32, height: isPad ? 44 : 30) }
                 .accessibilityLabel("Refresh connection and chats")
         }.foregroundStyle(.secondary).padding(.horizontal, 7)
     }
@@ -255,6 +260,11 @@ struct ControllerScreen: View {
     private func activateSlot(_ index: Int) {
         guard !store.isBusy else { return }
         dialSlot = index
+        let selectedMapping = store.profile.slots.first { $0.index == index }
+        let dictationAction = selectedMapping?.kind == "action" && selectedMapping?.targetID == "dictate"
+        let stoppingDictation = dictationAction && store.isRecording
+        if dictationAction { UIImpactFeedbackGenerator(style: .soft).impactOccurred() }
+        else { ControllerSound.shared.keyClick() }
         guard let mapping = store.profile.slots.first(where: { $0.index == index }), mapping.kind != "empty" else {
             mappingIndex = index
             return
@@ -266,6 +276,7 @@ struct ControllerScreen: View {
                   let current = store.profile.slots.first(where: { $0.index == index }),
                   current.kind == mapping.kind, current.targetID == mapping.targetID else { return }
             await store.openSlot(index)
+            if stoppingDictation { ControllerSound.shared.keyClick() }
             if mapping.kind == "chat", store.selectedSlotIndex == index, dialSlot == index,
                store.selectedHostID == hostID, store.selectedProvider == provider {
                 dialSlot = nil
@@ -307,6 +318,7 @@ struct ControllerScreen: View {
                                 selectionDescription: artifactSelectionLabel,
                                 visibleSelection: artifactID.flatMap { id in store.artifacts.first { $0.id == id }?.title },
                                 turn: turnArtifactDial, press: {
+                        ControllerSound.shared.keyClick()
                         if let artifactID, let artifact = store.artifacts.first(where: { $0.id == artifactID }) {
                             dialArtifactPreview = artifact
                         } else {
@@ -344,25 +356,31 @@ struct ControllerScreen: View {
         let selected = store.selectedSlotIndex == index
         let browsed = browsedSlot == index
         let color = GenesisPalette.color(index)
+        let assigned = store.profile.slots.contains { $0.index == index && $0.kind != "empty" }
         return ZStack {
-            KeySurface(color: color, illuminated: selected, scale: scale)
-            VStack(spacing: 4 * scale) {
-                Circle().fill(color).frame(width: 12 * scale, height: 12 * scale)
-                    .shadow(color: color.opacity(0.6), radius: (selected ? 8 : 2) * scale)
-                Text("\(slotPrefix)\(index + 1)")
-                    .font(.system(size: 11 * scale, weight: .bold, design: .monospaced))
+            KeySurface(color: color, illuminated: selected, scale: scale, tinted: assigned)
+            VStack(spacing: 5 * scale) {
+                HStack(spacing: 4 * scale) {
+                    Circle().fill(color.opacity(assigned ? 1 : 0.45))
+                        .frame(width: 7 * scale, height: 7 * scale)
+                        .overlay(Circle().strokeBorder(.white.opacity(0.75), lineWidth: 0.6 * scale))
+                    Text("\(slotPrefix)\(index + 1)")
+                        .font(.system(size: 11 * scale, weight: .bold, design: .monospaced))
+                }
                 Text(title)
-                    .font(.system(size: 8 * scale, weight: .medium))
-                    .lineLimit(isPad && size >= 90 ? 2 : 1)
+                    .font(.system(size: 9 * scale, weight: .semibold))
+                    .lineLimit(2)
                     .truncationMode(.tail)
                     .multilineTextAlignment(.center)
-                    .frame(width: max(0, size - 14 * scale))
+                    .frame(width: max(0, size - 12 * scale), height: 22 * scale, alignment: .top)
             }
+            .foregroundStyle(GenesisPalette.ink)
+            .padding(.vertical, 5 * scale)
         }.frame(width: size, height: size)
             .overlay {
                 if browsed {
                     RoundedRectangle(cornerRadius: 15 * scale)
-                        .strokeBorder(GenesisPalette.ink, style: StrokeStyle(lineWidth: 1.7 * scale, dash: [3 * scale, 2 * scale]))
+                        .strokeBorder(GenesisPalette.ink.opacity(0.65), style: StrokeStyle(lineWidth: 1.3 * scale, dash: [3 * scale, 2.5 * scale]))
                         .allowsHitTesting(false)
                         .accessibilityHidden(true)
                 }
@@ -370,14 +388,14 @@ struct ControllerScreen: View {
             .contentShape(RoundedRectangle(cornerRadius: 15 * scale))
             .gesture(LongPressGesture(minimumDuration: 0.65).exclusively(before: TapGesture()).onEnded { value in
                 switch value { case .first: ControllerSound.shared.keyClick(); mappingIndex = index
-                case .second: ControllerSound.shared.keyClick(); activateSlot(index) }
+                case .second: activateSlot(index) }
             })
             .accessibilityElement(children: .ignore)
             .accessibilityAddTraits(.isButton)
             .accessibilityLabel("\(slotPrefix)\(index + 1), \(title)")
             .accessibilityValue(selected && browsed ? "Current chat, dial selection" : selected ? "Current chat" : browsed ? "Dial selection" : "")
-            .accessibilityAction { ControllerSound.shared.keyClick(); activateSlot(index) }
-            .accessibilityAction(named: "Change assignment") { mappingIndex = index }
+            .accessibilityAction { activateSlot(index) }
+            .accessibilityAction(named: "Change assignment") { ControllerSound.shared.keyClick(); mappingIndex = index }
     }
 
     private func actionKey(_ title: String, icon: String, size: CGFloat, scale: CGFloat, active: Bool = false, enabled: Bool, action: @escaping () -> Void) -> some View {
@@ -386,9 +404,9 @@ struct ControllerScreen: View {
                 KeySurface(color: slotColor, illuminated: active, scale: scale)
                 VStack(spacing: 7 * scale) {
                     Image(systemName: icon).font(.system(size: 18 * scale, weight: .medium))
-                    Text(title.uppercased()).font(.system(size: 8 * scale, weight: .semibold, design: .monospaced))
+                    Text(title.uppercased()).font(.system(size: 8.5 * scale, weight: .semibold, design: .monospaced))
                         .lineLimit(1).truncationMode(.tail).frame(width: max(0, size - 14 * scale))
-                }.opacity(enabled ? 1 : 0.28)
+                }.opacity(enabled ? 1 : 0.48)
             }.frame(width: size, height: size)
         }.buttonStyle(KeyPressStyle()).disabled(!enabled).accessibilityLabel(title)
     }
@@ -403,12 +421,12 @@ struct ControllerScreen: View {
             VStack(spacing: 7 * scale) {
                 Image(systemName:action?.icon ?? "questionmark").font(.system(size: 18 * scale, weight:.medium))
                 Text(title.uppercased())
-                    .font(.system(size: 8 * scale, weight: .semibold, design: .monospaced))
+                    .font(.system(size: 8.5 * scale, weight: .semibold, design: .monospaced))
                     .lineLimit(2)
                     .truncationMode(.tail)
                     .multilineTextAlignment(.center)
                     .frame(width: max(0, size - 14 * scale))
-            }.opacity(enabled ? 1 : 0.28)
+            }.opacity(enabled ? 1 : 0.48)
         }.frame(width:size,height:size).contentShape(RoundedRectangle(cornerRadius:15 * scale))
             .gesture(LongPressGesture(minimumDuration:0.65).exclusively(before:TapGesture()).onEnded { value in
                 switch value {
@@ -421,16 +439,22 @@ struct ControllerScreen: View {
             .accessibilityAddTraits(.isButton).accessibilityLabel(title)
             .accessibilityHint(enabled ? "Tap to run. Hold to change this action." : store.actionUnavailableReason(id) ?? "This action is not available.")
             .accessibilityAction { runQuickAction(id) }
-            .accessibilityAction(named:"Change action") { quickMappingIndex = index }
+            .accessibilityAction(named:"Change action") { ControllerSound.shared.keyClick(); quickMappingIndex = index }
     }
 
     private func runQuickAction(_ id: String) {
-        ControllerSound.shared.keyClick()
+        let dictationAction = id == "dictate"
+        let stoppingDictation = dictationAction && store.isRecording
+        if dictationAction { UIImpactFeedbackGenerator(style: .soft).impactOccurred() }
+        else { ControllerSound.shared.keyClick() }
         guard store.canRunAction(id) else {
             store.lastError = store.actionUnavailableReason(id) ?? "This action is not available."
             return
         }
-        Task { await store.runAction(id) }
+        Task {
+            await store.runAction(id)
+            if stoppingDictation { ControllerSound.shared.keyClick() }
+        }
     }
 
     private func finishTalkGesture() {
@@ -456,9 +480,8 @@ struct ControllerScreen: View {
 
     private func talkKey(width: CGFloat, height: CGFloat, scale: CGFloat) -> some View {
         ZStack {
-            RoundedRectangle(cornerRadius: 16 * scale).fill(store.isRecording ? slotColor.opacity(0.13) : Color.white.opacity(0.9))
-                .overlay(RoundedRectangle(cornerRadius: 16 * scale).stroke(store.isRecording ? slotColor : Color.white, lineWidth: 2 * scale))
-                .shadow(color: .black.opacity(0.09), radius: 3 * scale, y: 3 * scale)
+            FrostedControlSurface(color: slotColor, illuminated: store.isRecording, scale: scale)
+                .overlay(RoundedRectangle(cornerRadius: 15 * scale).strokeBorder(store.isRecording ? slotColor.opacity(0.65) : .clear, lineWidth: 1.5 * scale))
             VStack(spacing: 5 * scale) {
                 Image(systemName: store.dictationControl.icon).font(.system(size: 23 * scale, weight: .medium))
                 Text(store.dictationControl.label)
@@ -486,9 +509,12 @@ struct ControllerScreen: View {
             .accessibilityHint(store.dictationControl.explanation ?? "Hold to record, then release to review your draft.")
             .accessibilityAddTraits(.isButton)
             .accessibilityAction {
-                if store.isRecording { Task { await store.stopDictation() } }
-                else if store.canDictate { Task { await store.startDictation() } }
-                else { store.lastError = store.dictationControl.explanation }
+                if store.isRecording { Task { await store.stopDictation(); ControllerSound.shared.keyClick() } }
+                else if store.canDictate {
+                    UIImpactFeedbackGenerator(style: .soft).impactOccurred()
+                    Task { await store.startDictation() }
+                }
+                else { ControllerSound.shared.keyClick(); store.lastError = store.dictationControl.explanation }
             }
     }
 
@@ -517,9 +543,9 @@ struct ControllerScreen: View {
                 Text("Delivery is unconfirmed. Your draft is saved and won’t be resent automatically.")
                     .font(isPad ? .subheadline : .caption).foregroundStyle(.orange)
                 HStack {
-                    Button("Check receipt") { Task { await store.recoverPendingSend() } }
+                    Button("Check receipt") { ControllerSound.shared.keyClick(); Task { await store.recoverPendingSend() } }
                     Spacer()
-                    Button("I checked the Mac…") { resolvingSend = true }
+                    Button("I checked the Mac…") { ControllerSound.shared.keyClick(); resolvingSend = true }
                 }.font(isPad ? .subheadline : .caption)
             }
         }.padding(isPad ? 20 : 16).background(.white.opacity(0.8), in: RoundedRectangle(cornerRadius: 20))
@@ -528,28 +554,76 @@ struct ControllerScreen: View {
 
 private struct MappingSelection: Identifiable { let id: Int }
 
+/// Native frost and light sit beneath the reused Blender bevels. Keeping the
+/// light separate from labels preserves contrast and the fixed slot palette.
+private struct FrostedControlSurface: View {
+    var color: Color = .clear
+    var illuminated = false
+    var scale: CGFloat = 1
+    var tinted = false
+    @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Environment(\.colorSchemeContrast) private var contrast
+
+    private var shape: RoundedRectangle { RoundedRectangle(cornerRadius: 15 * scale, style: .continuous) }
+    private var light: Double { illuminated ? 0.54 : tinted ? 0.28 : 0 }
+
+    var body: some View {
+        ZStack {
+            shape.fill(Color(white: 0.86))
+                .shadow(color: .black.opacity(0.14), radius: 2 * scale, x: 0, y: 3 * scale)
+                .shadow(color: color.opacity(illuminated ? 0.32 : tinted ? 0.10 : 0), radius: 8 * scale, x: 0, y: 1 * scale)
+            if reduceTransparency {
+                shape.fill(Color(white: 0.97))
+            } else {
+                shape.fill(.ultraThinMaterial)
+                shape.fill(.white.opacity(0.35))
+            }
+            shape.fill(RadialGradient(colors: [color.opacity(light), color.opacity(light * 0.24), .clear],
+                                      center: .bottom, startRadius: 0, endRadius: 68 * scale))
+            shape.fill(LinearGradient(colors: [.white.opacity(0.65), .white.opacity(0.10), .clear],
+                                      startPoint: .topLeading, endPoint: .bottomTrailing))
+            shape.strokeBorder(LinearGradient(colors: [.white.opacity(0.95), .white.opacity(0.35), color.opacity(tinted || illuminated ? 0.30 : 0.10)],
+                                               startPoint: .topLeading, endPoint: .bottomTrailing), lineWidth: 1.2 * scale)
+            shape.inset(by: 2.5 * scale).strokeBorder(.white.opacity(0.35), lineWidth: 0.6 * scale)
+            if contrast == .increased {
+                shape.strokeBorder(GenesisPalette.ink.opacity(0.6), lineWidth: 1.2 * scale)
+            }
+        }
+        .animation(reduceMotion ? nil : .easeInOut(duration: 0.22), value: illuminated)
+        .allowsHitTesting(false)
+        .accessibilityHidden(true)
+    }
+}
+
 struct KeySurface: View {
     var color: Color = .clear
     var illuminated = false
     var scale: CGFloat = 1
+    var tinted = false
+    @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
+
     var body: some View {
         ZStack {
-            RoundedRectangle(cornerRadius: 16 * scale).fill(color.opacity(illuminated ? 0.22 : 0.05))
-                .shadow(color: color.opacity(illuminated ? 0.38 : 0), radius: 9 * scale)
+            FrostedControlSurface(color: color, illuminated: illuminated, scale: scale, tinted: tinted)
             if let artwork = UIImage(named: "ControllerKey") {
-                Image(uiImage: artwork).renderingMode(.original).resizable().scaledToFit().scaleEffect(1.15).opacity(illuminated ? 0.9 : 1)
-            } else {
-                RoundedRectangle(cornerRadius: 14 * scale).fill(LinearGradient(colors: [.white, Color(white: 0.94)], startPoint: .topLeading, endPoint: .bottomTrailing))
-                    .shadow(color: .black.opacity(0.10), radius: 2 * scale, y: 3 * scale)
+                Image(uiImage: artwork).renderingMode(.original).resizable().scaledToFit()
+                    .scaleEffect(1.15).opacity(reduceTransparency ? 0.36 : 0.22)
+                    .allowsHitTesting(false)
             }
-        }.overlay(RoundedRectangle(cornerRadius: 15 * scale).stroke(color.opacity(illuminated ? 0.6 : 0), lineWidth: 1.5 * scale))
+        }
+        .overlay(RoundedRectangle(cornerRadius: 15 * scale).strokeBorder(color.opacity(illuminated ? 0.58 : 0), lineWidth: 1.4 * scale))
+        .accessibilityHidden(true)
     }
 }
 
 struct KeyPressStyle: ButtonStyle {
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     func makeBody(configuration: Configuration) -> some View {
-        configuration.label.scaleEffect(configuration.isPressed ? 0.955 : 1).offset(y: configuration.isPressed ? 2 : 0)
-            .animation(.easeOut(duration: 0.12), value: configuration.isPressed)
+        configuration.label.scaleEffect(configuration.isPressed && !reduceMotion ? 0.975 : 1)
+            .offset(y: configuration.isPressed && !reduceMotion ? 1 : 0)
+            .opacity(configuration.isPressed ? 0.92 : 1)
+            .animation(reduceMotion ? nil : .easeOut(duration: 0.12), value: configuration.isPressed)
     }
 }
 
@@ -563,6 +637,8 @@ struct DialControl: View {
     let turn: (Int) -> Void
     let press: () -> Void
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
+    @Environment(\.scenePhase) private var scenePhase
     @GestureState private var isDragging = false
     @State private var tracking: DialTracking?
     @State private var restingRotation = 0.0
@@ -608,16 +684,50 @@ struct DialControl: View {
         .accessibilityAction { pressDial() }
     }
 
-    private var face: some View {
-        ZStack {
-            if let artwork = UIImage(named: silver ? "ControllerDialSilver" : "ControllerDial") {
-                Image(uiImage: artwork).renderingMode(.original).resizable().scaledToFit()
-            } else {
-                Circle().fill(silver ? Color.gray.opacity(0.25) : GenesisPalette.ink).padding(3 * scale)
-                Capsule().fill(silver ? GenesisPalette.ink.opacity(0.6) : .white.opacity(0.8))
+    @ViewBuilder private var face: some View {
+        if silver {
+            // A quiet, slow illumination cycle runs only while this screen is
+            // active. Rotation remains driven by the existing finger tracking.
+            TimelineView(.animation(minimumInterval: 1.0 / 24.0, paused: scenePhase != .active || reduceMotion)) { context in
+                let breath = reduceMotion || scenePhase != .active ? 0.5 : (sin(context.date.timeIntervalSinceReferenceDate * .pi / 2.8) + 1) / 2
+                frostedFace(breath: breath)
+            }
+        } else if let artwork = UIImage(named: "ControllerDial") {
+            Image(uiImage: artwork).renderingMode(.original).resizable().scaledToFit()
+        } else {
+            ZStack {
+                Circle().fill(GenesisPalette.ink).padding(3 * scale)
+                Capsule().fill(.white.opacity(0.8))
                     .frame(width: 3 * scale, height: 12 * scale).offset(y: -17 * scale)
             }
         }
+    }
+
+    private func frostedFace(breath: Double) -> some View {
+        GeometryReader { geometry in
+            let diameter = min(geometry.size.width, geometry.size.height) * 0.82
+            ZStack {
+                Circle().fill(color.opacity(0.17 + breath * 0.07))
+                    .blur(radius: 5 * scale).padding(-2 * scale)
+                Circle().fill(Color(white: reduceTransparency ? 0.97 : 0.91))
+                    .shadow(color: .black.opacity(0.16), radius: 2 * scale, y: 2 * scale)
+                Circle().fill(RadialGradient(colors: [color.opacity(0.44 + breath * 0.09), color.opacity(0.18), .white.opacity(0.30)],
+                                             center: .bottomTrailing, startRadius: 0, endRadius: diameter * 0.85))
+                Circle().fill(LinearGradient(colors: [.white.opacity(0.85), .white.opacity(0.12), .clear], startPoint: .topLeading, endPoint: .bottomTrailing))
+                Circle().strokeBorder(.white.opacity(0.85), lineWidth: 1.3 * scale)
+                Circle().inset(by: 2 * scale).strokeBorder(color.opacity(0.22), lineWidth: 0.6 * scale)
+            }
+            .frame(width: diameter, height: diameter)
+            .overlay {
+                if let artwork = UIImage(named: "ControllerDialSilver") {
+                    Image(uiImage: artwork).renderingMode(.original).resizable().scaledToFit()
+                        .frame(width: diameter / 0.82, height: diameter / 0.82)
+                        .opacity(reduceTransparency ? 0.58 : 0.38)
+                }
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+        }
+        .animation(reduceMotion ? nil : .easeInOut(duration: 0.24), value: color)
     }
 
     private func drag(in size: CGSize) -> some Gesture<DragGesture.Value> {
@@ -648,7 +758,8 @@ struct DialControl: View {
     }
 
     private func pressDial() {
-        ControllerSound.shared.keyClick()
+        // The destination owns feedback so mapped microphone actions start
+        // with haptics only, including activation from the chat dial.
         press()
     }
 

@@ -4,6 +4,8 @@
 
 Genesis is an iPhone and iPad controller for Codex and Claude Code sessions on a paired Mac. It provides six assignable keys, chat switching, Hold to Talk, draft review, and Send. The iPad layout adapts to portrait and landscape. Turn the dials to browse chats or artifacts, then press to select. You can mute the dial ticks and key clicks under **Settings → Controller sounds**. The Mac companion handles chat navigation and sends the reviewed draft to the selected session. This app is a separate project from the [Genesis Mini hardware and firmware](https://github.com/rickndanger-ctrl/genesis-agent-micro-controller).
 
+Version **0.2.3 / build 21** adds frosted caps, fixed slot-color illumination, and a softly glowing chat dial that follows the key being browsed. The artifact dial stays black. Click feedback respects the sound switch and is suppressed during microphone capture and while backgrounded. Reduce Motion and Reduce Transparency retain accessible alternatives. A separate [full-screen controller proposal](genesis-iphone/docs/FULLSCREEN-CONTROLLER-PROPOSAL.md) is documented but not implemented.
+
 ## Build
 
 The mobile project targets iOS and iPadOS 26 or later and uses Xcode and XcodeGen. Generate the project, then open it in Xcode:
@@ -38,7 +40,7 @@ Under **Codex → Actions → Change model**, open the model and reasoning picke
 
 ## Even Realities G2 glasses
 
-Native version **0.2.2 / build 20** supports **Follow this controller** on both iPhone and iPad. The separate [Genesis G2 app](https://github.com/rickndanger-ctrl/genesis-g2) displays the selected Codex or supported Claude Code conversation above a dedicated draft box. The native app handles dictation and explicit Send; the glasses never submit a message themselves.
+Native version **0.2.3 / build 21** supports **Follow this controller** on both iPhone and iPad. The separate [Genesis G2 app](https://github.com/rickndanger-ctrl/genesis-g2) displays the selected Codex or supported Claude Code conversation above a dedicated draft box. The native app handles dictation and explicit Send; the glasses never submit a message themselves.
 
 Open Genesis G2 inside Even on the paired iPhone, then enable **Follow this controller** in this app and tap an assigned chat. **Conversation** and **Draft** choose which area the page arrows navigate. The right arrow shows older text; the left returns toward the latest. One native device controls the display at a time, and taking over from another device requires an explicit choice.
 

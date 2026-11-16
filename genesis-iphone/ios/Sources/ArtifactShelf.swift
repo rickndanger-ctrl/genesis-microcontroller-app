@@ -19,7 +19,7 @@ struct ArtifactShelf: View {
                 } else {
                     ScrollViewReader { proxy in List {
                         ForEach(store.artifacts.filter { query.isEmpty || $0.title.localizedCaseInsensitiveContains(query) }.sorted { pinned.contains(pinKey($0)) && !pinned.contains(pinKey($1)) }) { artifact in
-                            Button { selected = artifact } label: {
+                            Button { ControllerSound.shared.keyClick(); selected = artifact } label: {
                                 HStack(spacing: 12) {
                                     Image(systemName: artifact.kind == "web" ? "globe" : artifact.kind == "image" ? "photo" : "doc.text")
                                         .font(.title2).frame(width: 42, height: 48).background(.quaternary, in: RoundedRectangle(cornerRadius: 10))
@@ -32,7 +32,7 @@ struct ArtifactShelf: View {
                             .id(artifact.id)
                             .swipeActions(edge: .leading) { Button(pinned.contains(pinKey(artifact)) ? "Unpin" : "Pin") { togglePin(artifact) }.tint(.orange) }
                             .contextMenu {
-                                Button("Open on Mac", systemImage: "desktopcomputer") { Task { await store.openArtifact(artifact) } }
+                                Button("Open on Mac", systemImage: "desktopcomputer") { ControllerSound.shared.keyClick(); Task { await store.openArtifact(artifact) } }
                                 Button(pinned.contains(pinKey(artifact)) ? "Unpin" : "Pin", systemImage: "pin") { togglePin(artifact) }
                             }
                         }
@@ -42,14 +42,15 @@ struct ArtifactShelf: View {
                 }
             }.navigationTitle("Artifacts")
                 .toolbar {
-                    ToolbarItem(placement: .cancellationAction) { Button("Done") { dismiss() } }
-                    ToolbarItem(placement: .primaryAction) { Button { Task { await store.refreshArtifacts() } } label: { Image(systemName: "arrow.clockwise") }.accessibilityLabel("Refresh artifacts") }
+                    ToolbarItem(placement: .cancellationAction) { Button("Done") { ControllerSound.shared.keyClick(); dismiss() } }
+                    ToolbarItem(placement: .primaryAction) { Button { ControllerSound.shared.keyClick(); Task { await store.refreshArtifacts() } } label: { Image(systemName: "arrow.clockwise") }.accessibilityLabel("Refresh artifacts") }
                 }
                 .task { await store.refreshArtifacts() }
                 .sheet(item: $selected) { artifact in ArtifactPreview(store: store, artifact: artifact) }
         }
     }
     private func togglePin(_ artifact: ArtifactRecord) {
+        ControllerSound.shared.keyClick()
         let key = pinKey(artifact); if pinned.contains(key) { pinned.remove(key) } else { pinned.insert(key) }
         UserDefaults.standard.set(Array(pinned), forKey: "genesis.artifactPins")
     }
@@ -75,8 +76,8 @@ struct ArtifactPreview: View {
             }
             .navigationTitle(artifact.title).navigationBarTitleDisplayMode(.inline)
             .toolbar {
-                ToolbarItem(placement: .cancellationAction) { Button("Done") { dismiss() } }
-                ToolbarItem(placement: .primaryAction) { Button { Task { await store.openArtifact(artifact) } } label: { Image(systemName: "desktopcomputer") }.accessibilityLabel("Open on Mac") }
+                ToolbarItem(placement: .cancellationAction) { Button("Done") { ControllerSound.shared.keyClick(); dismiss() } }
+                ToolbarItem(placement: .primaryAction) { Button { ControllerSound.shared.keyClick(); Task { await store.openArtifact(artifact) } } label: { Image(systemName: "desktopcomputer") }.accessibilityLabel("Open on Mac") }
             }
             .task {
                 guard !store.isDemo else { return }
