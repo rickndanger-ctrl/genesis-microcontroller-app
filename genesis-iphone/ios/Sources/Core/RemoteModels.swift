@@ -306,7 +306,10 @@ enum RemoteError: LocalizedError {
         case .wrongHost: return "This connection belongs to a different Mac. Pair it again before sending."
         case .unsupportedProtocol: return "Update the Mac companion to a compatible Genesis version."
         case .invalidResponse: return "The companion returned an unexpected response."
-        case let .server(code, message): return code == 401 ? "Pairing expired or was revoked. Pair this Mac again." : message
+        case let .server(code, message):
+            if code == 401 { return "Pairing expired or was revoked. Pair this Mac again." }
+            if code == 502 { return "Could not reach the Mac's Genesis companion (502). Open Genesis Agent Micro Controller on the selected Mac, then tap Refresh." }
+            return message
         case let .capability(action): return "\(action) is not available for this Mac and provider yet."
         case .unresolvedSend: return "The previous Send is still unconfirmed. Check its receipt before sending another prompt."
         }

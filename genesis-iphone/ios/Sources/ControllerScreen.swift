@@ -567,7 +567,7 @@ struct ControllerScreen: View {
         let color = GenesisPalette.color(index)
         let assigned = store.profile.slots.contains { $0.index == index && $0.kind != "empty" }
         return ZStack {
-            KeySurface(color: color, illuminated: selected, scale: scale, tinted: assigned)
+            KeySurface(color: color, illuminated: selected, scale: scale, tinted: assigned, pulsing: selected)
             VStack(spacing: 5 * scale) {
                 HStack(spacing: 4 * scale) {
                     Circle().fill(color.opacity(assigned ? 1 : 0.45))
@@ -794,25 +794,42 @@ private struct FrostedControlSurface: View {
     var illuminated = false
     var scale: CGFloat = 1
     var tinted = false
+    var pulsing = false
     @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @Environment(\.colorSchemeContrast) private var contrast
+    @Environment(\.scenePhase) private var scenePhase
 
     private var shape: RoundedRectangle { RoundedRectangle(cornerRadius: 15 * scale, style: .continuous) }
-    private var light: Double { illuminated ? 0.88 : tinted ? 0.58 : 0 }
+    @ViewBuilder var body: some View {
+        if pulsing && illuminated {
+            // Only the confirmed selected slot breathes. Its timeline is local
+            // to this decorative surface, never controller state or actions.
+            TimelineView(.animation(minimumInterval: 1.0 / 20.0, paused: scenePhase != .active || reduceMotion)) { context in
+                let phase = reduceMotion || scenePhase != .active ? 0.85 : (sin(context.date.timeIntervalSinceReferenceDate * .pi / 2.8) + 1) / 2
+                surface(pulse: phase)
+            }
+        } else {
+            surface(pulse: 0)
+        }
+    }
 
-    var body: some View {
-        ZStack {
+    private func surface(pulse: Double) -> some View {
+        let selected = pulsing && illuminated
+        let light = selected ? 0.90 + pulse * 0.10 : illuminated ? 0.88 : tinted ? 0.58 : 0
+        let halo = selected ? 0.58 + pulse * 0.30 : illuminated ? 0.62 : tinted ? 0.30 : 0
+        let haloRadius = CGFloat(selected ? 11.0 + pulse * 4 : 10)
+        return ZStack {
             shape.fill(Color(white: 0.86))
                 .shadow(color: .black.opacity(0.14), radius: 2 * scale, x: 0, y: 3 * scale)
-                .shadow(color: color.opacity(illuminated ? 0.62 : tinted ? 0.30 : 0), radius: 10 * scale, x: 0, y: 2 * scale)
+                .shadow(color: color.opacity(halo), radius: haloRadius * scale, x: 0, y: 2 * scale)
             if reduceTransparency {
                 shape.fill(Color(white: 0.97))
             } else {
                 shape.fill(.ultraThinMaterial)
                 shape.fill(.white.opacity(0.35))
             }
-            shape.fill(color.opacity(illuminated ? 0.10 : tinted ? 0.05 : 0))
+            shape.fill(color.opacity(selected ? 0.14 + pulse * 0.06 : illuminated ? 0.10 : tinted ? 0.05 : 0))
             shape.fill(RadialGradient(colors: [color.opacity(light), color.opacity(light * 0.52), .clear],
                                       center: .bottom, startRadius: 0, endRadius: 78 * scale))
             shape.fill(LinearGradient(colors: [.white.opacity(0.55), .white.opacity(0.06), .clear],
@@ -820,6 +837,9 @@ private struct FrostedControlSurface: View {
             shape.strokeBorder(LinearGradient(colors: [.white.opacity(0.95), .white.opacity(0.45), color.opacity(illuminated ? 0.85 : tinted ? 0.62 : 0.10)],
                                                startPoint: .topLeading, endPoint: .bottomTrailing), lineWidth: 1.2 * scale)
             shape.inset(by: 2.5 * scale).strokeBorder(.white.opacity(0.35), lineWidth: 0.6 * scale)
+            if selected {
+                shape.inset(by: 3.5 * scale).strokeBorder(.white.opacity(0.25 + pulse * 0.30), lineWidth: 1.1 * scale)
+            }
             if contrast == .increased {
                 shape.strokeBorder(GenesisPalette.ink.opacity(0.6), lineWidth: 1.2 * scale)
             }
@@ -835,11 +855,12 @@ struct KeySurface: View {
     var illuminated = false
     var scale: CGFloat = 1
     var tinted = false
+    var pulsing = false
     @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
 
     var body: some View {
         ZStack {
-            FrostedControlSurface(color: color, illuminated: illuminated, scale: scale, tinted: tinted)
+            FrostedControlSurface(color: color, illuminated: illuminated, scale: scale, tinted: tinted, pulsing: pulsing)
             if let artwork = UIImage(named: "ControllerKey") {
                 Image(uiImage: artwork).renderingMode(.original).resizable().scaledToFit()
                     .scaleEffect(1.15).opacity(reduceTransparency ? 0.30 : tinted || illuminated ? 0.14 : 0.22)
