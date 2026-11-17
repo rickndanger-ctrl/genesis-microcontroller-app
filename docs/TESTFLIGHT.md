@@ -11,7 +11,9 @@ Agent Micro Controller is being prepared for iPhone and iPad distribution throug
 - **Listing preparation:** review demo notes saved, reviewer sign-in disabled, and App Store release set to manual. The initial store-version draft remains 1.0; the TestFlight candidate is 0.5.2 (32).
 - **Owner-approved upload completed:** 0.5.2 (32) was distribution-signed and uploaded on November 16, 2026 at 22:08 Pacific. Xcode returned `EXPORT SUCCEEDED` and `Upload succeeded`. The copied IPA is `genesis-iphone/build/appstore-build32/AgentMicroController-0.5.2-32.ipa`; its signature, version and embedded privacy manifest verify. Apple processing is verified `VALID`; App Store Connect reports `READY_FOR_BETA_TESTING` internally and `READY_FOR_BETA_SUBMISSION` externally.
 - **Apple build record:** `b293dc9c-448c-40e4-8995-262c518039bf`, version 0.5.2, build 32, uploaded November 16, 2026 at 22:08:48 Pacific, expires February 14, 2027.
-- **Not yet done:** assigning testers, external Beta App Review, public TestFlight link, or App Store review/release.
+- **Build 37 (0.7.2) uploaded and processed:** uploaded November 17, 2026 at 13:03 Pacific after an App Store Connect outage (the first three tries got HTTP 500 from Apple), processed as VALID by 13:07, expires February 15, 2027. It is the build with the status lights, deck themes and focused hints, and the same binary that is installed on the owner's iPhone and iPad.
+- **Internal testing set up:** an internal group "Internal testers" with access to all builds, so each new build reaches it automatically. The account holder was added at the owner's request and invited by Apple. Build 37 is `IN_BETA_TESTING` for internal testers.
+- **Not yet done:** external testers, external Beta App Review, public TestFlight link, or App Store review/release.
 - **Separate later decisions:** adding external testers, submitting for Beta App Review and enabling a public TestFlight link. None is implied by approving an upload. App Store release is also separate.
 
 ## Review notes (paste into "Beta App Review Information")
@@ -49,6 +51,10 @@ xcodebuild \
 ```
 
 The archive is a build artifact, not an uploaded TestFlight build. App Store distribution export must use the appropriate distribution signing and provisioning. Anyone building their own app from source must use their own bundle identifier and signing team.
+
+## Uploading a new build
+
+Archive with `DEVELOPMENT_TEAM=7FQA384X2F`, then `xcodebuild -exportArchive` with `ExportOptions-AppStoreConnect.plist` and the saved App Store Connect key (`-authenticationKeyPath/-authenticationKeyID/-authenticationKeyIssuerID`). Raise `CURRENT_PROJECT_VERSION` first: Apple refuses a build number it already has. New builds go to the internal group on their own once processed.
 
 ## Remaining release steps
 
