@@ -68,10 +68,15 @@ enum SelfCheck {
                    ok: "One message box found.",
                    none: "No message box is showing. Open a session in Claude.",
                    many: "More than one message box is showing, so the target is ambiguous."),
-            single("claude", "Send control", claude.sendOrStopButtons,
-                   ok: "The Send control was found.",
-                   none: "The Send control was not found. Claude\u{2019}s layout may have changed.",
-                   many: "More than one Send control was found, so the target is ambiguous. Claude\u{2019}s layout may have changed."),
+            // Claude only shows Send once there is a draft in the box, so its
+            // absence beside an empty message box is the normal resting state.
+            claude.sendOrStopButtons == 0 && claude.promptFields == 1
+                ? SelfCheckItem(provider: "claude", name: "Send control", ok: true,
+                                detail: "Not showing yet. Claude adds it once a draft is in the message box.")
+                : single("claude", "Send control", claude.sendOrStopButtons,
+                         ok: "The Send control was found.",
+                         none: "The Send control was not found. Claude\u{2019}s layout may have changed.",
+                         many: "More than one Send control was found, so the target is ambiguous. Claude\u{2019}s layout may have changed."),
             single("claude", "Model chooser", claude.modelChoosers,
                    ok: "The model chooser was found.",
                    none: "The model chooser was not found. Claude\u{2019}s layout may have changed.",

@@ -67,15 +67,40 @@ enum MuseChatList {
     /// no header, a way back to the main chat, and the plain message box.
     static func openChat(toggle: String?, hasBackToMain: Bool, boxLabels: [String]) -> String? {
         if let toggle { return openChat(fromToggle: toggle) }
-        return hasBackToMain && boxLabels == [messageBoxLabel(for: unnamedSideChat)] ? unnamedSideChat : nil
+        let plain = boxLabels.count == 1 && messageBox(boxLabels[0]) == MessageBox(chat: nil, answering: false)
+        return hasBackToMain && plain ? unnamedSideChat : nil
     }
 
-    /// What Muse's message box is called while it belongs to this chat. The
-    /// box names its chat, which is checked before anything is typed. The main
-    /// chat and an unnamed side chat share the plain label, so those two are
-    /// told apart by `openChat(toggle:hasBackToMain:boxLabels:)`, never by the box.
-    static func messageBoxLabel(for title: String) -> String {
-        title == mainChat || title == unnamedSideChat ? "Message Attach file\nSend" : "Message in \(title) Attach file\nSend"
+    /// Muse's message box, as read from its label.
+    struct MessageBox: Equatable {
+        /// The chat it names, or nil for the plain box used by the main chat
+        /// and by an unnamed side chat.
+        let chat: String?
+        /// Its Send has become Stop: Muse is answering.
+        let answering: Bool
+
+        func belongs(to title: String) -> Bool {
+            title == MuseChatList.mainChat || title == MuseChatList.unnamedSideChat ? chat == nil : chat == MuseChatList.normalized(title)
+        }
+    }
+
+    /// Reads the message box's label by its parts. Muse merges the box into
+    /// one control whose label lists what is inside it: "Message", then "in"
+    /// and the chat's title for a side chat, then "Attach file", then in some
+    /// versions "Dictate a message", then "Send" or, while Muse answers,
+    /// "Stop". Versions differ in the separators and in what sits in the
+    /// middle, so the whole label is never compared: 11.1 reads
+    /// "Message Attach file Dictate a message Send" where 12.1 reads
+    /// "Message Attach file\nSend".
+    static func messageBox(_ label: String) -> MessageBox? {
+        let text = normalized(label)
+        guard text.hasPrefix("Message"), let attach = text.range(of: " Attach file") else { return nil }
+        let answering: Bool
+        if text.hasSuffix(" Send") { answering = false } else if text.hasSuffix(" Stop") { answering = true } else { return nil }
+        let head = String(text[..<attach.lowerBound])
+        if head == "Message" { return MessageBox(chat: nil, answering: answering) }
+        guard head.hasPrefix("Message in "), head.count > "Message in ".count else { return nil }
+        return MessageBox(chat: String(head.dropFirst("Message in ".count)), answering: answering)
     }
 
     /// Whitespace varies between what was pasted and what the page hands back,
@@ -105,11 +130,6 @@ enum MuseChatList {
     /// Delivery is confirmed by the draft appearing once more than it did
     /// before Return, so an identical older message cannot stand in for it.
     static func showsAsSent(before: Int, after: Int) -> Bool { after > before }
-
-    /// While Muse answers, the box's Send becomes Stop.
-    static func answeringBoxLabel(for title: String) -> String {
-        String(messageBoxLabel(for: title).dropLast("Send".count)) + "Stop"
-    }
 
     /// Muse re-renders some text when it is sent: markdown loses its marks
     /// and a link becomes its own element, so the exact draft never shows in

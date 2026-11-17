@@ -382,6 +382,13 @@ import CoreImage.CIFilterBuiltins
                 lastResult=receipt.message;return .json(receipt)
             }
             if request.method=="GET",path=="/v1/diagnostics/selfcheck" {return .json(await selfCheck())}
+            if request.method=="GET",path=="/v1/diagnostics/outline" {
+                // Control names only, for working out what screen an app is on.
+                let bundles=["claude":access.bundle,"muse":MuseAccess.bundle,"codex":"com.openai.codex"]
+                guard let bundle=bundles[parameter("provider")] else{return .error(422,"Unknown provider.")}
+                guard !isLocked,AXIsProcessTrusted() else{return .error(423,"Unlock the Mac and enable Accessibility first.")}
+                return .json(["lines":MuseAccess.outline(bundle:bundle)])
+            }
             if request.method=="GET",path=="/v1/diagnostics/activity" {return .json(RemoteActivity(entries:activity?.recent(100) ?? []))}
             if request.method=="GET",path.hasPrefix("/v1/commands/") {
                 let id=String(path.dropFirst("/v1/commands/".count))

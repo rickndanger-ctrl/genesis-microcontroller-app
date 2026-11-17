@@ -90,8 +90,12 @@ import Foundation
         expect(twoBoxes?.ok == false && twoBoxes?.detail == "More than one message box is showing, so the target is ambiguous.", "Two message boxes are ambiguous")
 
         expect(item(run(claude(sends: 1)), "Send control")?.ok == true, "Exactly one send control passes")
-        let noSend = item(run(claude(sends: 0)), "Send control")
-        expect(noSend?.ok == false && noSend?.detail.contains("not found") == true && noSend?.detail.contains("layout may have changed") == true, "No send control says it was not found and the layout may have changed")
+        let resting = item(run(claude(sends: 0)), "Send control")
+        expect(resting?.ok == true && resting?.detail == "Not showing yet. Claude adds it once a draft is in the message box.", "No send control beside one empty message box is Claude's normal resting state")
+        let noSend = item(run(claude(prompts: 0, sends: 0)), "Send control")
+        expect(noSend?.ok == false && noSend?.detail.contains("not found") == true && noSend?.detail.contains("layout may have changed") == true, "No send control and no message box says it was not found and the layout may have changed")
+        let noSendTwoBoxes = item(run(claude(prompts: 2, sends: 0)), "Send control")
+        expect(noSendTwoBoxes?.ok == false, "No send control with two message boxes is not excused")
         let manySend = item(run(claude(sends: 3)), "Send control")
         expect(manySend?.ok == false && manySend?.detail.contains("ambiguous") == true && manySend?.detail.contains("layout may have changed") == true, "Several send controls are ambiguous and may mean a layout change")
 

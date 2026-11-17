@@ -38,8 +38,18 @@ import Foundation
         expect(MuseChatList.openChat(fromToggle: "Trip planning Unread chats Open chat and side chats") == "Trip planning", "A side chat's header starts with its title")
         expect(MuseChatList.openChat(fromToggle: "Trip planning Open chat and side chats") == "Trip planning", "A side chat's header without the unread marker")
         expect(MuseChatList.openChat(fromToggle: "Open chat and side chats") == nil && MuseChatList.openChat(fromToggle: "Invite") == nil, "Any other button names no chat")
-        expect(MuseChatList.messageBoxLabel(for: "Main chat") == "Message Attach file\nSend", "The main chat's message box has no chat name")
-        expect(MuseChatList.messageBoxLabel(for: "Trip planning") == "Message in Trip planning Attach file\nSend", "A side chat's message box names it")
+        typealias Box = MuseChatList.MessageBox
+        expect(MuseChatList.messageBox("Message Attach file\nSend") == Box(chat: nil, answering: false), "The plain message box in Muse 12 names no chat")
+        expect(MuseChatList.messageBox("Message Attach file Dictate a message Send") == Box(chat: nil, answering: false), "Muse 11 lists Dictate inside the same plain box")
+        expect(MuseChatList.messageBox("Message in Trip planning Attach file\nSend") == Box(chat: "Trip planning", answering: false), "A side chat's message box names it")
+        expect(MuseChatList.messageBox("Message in Trip planning Attach file Dictate a message Send")?.chat == "Trip planning", "A side chat's box names it in Muse 11 too")
+        expect(MuseChatList.messageBox("Message Attach file\nStop") == Box(chat: nil, answering: true), "Stop in place of Send means Muse is answering")
+        expect(MuseChatList.messageBox("Message in Trip planning Attach file Dictate a message Stop") == Box(chat: "Trip planning", answering: true), "A side chat's box while Muse answers")
+        expect(MuseChatList.messageBox("Search") == nil && MuseChatList.messageBox("Message Send") == nil && MuseChatList.messageBox("Message Attach file") == nil, "Anything missing a part is not the message box")
+        expect(MuseChatList.messageBox("Message in  Attach file Send") == nil, "A box that names an empty chat is not trusted")
+        expect(Box(chat: nil, answering: false).belongs(to: "Main chat") && Box(chat: nil, answering: false).belongs(to: "New side chat"), "The plain box belongs to the main chat or an unnamed side chat")
+        expect(!Box(chat: nil, answering: false).belongs(to: "Trip planning") && !Box(chat: "Trip planning", answering: false).belongs(to: "Main chat"), "A plain box never belongs to a named chat, nor a named box to the main chat")
+        expect(Box(chat: "Trip planning", answering: false).belongs(to: "Trip  planning") && !Box(chat: "Trip planning", answering: false).belongs(to: "Trip"), "A named box belongs only to its own chat, spacing aside")
 
         let plain = "Message Attach file\nSend"
         expect(MuseChatList.openChat(toggle: nil, hasBackToMain: true, boxLabels: [plain]) == "New side chat", "No header, a way back and the plain box is an unnamed side chat")
@@ -48,7 +58,8 @@ import Foundation
         expect(MuseChatList.openChat(toggle: nil, hasBackToMain: true, boxLabels: []) == nil && MuseChatList.openChat(toggle: nil, hasBackToMain: true, boxLabels: [plain, plain]) == nil, "No box or two boxes is unknown")
         expect(MuseChatList.openChat(toggle: nil, hasBackToMain: true, boxLabels: ["Message in Trip planning Attach file\nSend"]) == nil, "A named box without its header is unknown")
         expect(MuseChatList.openChat(toggle: "Trip planning Open chat and side chats", hasBackToMain: true, boxLabels: [plain]) == "Trip planning", "A header always wins")
-        expect(MuseChatList.messageBoxLabel(for: "New side chat") == plain, "An unnamed side chat uses the plain message box")
+        expect(MuseChatList.openChat(toggle: nil, hasBackToMain: true, boxLabels: ["Message Attach file Dictate a message Send"]) == "New side chat", "The older plain box is recognised as an unnamed side chat as well")
+        expect(MuseChatList.openChat(toggle: nil, hasBackToMain: true, boxLabels: ["Message Attach file\nStop"]) == nil, "A box that is answering is not a fresh unnamed chat")
         expect(MuseChatList.chat(row("New side chat")) == nil, "The panel's New side chat button is still not a chat row")
 
         let draft = "Show me what changed.\nThen list what is left."
@@ -67,8 +78,6 @@ import Foundation
         expect(MuseChatList.deliveries(in: history, prompt: "  ") == 0, "A blank prompt matches nothing")
         expect(MuseChatList.showsAsSent(before: 1, after: 2) && MuseChatList.showsAsSent(before: 0, after: 1), "One more appearance than before confirms this send")
         expect(!MuseChatList.showsAsSent(before: 1, after: 1) && !MuseChatList.showsAsSent(before: 2, after: 1), "An identical older message does not confirm it")
-        expect(MuseChatList.answeringBoxLabel(for: "Main chat") == "Message Attach file\nStop", "The main chat's box reads Stop while Muse answers")
-        expect(MuseChatList.answeringBoxLabel(for: "Trip planning") == "Message in Trip planning Attach file\nStop", "A side chat's box reads Stop while Muse answers")
         expect(MuseChatList.deliveredByEffect(entriesBefore: 10, entriesAfter: 12, answering: true, boxEmpty: false), "A new entry and Muse answering confirms a re-rendered message")
         expect(MuseChatList.deliveredByEffect(entriesBefore: 10, entriesAfter: 11, answering: false, boxEmpty: true), "A new entry and an emptied box confirms it too")
         expect(!MuseChatList.deliveredByEffect(entriesBefore: 10, entriesAfter: 10, answering: true, boxEmpty: true), "No new entry is never a delivery")
