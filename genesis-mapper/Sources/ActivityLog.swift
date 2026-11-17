@@ -113,3 +113,8 @@ final class ActivityLog {
         }
     }
 }
+
+/// The newest activity as the companion reports it.
+struct RemoteActivity: Codable {
+    var entries: [ActivityEntry]
+}

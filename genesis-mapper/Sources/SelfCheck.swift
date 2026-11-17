@@ -224,3 +224,11 @@ enum SelfCheck {
         provider.prefix(1).uppercased() + provider.dropFirst()
     }
 }
+
+/// The result of "Check this Mac" as the companion reports it.
+struct RemoteSelfCheck: Codable {
+    var checkedAt: Date
+    var companionVersion: String
+    var summary: String
+    var items: [SelfCheckItem]
+}
