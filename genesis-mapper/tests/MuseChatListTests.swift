@@ -41,6 +41,16 @@ import Foundation
         expect(MuseChatList.messageBoxLabel(for: "Main chat") == "Message Attach file\nSend", "The main chat's message box has no chat name")
         expect(MuseChatList.messageBoxLabel(for: "Trip planning") == "Message in Trip planning Attach file\nSend", "A side chat's message box names it")
 
+        let plain = "Message Attach file\nSend"
+        expect(MuseChatList.openChat(toggle: nil, hasBackToMain: true, boxLabels: [plain]) == "New side chat", "No header, a way back and the plain box is an unnamed side chat")
+        expect(MuseChatList.openChat(toggle: "Chats Open chat and side chats", hasBackToMain: false, boxLabels: [plain]) == "Main chat", "The same plain box under the Chats header is the main chat")
+        expect(MuseChatList.openChat(toggle: nil, hasBackToMain: false, boxLabels: [plain]) == nil, "Without a way back the open chat is unknown, not assumed")
+        expect(MuseChatList.openChat(toggle: nil, hasBackToMain: true, boxLabels: []) == nil && MuseChatList.openChat(toggle: nil, hasBackToMain: true, boxLabels: [plain, plain]) == nil, "No box or two boxes is unknown")
+        expect(MuseChatList.openChat(toggle: nil, hasBackToMain: true, boxLabels: ["Message in Trip planning Attach file\nSend"]) == nil, "A named box without its header is unknown")
+        expect(MuseChatList.openChat(toggle: "Trip planning Open chat and side chats", hasBackToMain: true, boxLabels: [plain]) == "Trip planning", "A header always wins")
+        expect(MuseChatList.messageBoxLabel(for: "New side chat") == plain, "An unnamed side chat uses the plain message box")
+        expect(MuseChatList.chat(row("New side chat")) == nil, "The panel's New side chat button is still not a chat row")
+
         let draft = "Show me what changed.\nThen list what is left."
         expect(MuseChatList.holdsDraft("Show me what changed.\n\nThen list what is left.\n", prompt: draft), "Line breaks the page reshapes still count as the same draft")
         expect(MuseChatList.holdsDraft("Show  me what changed. Then list what is left.", prompt: draft), "Runs of whitespace compare as one space")
@@ -57,6 +67,12 @@ import Foundation
         expect(MuseChatList.deliveries(in: history, prompt: "  ") == 0, "A blank prompt matches nothing")
         expect(MuseChatList.showsAsSent(before: 1, after: 2) && MuseChatList.showsAsSent(before: 0, after: 1), "One more appearance than before confirms this send")
         expect(!MuseChatList.showsAsSent(before: 1, after: 1) && !MuseChatList.showsAsSent(before: 2, after: 1), "An identical older message does not confirm it")
+        expect(MuseChatList.answeringBoxLabel(for: "Main chat") == "Message Attach file\nStop", "The main chat's box reads Stop while Muse answers")
+        expect(MuseChatList.answeringBoxLabel(for: "Trip planning") == "Message in Trip planning Attach file\nStop", "A side chat's box reads Stop while Muse answers")
+        expect(MuseChatList.deliveredByEffect(entriesBefore: 10, entriesAfter: 12, answering: true, boxEmpty: false), "A new entry and Muse answering confirms a re-rendered message")
+        expect(MuseChatList.deliveredByEffect(entriesBefore: 10, entriesAfter: 11, answering: false, boxEmpty: true), "A new entry and an emptied box confirms it too")
+        expect(!MuseChatList.deliveredByEffect(entriesBefore: 10, entriesAfter: 10, answering: true, boxEmpty: true), "No new entry is never a delivery")
+        expect(!MuseChatList.deliveredByEffect(entriesBefore: 10, entriesAfter: 11, answering: false, boxEmpty: false), "A new entry alone could be Muse speaking first")
         print("Muse chat list: \(passed) checks passed")
     }
 }

@@ -57,10 +57,25 @@ enum MuseChatList {
         return title.isEmpty ? nil : title == "Chats" ? mainChat : title
     }
 
+    /// A side chat Muse has just opened and not yet named. It has no row in
+    /// the panel and no header; Muse names it after its first message. It is
+    /// offered under this title so a draft can be sent into it straight away.
+    static let unnamedSideChat = "New side chat"
+
+    /// The chat on screen, from what the window shows: the header's name when
+    /// there is a header; otherwise an unnamed side chat, recognised by having
+    /// no header, a way back to the main chat, and the plain message box.
+    static func openChat(toggle: String?, hasBackToMain: Bool, boxLabels: [String]) -> String? {
+        if let toggle { return openChat(fromToggle: toggle) }
+        return hasBackToMain && boxLabels == [messageBoxLabel(for: unnamedSideChat)] ? unnamedSideChat : nil
+    }
+
     /// What Muse's message box is called while it belongs to this chat. The
-    /// box names its chat, which is checked before anything is typed.
+    /// box names its chat, which is checked before anything is typed. The main
+    /// chat and an unnamed side chat share the plain label, so those two are
+    /// told apart by `openChat(toggle:hasBackToMain:boxLabels:)`, never by the box.
     static func messageBoxLabel(for title: String) -> String {
-        title == mainChat ? "Message Attach file\nSend" : "Message in \(title) Attach file\nSend"
+        title == mainChat || title == unnamedSideChat ? "Message Attach file\nSend" : "Message in \(title) Attach file\nSend"
     }
 
     /// Whitespace varies between what was pasted and what the page hands back,
@@ -90,4 +105,18 @@ enum MuseChatList {
     /// Delivery is confirmed by the draft appearing once more than it did
     /// before Return, so an identical older message cannot stand in for it.
     static func showsAsSent(before: Int, after: Int) -> Bool { after > before }
+
+    /// While Muse answers, the box's Send becomes Stop.
+    static func answeringBoxLabel(for title: String) -> String {
+        String(messageBoxLabel(for: title).dropLast("Send".count)) + "Stop"
+    }
+
+    /// Muse re-renders some text when it is sent: markdown loses its marks
+    /// and a link becomes its own element, so the exact draft never shows in
+    /// the history. For those, delivery is confirmed by what sending causes:
+    /// the history gains an entry, and either Muse starts answering or the
+    /// message box is seen to be empty. Neither alone is enough.
+    static func deliveredByEffect(entriesBefore: Int, entriesAfter: Int, answering: Bool, boxEmpty: Bool) -> Bool {
+        entriesAfter > entriesBefore && (answering || boxEmpty)
+    }
 }

@@ -16,6 +16,8 @@ final class RemoteHTTPServer: @unchecked Sendable {
     let queue = DispatchQueue(label:"genesis.remote.http",qos:.userInitiated)
     private var listener:NWListener?
     private var peers:[UUID:NWConnection] = [:]
+    /// Connections that have not yet sent a complete request. Touched only on `queue`.
+    private var waiting:Set<UUID> = []
     private let token:String
     private let port:UInt16
     private let handler:@MainActor (RemoteHTTPRequest) async -> RemoteHTTPResponse
@@ -40,26 +42,35 @@ final class RemoteHTTPServer: @unchecked Sendable {
             guard self.peers.count<12 else {connection.cancel();return}
             let id = UUID(); self.peers[id] = connection
             connection.stateUpdateHandler = { [weak self] state in
-                switch state {case .cancelled,.failed(_):self?.peers.removeValue(forKey:id);default:break}
+                switch state {case .cancelled,.failed(_):self?.peers.removeValue(forKey:id);self?.waiting.remove(id);default:break}
             }
             connection.start(queue:self.queue)
-            self.queue.asyncAfter(deadline:.now()+20) { [weak self,weak connection] in connection?.cancel();self?.peers.removeValue(forKey:id) }
-            self.receive(connection,accumulated:Data())
+            self.waiting.insert(id)
+            // A connection that has not delivered a whole request within five
+            // seconds is dropped, so stalled or abandoned connections cannot
+            // hold the few slots there are. A request being served keeps its 20.
+            self.queue.asyncAfter(deadline:.now()+5) { [weak self,weak connection] in
+                guard let self,self.waiting.contains(id) else{return}
+                connection?.cancel();self.peers.removeValue(forKey:id);self.waiting.remove(id)
+            }
+            self.queue.asyncAfter(deadline:.now()+20) { [weak self,weak connection] in connection?.cancel();self?.peers.removeValue(forKey:id);self?.waiting.remove(id) }
+            self.receive(connection,accumulated:Data(),id:id)
         }
         listener.start(queue:queue)
     }
     func stop() { queue.async { [weak self] in self?.listener?.cancel();self?.listener=nil;self?.peers.values.forEach{$0.cancel()};self?.peers.removeAll() } }
-    private func receive(_ connection:NWConnection,accumulated:Data) {
+    private func receive(_ connection:NWConnection,accumulated:Data,id:UUID) {
         connection.receive(minimumIncompleteLength:1,maximumLength:16_384) { [weak self] data,_,complete,error in
             guard let self else {connection.cancel();return}
             var all=accumulated;if let data {all.append(data)}
             do {
                 if let request=try RemoteHTTPRequest.parse(all) {
+                    self.waiting.remove(id)
                     guard RemotePolicy.equalToken(request.headers["authorization"] ?? "","Bearer "+self.token) else {self.send(.error(401,"Pair this iPhone with the Mac first."),on:connection);return}
                     if ["POST","PUT"].contains(request.method),request.headers["content-type"]?.lowercased().hasPrefix("application/json") != true {self.send(.error(415,"JSON content type required."),on:connection);return}
                     Task { @MainActor in let response = await self.handler(request);self.queue.async {self.send(response,on:connection)} }
                 } else if complete || error != nil {self.send(.error(400,"Incomplete request."),on:connection)}
-                else {self.receive(connection,accumulated:all)}
+                else {self.receive(connection,accumulated:all,id:id)}
             } catch let error as RemoteFault {self.send(.error(error.status,error.message),on:connection)}
             catch {self.send(.error(400,"Invalid request."),on:connection)}
         }

@@ -38,10 +38,17 @@ final class MuseAccess {
         /// The chat Muse is showing. The header names it whether or not the
         /// panel is open; the panel's own marker is the fallback.
         var current: String? {
-            toggleLabel.flatMap(MuseChatList.openChat(fromToggle:)) ?? MuseChatList.current(rows.map(\.row))?.title
+            MuseChatList.openChat(toggle: toggleLabel, hasBackToMain: !backToMain.isEmpty, boxLabels: boxLabels)
+                ?? MuseChatList.current(rows.map(\.row))?.title
         }
         var toggleLabel: String?
         var panel: AXUIElement?
+        var backToMain: [AXUIElement] = []
+        var boxLabels: [String] = []
+        /// Labels of message boxes whose Send has become Stop: Muse is answering.
+        var answering: [String] = []
+        var historyEntries: Int { history.map { children($0).count } ?? 0 }
+        var children: (AXUIElement) -> [AXUIElement] = { _ in [] }
     }
 
     var app: NSRunningApplication? { NSRunningApplication.runningApplications(withBundleIdentifier: Self.bundle).first }
@@ -77,6 +84,7 @@ final class MuseAccess {
         let root = AXUIElementCreateApplication(app.processIdentifier)
         AXUIElementSetMessagingTimeout(root, 0.4)
         var result = Snapshot()
+        result.children = { [unowned self] in self.children($0) }
         var queue: [(element: AXUIElement, inPanel: Bool, underHeading: Bool)] = [(root, false, false)], index = 0
         while index < queue.count && index < 6000 {
             let (element, inPanel, underHeading) = queue[index]; index += 1
@@ -92,7 +100,9 @@ final class MuseAccess {
                     if name == "New side chat" { result.newSideChat.append(element) }
                     else { result.rows.append((element, .init(label: name, current: string(element, "AXARIACurrent") == "page"))) }
                 } else if name.hasSuffix(MuseChatList.panelToggleSuffix) { result.toggle = element; result.toggleLabel = name }
-                if name.hasSuffix(Self.boxSuffix) { result.boxes.append(element) }
+                if name.hasSuffix(Self.boxSuffix) { result.boxes.append(element); result.boxLabels.append(name) }
+                if name.hasSuffix("Attach file\nStop") { result.answering.append(name) }
+                if name == "Back to main chat" { result.backToMain.append(element) }
                 if name == "Call your assistant" { result.call.append(element) }
             }
             for child in children(element) { queue.append((child, panel, role == "AXHeading")) }
@@ -101,8 +111,23 @@ final class MuseAccess {
     }
 
     /// A snapshot with the chat panel showing, opening it if it is closed.
-    @MainActor private func panel() async -> Snapshot? {
-        guard let first = snapshot() else { return nil }
+    /// An unnamed side chat has no way to the panel except back through the
+    /// main chat, which abandons it, so that step is taken only when asked.
+    @MainActor private func panel(leavingUnnamedChat: Bool = false) async -> Snapshot? {
+        guard var first = snapshot() else { return nil }
+        if first.toggle == nil, !first.panelOpen, leavingUnnamedChat, first.backToMain.count == 1 {
+            let back = first.backToMain[0]
+            _ = AXUIElementPerformAction(back, kAXPressAction as CFString)
+            for attempt in 0..<12 {
+                try? await Task.sleep(nanoseconds: 150_000_000)
+                if let fresh = snapshot(), fresh.toggle != nil { first = fresh; break }
+                // Muse ignores a press on some controls; fall back to a real click once.
+                if attempt == 5, await activate(), let pid = app?.processIdentifier, let area = frame(back) {
+                    let point = CGPoint(x: area.midX, y: area.midY)
+                    if isMuseWindow(at: point, pid: pid) { click(point) }
+                }
+            }
+        }
         guard !first.panelOpen, let toggle = first.toggle,
               AXUIElementPerformAction(toggle, kAXPressAction as CFString) == .success else { return first }
         for _ in 0..<10 {
@@ -112,8 +137,14 @@ final class MuseAccess {
         return snapshot()
     }
 
-    @MainActor func listing() async -> Listing? {
-        guard let shown = await panel(), shown.panelOpen else { return nil }
+    /// The chats that can be addressed. While an unnamed side chat is open
+    /// only that chat can be seen; pass `leavingUnnamedChat` when the caller
+    /// means to go somewhere else and needs the full list.
+    @MainActor func listing(leavingUnnamedChat: Bool = false) async -> Listing? {
+        if !leavingUnnamedChat, snapshot()?.current == MuseChatList.unnamedSideChat {
+            return Listing(chats: [.init(title: MuseChatList.unnamedSideChat, current: true, unread: false)], ambiguous: [])
+        }
+        guard let shown = await panel(leavingUnnamedChat: leavingUnnamedChat), shown.panelOpen else { return nil }
         let result = MuseChatList.chats(shown.rows.map(\.row))
         return Listing(chats: result.chats, ambiguous: result.ambiguous)
     }
@@ -144,6 +175,14 @@ final class MuseAccess {
 
     @MainActor func activate() async -> Bool {
         guard let app else { return false }
+        // A minimized window has nothing to click or type into. Whoever is
+        // holding the phone is not at the Mac to restore it, so do it here.
+        let root = AXUIElementCreateApplication(app.processIdentifier)
+        if let windows = value(root, kAXWindowsAttribute), CFGetTypeID(windows) == CFArrayGetTypeID() {
+            for window in (windows as? [AXUIElement]) ?? [] where (value(window, kAXMinimizedAttribute) as? Bool) == true {
+                AXUIElementSetAttributeValue(window, kAXMinimizedAttribute as CFString, kCFBooleanFalse)
+            }
+        }
         if isFrontmost { return true }
         NSApp.yieldActivation(to: app)
         if let url = app.bundleURL {
@@ -166,7 +205,11 @@ final class MuseAccess {
             _ = await activate()
             return .confirmed("Opened \(title).")
         }
-        guard let shown = await panel(), shown.panelOpen else { return .failed("Muse’s chat list could not be shown. Open Muse on this Mac and try again.") }
+        // An unnamed side chat exists only while it is on screen.
+        guard title != MuseChatList.unnamedSideChat else {
+            return .failed("That new side chat has since been named or closed. Choose it from the chat list.")
+        }
+        guard let shown = await panel(leavingUnnamedChat: true), shown.panelOpen else { return .failed("Muse’s chat list could not be shown. Open Muse on this Mac and try again.") }
         let matches = shown.rows.filter { MuseChatList.chat($0.row)?.title == title }
         guard matches.count == 1 else {
             return .failed(matches.isEmpty ? "This Muse chat is no longer in the chat list. Refresh its mapping; nothing was opened."
@@ -194,11 +237,23 @@ final class MuseAccess {
         return .failed("Muse took the click but did not show the chat. Nothing else was sent.")
     }
 
+    /// Opens a new, unnamed side chat and confirms Muse is showing it.
     @MainActor func newSideChat(contextIsCurrent: () -> Bool) async -> Outcome {
+        let opened = Outcome.confirmed("Opened a new side chat in Muse. Dictate or type a draft, then Send.")
+        if snapshot()?.current == MuseChatList.unnamedSideChat {
+            _ = await activate()
+            return opened
+        }
         guard let shown = await panel(), shown.panelOpen, shown.newSideChat.count == 1 else { return .failed("Muse is not showing its New side chat control.") }
         guard contextIsCurrent(), AXUIElementPerformAction(shown.newSideChat[0], kAXPressAction as CFString) == .success else { return .failed("Muse did not accept the press.") }
-        _ = await activate()
-        return .confirmed("Asked Muse for a new side chat. Choose it on the phone once Muse has named it.")
+        for _ in 0..<16 {
+            try? await Task.sleep(nanoseconds: 150_000_000)
+            if snapshot()?.current == MuseChatList.unnamedSideChat {
+                _ = await activate()
+                return opened
+            }
+        }
+        return .failed("Muse did not open a new side chat.")
     }
 
     @MainActor func startCall(contextIsCurrent: () -> Bool) async -> Outcome {
@@ -295,6 +350,9 @@ final class MuseAccess {
         guard await activate(), let pid = app?.processIdentifier else { return .failed("Muse could not be brought to the front on the Mac. Nothing was typed.") }
         // The message box names the chat it belongs to. It must be this one.
         let boxName = MuseChatList.messageBoxLabel(for: title)
+        if let busy = snapshot(), busy.boxes.isEmpty, !busy.answering.isEmpty {
+            return .failed("Muse is still answering. Wait for it to finish, then send again; nothing was typed.")
+        }
         guard let shown = snapshot(), shown.current == title, shown.boxes.count == 1, label(shown.boxes[0]) == boxName,
               let box = frame(shown.boxes[0]), box.width > 160 else {
             return .failed("Muse’s message box could not be matched to this chat. Nothing was typed.")
@@ -316,6 +374,7 @@ final class MuseAccess {
         func ready() -> Bool { contextIsCurrent() && isFrontmost && focusIsMessageBox(pid, named: boxName) }
         guard ready() else { return .failed("Muse’s message box did not take the cursor. Nothing was typed.") }
         guard await copyAll(pid) == nil else {
+            post(124, to: pid)               // leave their text unselected, as it was
             return .failed("Muse’s message box already contains a draft. Clear it on the Mac first; nothing was replaced or sent.")
         }
 
@@ -334,6 +393,7 @@ final class MuseAccess {
             return .failed("The Muse chat changed before Send. The draft is in Muse’s message box on the Mac; nothing was sent.")
         }
         let before = deliveries(of: prompt)
+        let entriesBefore = snapshot()?.historyEntries ?? 0
         if rehearsal {
             post(51, to: pid)                // the read-back left the draft selected: delete it
             try? await Task.sleep(nanoseconds: 300_000_000)
@@ -343,16 +403,27 @@ final class MuseAccess {
         post(124, to: pid)                   // right arrow: drop the selection
         post(36, to: pid)                    // return: send
 
-        // Once Return is pressed nothing more is typed. Muse relabels the box
-        // while it answers, so delivery is judged only by the message
-        // appearing in the chat once more than before.
+        // After Return nothing more is typed unless the box must be read
+        // once. Delivery is the draft appearing in the chat once more than
+        // before; for text Muse re-renders, it is the history gaining an entry
+        // while Muse starts to answer.
+        let named = title != MuseChatList.unnamedSideChat
+        let sent = Outcome.confirmed("Prompt sent to \(title) in Muse.")
+        var grew = false
         for _ in 0..<16 {
             try? await Task.sleep(nanoseconds: 300_000_000)
-            guard snapshot()?.current == title else { break }
-            if MuseChatList.showsAsSent(before: before, after: deliveries(of: prompt)) {
-                return .confirmed("Prompt sent to \(title) in Muse.")
-            }
+            guard let now = snapshot() else { break }
+            // Muse names a new side chat once its first message lands, so
+            // that chat is not expected to keep its placeholder title.
+            if named, now.current != title { break }
+            if MuseChatList.showsAsSent(before: before, after: deliveries(of: prompt)) { return sent }
+            grew = now.historyEntries > entriesBefore
+            let answering = named ? now.answering == [MuseChatList.answeringBoxLabel(for: title)] : now.answering.count == 1
+            if MuseChatList.deliveredByEffect(entriesBefore: entriesBefore, entriesAfter: now.historyEntries, answering: answering, boxEmpty: false) { return sent }
         }
+        // Muse may have answered and gone idle between looks. One read of the
+        // box settles it: empty with a new entry is sent; still full is not.
+        if grew, isFrontmost, focusIsMessageBox(pid, named: boxName), await copyAll(pid) == nil { return sent }
         return .uncertain("Send could not be confirmed. Check Muse on the Mac before sending again.")
     }
 }

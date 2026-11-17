@@ -182,7 +182,12 @@ final class ClaudeAccess {
     // Only click a freshly resolved, unobscured Claude navigation control.
     @MainActor func navigationClick(_ element: AXUIElement, app: NSRunningApplication, contextIsCurrent: (() -> Bool)? = nil) async -> Bool {
         guard (value(element,kAXEnabledAttribute) as? Bool) != false,
-              NSWorkspace.shared.frontmostApplication?.processIdentifier == app.processIdentifier,
+              NSWorkspace.shared.frontmostApplication?.processIdentifier == app.processIdentifier else {return false}
+        // A row further down a long list is not under any point on screen until
+        // it is scrolled to, and the hit test below would refuse it. Bring it
+        // into view first; the positions are read again after it settles.
+        if AXUIElementPerformAction(element,"AXScrollToVisible" as CFString) == .success {try? await Task.sleep(nanoseconds:220_000_000)}
+        guard NSWorkspace.shared.frontmostApplication?.processIdentifier == app.processIdentifier,
               let pv=value(element,kAXPositionAttribute), let sv=value(element,kAXSizeAttribute),
               CFGetTypeID(pv)==AXValueGetTypeID(), CFGetTypeID(sv)==AXValueGetTypeID() else {return false}
         var point=CGPoint.zero, size=CGSize.zero

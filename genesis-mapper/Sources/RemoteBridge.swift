@@ -142,9 +142,16 @@ import CoreImage.CIFilterBuiltins
         guard let pid=muse.app?.processIdentifier else{return result(.failed("Open Muse on this Mac first."))}
         func contextOK()->Bool {self.enabled && !self.isLocked && AXIsProcessTrusted() && self.muse.app?.processIdentifier==pid}
         if command.action=="nativeVoice" {return result(await muse.startCall(contextIsCurrent:contextOK))}
-        if command.action=="newChat" {return result(await muse.newSideChat(contextIsCurrent:contextOK))}
+        let unnamed=RemoteChat(id:RemotePolicy.chatID("muse",MuseChatList.unnamedSideChat),title:MuseChatList.unnamedSideChat,state:"Current")
+        if command.action=="newChat" {
+            // Hand the phone the new chat so a draft can go into it at once.
+            let outcome=await muse.newSideChat(contextIsCurrent:contextOK)
+            var receipt=result(outcome);if outcome.status=="confirmed" {receipt.activeChat=unnamed}
+            return receipt
+        }
         guard ["openChat","sendPrompt"].contains(command.action) else{return result(.failed("This action is not connected for Muse."))}
-        guard let id=command.chatID,let listing=await muse.listing() else{return result(.failed("Muse’s chat list could not be read. Open Muse on this Mac and refresh."))}
+        // Reaching any other chat from an unnamed side chat means leaving it.
+        guard let id=command.chatID,let listing=await muse.listing(leavingUnnamedChat:command.chatID != unnamed.id) else{return result(.failed("Muse’s chat list could not be read. Open Muse on this Mac and refresh."))}
         // The opaque ID only names a title. The fresh listing above decides
         // whether that title still points at exactly one chat.
         guard let target=listing.chats.first(where:{RemotePolicy.chatID("muse",$0.title)==id}) else {
@@ -315,7 +322,8 @@ import CoreImage.CIFilterBuiltins
                 let command=try JSONDecoder().decode(RemoteCommand.self,from:request.body)
                 try RemotePolicy.validate(command,hostID:store.hostID)
                 if let receipt=try store.previous(command) {return .json(receipt)}
-                guard !commandBusy else{return .error(503,"Another controller action is finishing. Nothing was sent.")}
+                // 409, not 503: the phone must be able to tell "refused, nothing ran" from "result unknown".
+                guard !commandBusy else{return .error(409,"Another controller action is finishing. Nothing was sent.")}
                 try store.begin(command);commandBusy=true
                 defer{commandBusy=false}
                 let receipt=await execute(command)

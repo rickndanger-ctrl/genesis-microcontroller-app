@@ -127,8 +127,18 @@ enum CodexNativeActions {
         guard let app=NSRunningApplication.runningApplications(withBundleIdentifier:bundle).first(where:{!$0.isTerminated}) else {
             return failed("Open Codex on this Mac before using its menu controls.")
         }
-        app.activate(options:[])
-        for _ in 0..<8 {
+        // The companion is never the active app when a phone presses a key, and
+        // macOS ignores a plain activate() from an app in the background. Hand
+        // activation over and ask the system to open the running app instead.
+        if NSWorkspace.shared.frontmostApplication?.processIdentifier != app.processIdentifier {
+            await MainActor.run {NSApp?.yieldActivation(to:app)}
+            app.activate(options:[])
+            if let url=app.bundleURL {
+                let configuration=NSWorkspace.OpenConfiguration();configuration.activates=true
+                _ = try? await NSWorkspace.shared.openApplication(at:url,configuration:configuration)
+            }
+        }
+        for _ in 0..<24 {
             guard isCurrent(),!Task.isCancelled else {return failed("The controller selection changed. No menu action ran.")}
             if NSWorkspace.shared.frontmostApplication?.processIdentifier==app.processIdentifier {break}
             try? await Task.sleep(nanoseconds:50_000_000)
@@ -153,7 +163,7 @@ enum CodexNativeActions {
             return .init(requested:true,message:"Requested Codex’s model picker. Choose a model in the open menu. If you changed Select effort’s keyboard shortcut in Codex, restore Control–Shift–M to use this control.")
         }
         guard let route else {return failed("The Codex menu action is unavailable.")}
-        let deadline=ProcessInfo.processInfo.systemUptime+1.5
+        var deadline=ProcessInfo.processInfo.systemUptime+1.5
         func value(_ e: AXUIElement,_ attribute: String) -> CFTypeRef? {
             guard ProcessInfo.processInfo.systemUptime<deadline else {return nil}
             AXUIElementSetMessagingTimeout(e,0.08)
@@ -161,9 +171,18 @@ enum CodexNativeActions {
             return AXUIElementCopyAttributeValue(e,attribute as CFString,&result) == .success ? result:nil
         }
         let root=AXUIElementCreateApplication(app.processIdentifier)
-        guard let raw=value(root,kAXMenuBarAttribute),CFGetTypeID(raw)==AXUIElementGetTypeID() else {
+        // An app that has just come to the front can take a moment to answer.
+        // Reading its menu bar once made the first press after a switch fail.
+        var found: CFTypeRef?
+        for _ in 0..<8 {
+            if let bar=value(root,kAXMenuBarAttribute),CFGetTypeID(bar)==AXUIElementGetTypeID() {found=bar;break}
+            guard isCurrent(),!Task.isCancelled else {return failed("The controller selection changed. No menu action ran.")}
+            try? await Task.sleep(nanoseconds:100_000_000)
+        }
+        guard let raw=found else {
             return failed("Codex's native menu is unavailable in this view.")
         }
+        deadline=ProcessInfo.processInfo.systemUptime+1.5
         let menuBar=raw as! AXUIElement
         let top=(value(menuBar,kAXChildrenAttribute) as? [AXUIElement] ?? []).filter {
             CodexNativeActionPolicy.normalized(value($0,kAXTitleAttribute) as? String ?? "")==CodexNativeActionPolicy.normalized(route.menu)
