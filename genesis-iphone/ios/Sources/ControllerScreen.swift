@@ -31,9 +31,12 @@ struct ControllerScreen: View {
     @Environment(\.dynamicTypeSize) private var dynamicTypeSize
 
     static let fullScreenKey = "controllerFullScreen"
+    /// Off hides every glasses control. See `GlassesFeature`.
+    @AppStorage private var glassesFeature: Bool
 
     init(store: ControllerStore) {
         self.store = store
+        _glassesFeature = AppStorage(wrappedValue: false, GlassesFeature.storageKey(demo: store.isDemo))
         // The demo always opens on the dashboard so previews and UI tests
         // start from one known layout.
         _fullScreenController = State(initialValue: !store.isDemo && UserDefaults.standard.bool(forKey: Self.fullScreenKey))
@@ -56,6 +59,8 @@ struct ControllerScreen: View {
     private var canChangeLayout: Bool {
         !heldTalk && !talkGestureActive && !store.isRecording && !store.isFinalizing && !chatDialActive && !artifactDialActive
     }
+    /// A draft is growing under dictation right now.
+    private var dictatingDraft: Bool { (store.isRecording || store.isFinalizing) && !store.draft.isEmpty }
     private var selectedComputerName: String { store.hosts.first { $0.id == store.selectedHostID }?.name ?? "Pair a Mac" }
 
     var body: some View {
@@ -247,6 +252,10 @@ struct ControllerScreen: View {
                             .font(.system(size: isPad ? 16 : 14)).lineLimit(2)
                             .foregroundStyle(store.draft.isEmpty ? GenesisPalette.dim : GenesisPalette.text)
                             .frame(maxWidth: .infinity, alignment: .leading)
+                            // Two lines cut a long dictation off at its start, hiding
+                            // the words being spoken. While listening, show its end.
+                            .opacity(dictatingDraft ? 0 : 1)
+                            .overlay { if dictatingDraft { LiveDraft(text: store.draft, size: isPad ? 16 : 14) } }
                     }.frame(minHeight: 54, alignment: .leading).contentShape(Rectangle())
                 }
                 .buttonStyle(.plain).disabled(!canChangeLayout)
@@ -283,8 +292,12 @@ struct ControllerScreen: View {
                 Label("Actions", systemImage: "square.grid.2x2").frame(minHeight: 44)
             }
             .buttonStyle(.bordered)
-            FocusedGlassesAccess(follow: store.glasses) {
-                ControllerSound.shared.keyClick(); showGlassesControls = true
+            if glassesFeature {
+                FocusedGlassesAccess(follow: store.glasses) {
+                    ControllerSound.shared.keyClick(); showGlassesControls = true
+                }
+            } else {
+                Spacer(minLength: 0)
             }
             Button { ControllerSound.shared.keyClick(); showSettings = true } label: {
                 Image(systemName: "slider.horizontal.3").frame(width: 44, height: 44).genesisPanel(radius: 14)
@@ -388,7 +401,7 @@ struct ControllerScreen: View {
             .buttonStyle(.plain)
         }
         composer
-        GlassesFollowPanel(store: store, follow: store.glasses)
+        if glassesFeature { GlassesFollowPanel(store: store, follow: store.glasses) }
         if let receipt = store.lastReceipt {
             Label(receipt.message, systemImage: receipt.statusIcon)
                 .font(isPad ? .subheadline : .caption)
@@ -839,6 +852,15 @@ struct ControllerScreen: View {
             }
             TextField(codexDraftOnly ? "Local draft — Send is not connected yet" : "Hold the microphone, or type a draft…", text: $store.draft, axis: .vertical)
                 .font(.system(size: isPad ? 17 : 14)).lineLimit(isPad ? 3...8 : 2...5).disabled(store.selectedChat == nil || store.isRecording || store.isFinalizing)
+                // The field shows its first lines and cannot scroll while it
+                // is disabled for dictation, so new words past the last line
+                // never appeared. The live view over it follows the newest.
+                // Faded out whole, not just its text, so spelling marks from
+                // typing cannot show through under different words. It is not
+                // taken to zero: a fully transparent field leaves the
+                // accessibility tree, and VoiceOver must still read the draft.
+                .opacity(dictatingDraft ? 0.02 : 1)
+                .overlay { if dictatingDraft { LiveDraft(text: store.draft, size: isPad ? 17 : 14) } }
                 .accessibilityLabel("Draft for selected chat")
                 .accessibilityIdentifier("controller.draft")
             HStack {
@@ -866,6 +888,28 @@ struct ControllerScreen: View {
                 Button("I checked — it did not arrive") { ControllerSound.shared.keyClick(); store.acknowledgeUncertainSend(wasSent: false) }
                 Button("Keep waiting", role: .cancel) { ControllerSound.shared.keyClick() }
             } message: { Text("This only resolves the saved receipt. Nothing is sent by choosing an answer.") }
+    }
+}
+
+/// The draft while it is being dictated, pinned to its newest line so the
+/// words just spoken are always in view. Display only: the field beneath it
+/// still owns the text and its accessibility.
+private struct LiveDraft: View {
+    let text: String
+    let size: CGFloat
+    var body: some View {
+        ScrollView(.vertical) {
+            Text(text).font(.system(size: size)).foregroundStyle(GenesisPalette.text)
+                .frame(maxWidth: .infinity, alignment: .leading)
+        }
+        // Follow the end as it grows, but sit at the top while the text is
+        // still shorter than the box, where the field beneath draws it.
+        .defaultScrollAnchor(.bottom, for: .initialOffset)
+        .defaultScrollAnchor(.bottom, for: .sizeChanges)
+        .defaultScrollAnchor(.top, for: .alignment)
+        .scrollIndicators(.hidden)
+        .allowsHitTesting(false)
+        .accessibilityHidden(true)
     }
 }
 

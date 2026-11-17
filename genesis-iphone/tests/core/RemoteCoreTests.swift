@@ -120,9 +120,35 @@ import Foundation
         expect(DeferredTap(target: .action("stop"), pressed: pressed).target != .action("modelAndEffort"), "A waiting key is identified by its action")
     }
 
+    static func glassesFeatureChecks() {
+        func fresh() -> UserDefaults {
+            let name = "genesis.glasses.\(UUID().uuidString)"
+            let defaults = UserDefaults(suiteName: name)!
+            defaults.removePersistentDomain(forName: name)
+            return defaults
+        }
+        let newInstall = fresh()
+        GlassesFeature.prepare(newInstall, demo: false, hasPairedMac: false)
+        expect(newInstall.object(forKey: GlassesFeature.key) as? Bool == false, "A fresh install starts with the glasses controls hidden")
+        GlassesFeature.prepare(newInstall, demo: false, hasPairedMac: true)
+        expect(newInstall.bool(forKey: GlassesFeature.key) == false, "Pairing later does not turn the glasses controls on by itself")
+        let upgrade = fresh()
+        GlassesFeature.prepare(upgrade, demo: false, hasPairedMac: true)
+        expect(upgrade.bool(forKey: GlassesFeature.key), "An install that already has a Mac keeps the glasses controls it had")
+        upgrade.set(false, forKey: GlassesFeature.key)
+        GlassesFeature.prepare(upgrade, demo: false, hasPairedMac: true)
+        expect(upgrade.bool(forKey: GlassesFeature.key) == false, "A choice already made is kept at the next launch")
+        let demo = fresh()
+        demo.set(false, forKey: GlassesFeature.demoKey)
+        GlassesFeature.prepare(demo, demo: true, hasPairedMac: false)
+        expect(demo.bool(forKey: GlassesFeature.demoKey) && demo.object(forKey: GlassesFeature.key) == nil, "The demo shows the glasses controls at every launch and leaves the real setting alone")
+        expect(GlassesFeature.storageKey(demo: true) != GlassesFeature.storageKey(demo: false), "The demo and the real app keep separate settings")
+    }
+
     static func main() throws {
         dialTrackingChecks()
         deferredTapChecks()
+        glassesFeatureChecks()
         let valid = PairingPayload(v: 1, name: "Test Mac", hostID: "CFC99A4B-34EB-4E90-8413-97BE5866FE84",
             baseURL: "https://test-mac.example.ts.net:8451", token: String(repeating: "t", count: 64))
         let restored = try PairingPayload.decode(pairingURL(valid))

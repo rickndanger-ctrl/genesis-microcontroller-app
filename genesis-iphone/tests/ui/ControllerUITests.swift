@@ -320,6 +320,45 @@ final class ControllerUITests: XCTestCase {
     }
 
     @MainActor
+    func testGlassesSwitchHidesGlassesControls() {
+        continueAfterFailure = false
+        let app = XCUIApplication()
+        app.launchArguments = ["--demo"]
+        XCUIDevice.shared.orientation = UIDevice.current.userInterfaceIdiom == .pad ? .landscapeLeft : .portrait
+        app.launch()
+        let settings = app.buttons["Settings and Mac pairing"]
+        XCTAssertTrue(settings.waitForExistence(timeout: 8))
+        let follow = app.switches["glasses.enabled"]
+        XCTAssertTrue(follow.exists, "The demo starts with the glasses controls shown")
+        func setGlasses(_ on: Bool) {
+            settings.tap()
+            let toggle = app.switches["settings.glasses"]
+            XCTAssertTrue(app.navigationBars["Your controller"].waitForExistence(timeout: 5))
+            // The switch sits below pairing, so it may start off-screen.
+            for _ in 0..<6 where !toggle.isHittable { app.swipeUp() }
+            XCTAssertTrue(toggle.isHittable, "The glasses switch can be reached in Settings")
+            if (toggle.value as? String == "1") != on {
+                toggle.coordinate(withNormalizedOffset: CGVector(dx: 0.94, dy: 0.50)).tap()
+                let changed = NSPredicate { _, _ in (toggle.value as? String == "1") == on }
+                expectation(for: changed, evaluatedWith: toggle)
+                waitForExpectations(timeout: 3)
+            }
+            app.buttons["Done"].firstMatch.tap()
+            XCTAssertTrue(app.buttons["controller.fullscreen"].waitForExistence(timeout: 3))
+        }
+        setGlasses(false)
+        XCTAssertFalse(follow.exists, "Turning the switch off removes the Follow panel")
+        app.buttons["controller.fullscreen"].tap()
+        XCTAssertTrue(app.buttons["controller.exitFullscreen"].waitForExistence(timeout: 3))
+        XCTAssertFalse(app.buttons["controller.glasses"].exists, "Full screen has no Glasses button either")
+        XCTAssertTrue(app.buttons["Actions"].isHittable, "The other tools stay usable without it")
+        app.buttons["controller.exitFullscreen"].tap()
+        XCTAssertTrue(app.buttons["controller.fullscreen"].waitForExistence(timeout: 3))
+        setGlasses(true)
+        XCTAssertTrue(follow.exists, "Turning it back on restores the Follow panel")
+    }
+
+    @MainActor
     func testGlassesFollowPanel() {
         continueAfterFailure = false
         let app = XCUIApplication()

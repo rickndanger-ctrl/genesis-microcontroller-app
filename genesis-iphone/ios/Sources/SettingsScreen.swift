@@ -8,6 +8,7 @@ struct SettingsScreen: View {
     @AppStorage("controllerSoundsEnabled") private var controllerSoundsEnabled = true
     @AppStorage(ControllerSound.packKey) private var soundPack = ControllerSound.defaultPack.id
     @AppStorage(ControllerSound.volumeKey) private var soundVolume = ControllerSound.defaultVolume
+    @AppStorage private var glassesFeature: Bool
     @State private var pairingLink = ""
     @State private var scanning = false
     @State private var pairing = false
@@ -15,6 +16,11 @@ struct SettingsScreen: View {
 
     private var selectedPack: ControllerSound.Pack {
         ControllerSound.packs.first { $0.id == soundPack } ?? ControllerSound.defaultPack
+    }
+
+    init(store: ControllerStore) {
+        self.store = store
+        _glassesFeature = AppStorage(wrappedValue: false, GlassesFeature.storageKey(demo: store.isDemo))
     }
 
     var body: some View {
@@ -74,6 +80,18 @@ struct SettingsScreen: View {
                         Text(info.reason ?? "Select a mapped chat to begin.").font(.caption).foregroundStyle(.secondary)
                     }
                     Button("Refresh") { ControllerSound.shared.keyClick(); Task { await store.refresh() } }
+                }
+                Section("Glasses") {
+                    Toggle("I use Even G2 glasses", isOn: Binding(get: { glassesFeature }, set: { enabled in
+                        guard enabled != glassesFeature else { return }
+                        ControllerSound.shared.keyClick()
+                        // Hiding the controls must not leave Follow running unseen.
+                        if !enabled, store.glasses.enabled { store.glasses.stop() }
+                        glassesFeature = enabled
+                    }))
+                    .accessibilityIdentifier("settings.glasses")
+                    Text("Shows Follow this controller, which mirrors your chat and draft on G2 glasses through the separate Genesis G2 app. Leave it off if you don’t have the glasses.")
+                        .font(.caption).foregroundStyle(.secondary)
                 }
                 Section("How it works") {
                     Label("Hold Talk, release to review, tap Send.", systemImage: "mic")

@@ -68,6 +68,7 @@ final class ControllerStore: ObservableObject {
         settings = saved
         let restoredHosts = demo ? RemoteHost.demoHosts : saved.hosts
         hosts = restoredHosts
+        if let glassesPreferences { GlassesFeature.prepare(glassesPreferences, demo: demo, hasPairedMac: !saved.hosts.isEmpty) }
         selectedHostID = restoredHosts.first(where: { $0.id == saved.selectedHostID })?.id ?? restoredHosts.first?.id ?? ""
         selectedProvider = saved.selectedProvider
         profile = .empty(saved.selectedProvider)
