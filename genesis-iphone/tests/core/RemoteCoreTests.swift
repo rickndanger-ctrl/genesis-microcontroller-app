@@ -341,6 +341,11 @@ import Foundation
         expect(catalog.availableActions.filter({$0.id == "newChat"}).count == 1, "Catalog deduplicates advertised actions")
         expect(newChat.matches("navigate") && newChat.matches("empty") && !newChat.matches("delete"), "Action search includes category and details")
         let oldProfile = try JSONDecoder().decode(RemoteProfile.self,from:Data("{\"provider\":\"claude\",\"revision\":1,\"slots\":[]}".utf8))
+        let museProfile = RemoteProfile(provider: "muse", revision: 0, slots: [])
+        expect(museProfile.quickActionIDs == ["sendPrompt","newChat","nativeVoice","artifacts"] && !museProfile.quickActionIDs.contains("stop"),
+               "Muse's default keys leave out Stop, which Muse cannot do, for a new side chat")
+        var museSaved = museProfile; museSaved.quickActions = ["sendPrompt","stop","nativeVoice","artifacts"]
+        expect(museSaved.quickActionIDs[1] == "stop", "Keys someone chose are kept as they chose them")
         expect(oldProfile.quickActionIDs == ["sendPrompt","stop","nativeVoice","artifacts"], "Older Claude profiles retain their original quick-key layout")
         var codexProfile = RemoteProfile.empty(.codex)
         expect(codexProfile.quickActionIDs == ["newChat","previousControllerChat","keyboardShortcuts","artifacts"], "Unconfigured Codex quick keys favor useful supported navigation")

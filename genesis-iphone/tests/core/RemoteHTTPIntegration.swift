@@ -475,6 +475,18 @@ final class FixtureCredentials: ControllerCredentialVault {
         await restored.refresh()
         expect(!restored.hasUnresolvedSend && restored.draft.isEmpty, "GET receipt confirms delivery and clears matching draft")
         expect(first.sendCount == 1, "Receipt recovery never posts again")
+        // An unconfirmed Send on a chat that is not open is checked as well, so its red key clears without opening it.
+        expect(store.unresolvedSendCount == 1, "The first controller still holds the unconfirmed Send")
+        store.selectProvider(.codex)
+        for _ in 0..<100 {
+            await store.refresh()
+            if store.unresolvedSendCount == 0 { break }
+            try? await Task.sleep(nanoseconds:20_000_000)
+        }
+        expect(store.unresolvedSendCount == 0 && first.sendCount == 1, "A refresh resolves an unconfirmed Send on another chat, and never posts again")
+        store.selectProvider(.claude)
+        expect(!store.hasUnresolvedSend && store.activity(slot: 0) != .error, "Its key is no longer red when you come back")
+        try? await Task.sleep(nanoseconds:200_000_000)
 
         store.acknowledgeUncertainSend(wasSent: true)
         store.draft = "Draft for first Mac"

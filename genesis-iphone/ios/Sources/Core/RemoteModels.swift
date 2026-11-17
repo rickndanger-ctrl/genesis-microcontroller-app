@@ -292,7 +292,10 @@ struct RemoteProfile: Codable, Equatable {
     static let defaultQuickActions = ["sendPrompt", "stop", "nativeVoice", "artifacts"]
     var quickActionIDs: [String] {
         if let quickActions, quickActions.count == 4 { return quickActions }
-        return provider == "codex" ? ["newChat", "previousControllerChat", "keyboardShortcuts", "artifacts"] : Self.defaultQuickActions
+        if provider == "codex" { return ["newChat", "previousControllerChat", "keyboardShortcuts", "artifacts"] }
+        // Muse cannot be stopped from here, so its second key starts a new side chat instead.
+        if provider == "muse" { return ["sendPrompt", "newChat", "nativeVoice", "artifacts"] }
+        return Self.defaultQuickActions
     }
     static func empty(_ provider: ProviderID) -> RemoteProfile { .init(provider: provider.rawValue, revision: 0, slots: (0..<6).map(SlotMapping.empty)) }
     var orderedSlots: [SlotMapping] { (0..<6).map { index in slots.first { $0.index == index } ?? .empty(index) } }

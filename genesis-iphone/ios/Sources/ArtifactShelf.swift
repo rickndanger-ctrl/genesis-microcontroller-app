@@ -47,6 +47,10 @@ struct ArtifactShelf: View {
                 }
                 .task { await store.refreshArtifacts() }
                 .sheet(item: $selected) { artifact in ArtifactPreview(store: store, artifact: artifact) }
+                // A failure while this sheet is up would otherwise be reported behind it, unseen.
+                .alert("Controller update", isPresented: Binding(get: { store.lastError != nil }, set: { if !$0 { store.lastError = nil } })) {
+                    Button("OK", role: .cancel) { ControllerSound.shared.keyClick(); store.lastError = nil }
+                } message: { Text(store.lastError ?? "") }
         }
     }
     private func togglePin(_ artifact: ArtifactRecord) {
@@ -75,6 +79,10 @@ struct ArtifactPreview: View {
                 else { ProgressView("Opening artifact…") }
             }
             .navigationTitle(artifact.title).navigationBarTitleDisplayMode(.inline)
+            // A failure while this sheet is up would otherwise be reported behind it, unseen.
+            .alert("Controller update", isPresented: Binding(get: { store.lastError != nil }, set: { if !$0 { store.lastError = nil } })) {
+                Button("OK", role: .cancel) { ControllerSound.shared.keyClick(); store.lastError = nil }
+            } message: { Text(store.lastError ?? "") }
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) { Button("Done") { ControllerSound.shared.keyClick(); dismiss() } }
                 ToolbarItem(placement: .primaryAction) { Button { ControllerSound.shared.keyClick(); Task { await store.openArtifact(artifact) } } label: { Image(systemName: "desktopcomputer") }.accessibilityLabel("Open on Mac") }

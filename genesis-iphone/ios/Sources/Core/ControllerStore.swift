@@ -545,6 +545,7 @@ final class ControllerStore: ObservableObject {
                                                      chat: selectedChat, enabled: capability?.supports("artifacts") == true)
             async let receipts: Void = recoverPendingSend()
             _ = try await (mappings, list, shelf, receipts)
+            await recoverOtherPendingSends()
         } catch { if gate.accepts(generation) { failConnection(error); if isPaired { lastError = error.localizedDescription } } }
     }
 
@@ -1032,6 +1033,24 @@ final class ControllerStore: ObservableObject {
         }
     }
     /// Only call after the user explicitly checks the destination chat.
+    /// Sends whose result the Mac has not yet confirmed, on any chat.
+    var unresolvedSendCount: Int { settings.ledger.pendingSends.count }
+    /// A Send left unconfirmed on a chat that is not open still turns that chat's
+    /// key red. Ask the Mac about those too, so the key clears once the Mac knows,
+    /// without having to open each chat. Nothing is ever sent again.
+    private func recoverOtherPendingSends() async {
+        guard !isDemo, !isBusy else { return }
+        let hostID = selectedHost?.hostID ?? selectedHostID, current = currentRoute?.storageKey
+        let others = settings.ledger.pendingSends.values.filter { $0.route.hostID == hostID && $0.route.storageKey != current }
+        guard !others.isEmpty, let (host, token) = try? connection() else { return }
+        for pending in others.prefix(6) where recoveringCommands.insert(pending.commandID).inserted {
+            defer { recoveringCommands.remove(pending.commandID) }
+            guard let receipt = try? await client.fetch(CommandReceipt.self, host: host, token: token, path: "/v1/commands/\(pending.commandID)", deadline: 3),
+                  receipt.id == pending.commandID,
+                  settings.ledger.pendingSends[pending.route.storageKey]?.commandID == pending.commandID else { continue }
+            finishSend(receipt, pending: pending)
+        }
+    }
     func acknowledgeUncertainSend(wasSent: Bool) {
         guard let route = currentRoute, let pending = settings.ledger.pendingSends[route.storageKey] else { return }
         let receipt = CommandReceipt(id: pending.commandID, status: wasSent ? "confirmed" : "failed",
