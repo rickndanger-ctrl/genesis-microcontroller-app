@@ -16,6 +16,13 @@ import CoreImage.CIFilterBuiltins
     @Published var lastSelfCheck:RemoteSelfCheck?
     @Published var checking=false
     private var activity:ActivityLog?
+    /// Which phones may talk to this Mac. Loaded from and saved to devices.json.
+    private var registry=DeviceRegistry()
+    private var pairingCodes=PairingCodes()
+    @Published var devices:[PairedDevice]=[]
+    @Published var legacySecretAccepted=true
+    /// The single-use code in the QR code now on screen.
+    @Published var pairingCode:String?
     static let companionVersion=Bundle.main.object(forInfoDictionaryKey:"CFBundleShortVersionString") as? String ?? "development"
     private(set) var store:RemoteStore?
     private var server:RemoteHTTPServer?
@@ -53,8 +60,9 @@ import CoreImage.CIFilterBuiltins
     func setEnabled(_ value:Bool) {if !value {menuNavigation.invalidate();clearDisplaySession()};enabled=value;UserDefaults.standard.set(value,forKey:"remote.enabled");if value {startIfEnabled()} else {server?.stop();server=nil;serviceStatus="Remote access is off"}}
     func saveAddress() {UserDefaults.standard.set(baseURL,forKey:"remote.baseURL")}
     func startIfEnabled() {
-        guard enabled,server==nil,let store else{return}
-        let server=RemoteHTTPServer(token:store.token) {[weak self] request in guard let self else{return .error(503,"Companion closed.")};return await self.route(request)}
+        guard enabled,server==nil,store != nil else{return}
+        loadRegistry()
+        let server=RemoteHTTPServer {[weak self] request in guard let self else{return .error(503,"Companion closed.")};return await self.route(request)}
         server.stateChanged={[weak self] state in Task{@MainActor in self?.serviceStatus=state}}
         do {try server.start();self.server=server} catch {serviceStatus="Remote service could not start."}
     }
@@ -74,7 +82,9 @@ import CoreImage.CIFilterBuiltins
     }
     var pairingLink:URL? {
         guard enabled,let store,let parsed=URLComponents(string:baseURL),parsed.scheme=="https",let host=parsed.host,!host.isEmpty,parsed.user==nil,parsed.password==nil,parsed.query==nil,parsed.fragment==nil,parsed.path.isEmpty || parsed.path=="/" else{return nil}
-        let payload=RemotePairing(name:hostName,hostID:store.hostID,baseURL:baseURL.trimmingCharacters(in:CharacterSet(charactersIn:"/")),token:store.token)
+        // The code is good once and for ten minutes; it is not the Mac's secret.
+        guard let code=pairingCode else{return nil}
+        let payload=RemotePairing(name:hostName,hostID:store.hostID,baseURL:baseURL.trimmingCharacters(in:CharacterSet(charactersIn:"/")),token:code)
         guard let data=try? JSONEncoder().encode(payload) else{return nil}
         let encoded=data.base64EncodedString().replacingOccurrences(of:"+",with:"-").replacingOccurrences(of:"/",with:"_").replacingOccurrences(of:"=",with:"")
         return URL(string:"genesiscontroller://pair?data="+encoded)
@@ -318,10 +328,60 @@ import CoreImage.CIFilterBuiltins
         guard let data=try? JSONSerialization.data(withJSONObject:payload,options:[.sortedKeys]) else{return .error(500,"Diagnostics unavailable.")}
         return RemoteHTTPResponse(data:data)
     }
+    // MARK: Paired devices
+    private var registryURL:URL? {store?.directory.appendingPathComponent("devices.json")}
+    private func loadRegistry() {
+        guard let url=registryURL,let data=try? Data(contentsOf:url),let saved=try? JSONDecoder().decode(DeviceRegistry.self,from:data) else {publishRegistry();return}
+        registry=saved;publishRegistry()
+    }
+    private func saveRegistry() {
+        publishRegistry()
+        guard let url=registryURL,let data=try? JSONEncoder().encode(registry) else{return}
+        try? data.write(to:url,options:.atomic)
+        try? FileManager.default.setAttributes([.posixPermissions:0o600],ofItemAtPath:url.path)
+    }
+    private func publishRegistry() {devices=registry.devices;legacySecretAccepted=registry.legacySecretAccepted}
+    /// Shows a fresh single-use code. Called when the pairing window opens,
+    /// after a code is used, and before one would expire.
+    func refreshPairingCode() {pairingCode=pairingCodes.issue(now:Date())}
+    func revokeDevice(_ id:String) {if registry.revoke(id) {saveRegistry()}}
+    /// Cuts off every phone that paired before per-device secrets. They show
+    /// "Pair this Mac" and can be paired again with the QR code.
+    func stopAcceptingLegacySecret() {registry.legacySecretAccepted=false;saveRegistry()}
+    /// Whether a request carries a secret this Mac accepts. Both checks always
+    /// run, so the answer's timing does not say which kind of secret it was.
+    private func authorized(_ request:RemoteHTTPRequest)->Bool {
+        guard let store else{return false}
+        let header=request.headers["authorization"] ?? ""
+        let supplied=header.hasPrefix("Bearer ") ? String(header.dropFirst("Bearer ".count)):""
+        let legacy=RemotePolicy.equalToken(supplied,store.token) && registry.legacySecretAccepted
+        let device=registry.device(for:supplied)
+        if let device,registry.seen(device.id,now:Date()) {saveRegistry()}
+        return legacy || device != nil
+    }
+    /// Trades the single-use code from the QR code for a secret of the phone's own.
+    private func pair(_ request:RemoteHTTPRequest)->RemoteHTTPResponse {
+        guard enabled else{return .error(403,"Remote access is off on this Mac.")}
+        guard let body=try? JSONDecoder().decode(RemotePairRequest.self,from:request.body) else{return .error(400,"Invalid pairing request.")}
+        switch pairingCodes.redeem(body.code,now:Date()) {
+        case .lockedOut:return .error(429,"Too many wrong pairing codes. Wait a minute, then scan a fresh code from the Mac.")
+        case .rejected:return .error(403,"This pairing code is no longer valid. Scan a fresh code from the Mac.")
+        case .accepted:
+            let enrolled=registry.enroll(name:body.deviceName ?? "",now:Date())
+            saveRegistry()
+            // A used code is gone; put a new one on screen for the next device.
+            refreshPairingCode()
+            lastResult="Paired \(enrolled.device.name)."
+            return .json(RemotePairResponse(token:enrolled.token,deviceID:enrolled.device.id,deviceName:enrolled.device.name))
+        }
+    }
     func route(_ request:RemoteHTTPRequest) async -> RemoteHTTPResponse {
         guard let store else{return .error(503,"Remote storage unavailable.")}
         guard let url=URLComponents(string:"http://localhost"+request.target) else{return .error(400,"Invalid path.")}
         let path=url.path,query=url.queryItems ?? []
+        // Pairing is the one request that cannot carry a secret yet.
+        if request.method=="POST",path=="/v1/pair" {return pair(request)}
+        guard authorized(request) else{return .error(401,"Pair this iPhone with the Mac first.")}
         func parameter(_ key:String)->String {query.first{$0.name==key}?.value ?? ""}
         do {
             if request.method=="GET",path=="/v1/status" {return .json(status())}
@@ -681,6 +741,8 @@ struct RemotePairingView:View {
     @State private var chatID=""
     @State private var linkTitle=""
     @State private var linkURL=""
+    @State private var revoking:PairedDevice?
+    @State private var retiringLegacy=false
     var body:some View {
         ScrollView {VStack(alignment:.leading,spacing:18) {
             Text("Agent Micro Controller on iPhone").font(.largeTitle.bold())
@@ -692,7 +754,7 @@ struct RemotePairingView:View {
                 if let image=bridge.qrImage {Image(nsImage:image).interpolation(.none).resizable().frame(width:220,height:220).padding(12).background(.white).clipShape(RoundedRectangle(cornerRadius:14))}
                 VStack(alignment:.leading,spacing:12) {
                     Text("Scan from Agent Micro Controller on your iPhone").font(.headline)
-                    Text("This QR code contains a private pairing key. Share it only with your own phone.").font(.callout)
+                    Text("This code pairs one device, once, and stops working after ten minutes. Scanning it gives that device control of the apps on this Mac, so show it only to your own phone or tablet.").font(.callout)
                     Text("The HTTPS endpoint must be connected to this Mac’s local service on port 18765. Tailscale reachability is checked during pairing.").font(.caption).foregroundStyle(.secondary)
                     Button("Copy pairing link") {if let link=bridge.pairingLink {NSPasteboard.general.clearContents();NSPasteboard.general.setString(link.absoluteString,forType:.string)}}.disabled(bridge.pairingLink==nil)
                     Button("Save address"){bridge.saveAddress()}
@@ -711,6 +773,32 @@ struct RemotePairingView:View {
             ForEach(bridge.artifacts.filter{$0.provider==provider},id:\.id) { item in HStack {Image(systemName:item.kind=="web" ? "globe":"doc");Text(item.title);Spacer();Button("Remove"){bridge.removeArtifact(item.id)}}.padding(8).background(.quaternary,in:RoundedRectangle(cornerRadius:8)) }
             Divider()
             Text(bridge.lastResult).font(.callout).textSelection(.enabled)
+            Divider()
+            Text("Paired devices").font(.title3.bold())
+            Text("Each device has its own secret. Revoking one cuts off that device only; pair it again to restore it.").font(.caption).foregroundStyle(.secondary)
+            if bridge.devices.isEmpty {Text("No devices have paired with the new codes yet.").font(.callout).foregroundStyle(.secondary)}
+            ForEach(bridge.devices) { device in
+                HStack(spacing:10) {
+                    Image(systemName:"iphone")
+                    VStack(alignment:.leading,spacing:2) {
+                        Text(device.name).font(.callout.weight(.medium))
+                        Text("Paired \(device.pairedAt.formatted(date:.abbreviated,time:.shortened))"+(device.lastSeenAt.map{" · last seen \($0.formatted(date:.abbreviated,time:.shortened))"} ?? " · not seen yet")).font(.caption).foregroundStyle(.secondary)
+                    }
+                    Spacer()
+                    Button("Revoke",role:.destructive){revoking=device}
+                }.padding(8).background(.quaternary,in:RoundedRectangle(cornerRadius:8))
+            }
+            if bridge.legacySecretAccepted {
+                HStack(spacing:10) {
+                    Image(systemName:"key")
+                    VStack(alignment:.leading,spacing:2) {
+                        Text("Devices paired before version 0.7").font(.callout.weight(.medium))
+                        Text("They share one older secret and cannot be told apart. Stop accepting it once every device has paired again.").font(.caption).foregroundStyle(.secondary)
+                    }
+                    Spacer()
+                    Button("Stop accepting…",role:.destructive){retiringLegacy=true}
+                }.padding(8).background(.quaternary,in:RoundedRectangle(cornerRadius:8))
+            }
             Divider()
             HStack {
                 Text("Check this Mac").font(.title3.bold())
@@ -745,5 +833,15 @@ struct RemotePairingView:View {
             }
             Text("Claude desktop controls require Claude to be open, an unlocked Mac, and Accessibility. Codex supports saved-chat selection, phone Send, and available Mac menu controls. Stop and native live voice are not connected for Codex; native live voice is also unavailable for Claude. Muse needs to be open: its chats, Send, New side chat and Call are connected, and side chats that share a title are left out.").font(.caption).foregroundStyle(.secondary)
         }.padding(28)}.frame(minWidth:740,minHeight:640).task{bridge.loadActivity()}
+            // A code lasts ten minutes; replace it a little before that while the window is open.
+            .task{while !Task.isCancelled {bridge.refreshPairingCode();try? await Task.sleep(nanoseconds:540_000_000_000)}}
+            .confirmationDialog("Revoke \(revoking?.name ?? "this device")?",isPresented:Binding(get:{revoking != nil},set:{if !$0 {revoking=nil}}),titleVisibility:.visible) {
+                Button("Revoke",role:.destructive){if let device=revoking {bridge.revokeDevice(device.id)};revoking=nil}
+                Button("Cancel",role:.cancel){revoking=nil}
+            } message:{Text("It will stop working at once and show “Pair this Mac”. Scan a new code to pair it again.")}
+            .confirmationDialog("Stop accepting the older shared secret?",isPresented:$retiringLegacy,titleVisibility:.visible) {
+                Button("Stop accepting it",role:.destructive){bridge.stopAcceptingLegacySecret()}
+                Button("Cancel",role:.cancel){}
+            } message:{Text("Every phone and tablet that paired before version 0.7 will stop working until it scans a new code. This cannot be undone.")}
     }
 }

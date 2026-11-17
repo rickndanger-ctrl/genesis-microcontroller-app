@@ -2,7 +2,7 @@
 
 Private HTTPS via Tailscale Serve -> loopback Mac companion. Every /v1 request uses `Authorization: Bearer <paired token>`; tokens never enter logs. JSON body <= 128 KiB. No shell commands or arbitrary files. Existing USB controller remains a separate input client.
 
-Pairing QR/deep link: `genesiscontroller://pair?data=<base64url JSON>` where JSON is `{v:1,name,hostID,baseURL,token}`. HTTPS is required except DEBUG localhost simulator. Default HTTPS port 8451, local service 18765. Identity is a persisted host UUID, not its address.
+Pairing QR/deep link: `genesiscontroller://pair?data=<base64url JSON>` where JSON is `{v,name,hostID,baseURL,token}`. With `v:2` (companion 0.7+) `token` is a single-use code, valid ten minutes: the app trades it at `POST /v1/pair` `{code,deviceName?}` -> `{token,deviceID,deviceName}` (the only /v1 route without a bearer; 403 for a wrong, used or expired code, 429 after five wrong codes in a row for one minute, though the right code is always accepted) and keeps the returned per-device token. With `v:1` `token` is the Mac's older shared secret, still accepted until the owner retires it. The Mac stores a SHA-256 of each device token in `devices.json`, never the token. HTTPS is required except DEBUG localhost simulator. Default HTTPS port 8451, local service 18765. Identity is a persisted host UUID, not its address.
 
 ## JSON shapes
 

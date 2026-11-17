@@ -10,7 +10,12 @@ struct RemoteProfile: Codable { var provider: String; var revision: Int; var slo
 struct RemoteCommand: Codable { var id: String; var hostID: String; var provider: String; var chatID: String?; var action: String; var text: String?; var artifactID: String?; var generation: Int; var navigationSession: String? = nil }
 struct RemoteReceipt: Codable { var id: String; var status: String; var message: String; var activeChat: RemoteChat? = nil; var navigation: RemoteNavigationState? = nil }
 struct RemoteArtifact: Codable { var id: String; var title: String; var kind: String; var url: String?; var mimeType: String?; var hostID: String; var provider: String; var chatID: String }
-struct RemotePairing: Codable { var v = 1; var name: String; var hostID: String; var baseURL: String; var token: String }
+/// What the pairing QR code carries. Version 1 put the Mac's one shared secret
+/// in `token`. Version 2 puts a single-use code there, which the phone trades
+/// for a secret of its own at /v1/pair.
+struct RemotePairing: Codable { var v = 2; var name: String; var hostID: String; var baseURL: String; var token: String }
+struct RemotePairRequest: Codable { var code: String; var deviceName: String? = nil }
+struct RemotePairResponse: Codable { var token: String; var deviceID: String; var deviceName: String }
 struct RemoteFault: Error { let status: Int; let message: String }
 
 struct RemoteAction: Codable, Equatable {

@@ -57,6 +57,10 @@ final class HTTPFixture: @unchecked Sendable {
         lock.lock(); actionResults[action] = result; lock.unlock()
     }
     func dropAction(_ action: String, value: Bool) { lock.lock(); if value { droppedActions.insert(action) } else { droppedActions.remove(action) }; lock.unlock() }
+    private var pairingCode: String?
+    private(set) var pairedDeviceNames: [String] = []
+    /// Makes one single-use pairing code valid, as showing a QR code would.
+    func offerPairingCode(_ code: String) { lock.lock(); pairingCode = code; lock.unlock() }
     func setNavigation(_ active: Bool, rotate: Bool = false) { lock.lock(); navigationActive = active; if rotate { navigationSession = UUID().uuidString }; lock.unlock() }
     var navigationCount: Int { lock.lock(); defer { lock.unlock() }; return acceptedNavigation }
     func delayStatus(_ delay: TimeInterval) { lock.lock(); statusDelay = delay; lock.unlock() }
@@ -120,9 +124,17 @@ final class HTTPFixture: @unchecked Sendable {
     }
     private func reply(_ connection: NWConnection, firstLine: String, headers: [String: String], body: Data) {
         lock.lock(); requests.append((firstLine, headers, body)); let delay = statusDelay; let unavailable = statusUnavailable; let uncertain = simulateUncertain; let rejected = rejectSend; let dropped = dropSendResponse; let receiptState = self.receiptState; lock.unlock()
-        guard headers["authorization"] == "Bearer \(token)" else { respond(connection, code: 401, json: ["error": "Unauthorized"]); return }
         let target = firstLine.split(separator: " ").dropFirst().first.map(String.init) ?? ""
         let path = target.components(separatedBy: "?")[0]
+        // Pairing is the one request that carries a single-use code instead of the secret.
+        if path == "/v1/pair" {
+            let sent = (try? JSONSerialization.jsonObject(with: body)) as? [String: Any]
+            lock.lock(); let expected = pairingCode; pairingCode = nil; pairedDeviceNames.append(sent?["deviceName"] as? String ?? ""); lock.unlock()
+            if let expected, sent?["code"] as? String == expected { respond(connection, code: 200, json: ["token": token, "deviceID": UUID().uuidString, "deviceName": "Fixture phone"]) }
+            else { respond(connection, code: 403, json: ["error": "This pairing code is no longer valid. Scan a fresh code from the Mac."]) }
+            return
+        }
+        guard headers["authorization"] == "Bearer \(token)" else { respond(connection, code: 401, json: ["error": "Unauthorized"]); return }
         let queryProvider = URLComponents(string:"http://localhost" + target)?.queryItems?.first(where:{$0.name == "provider"})?.value ?? "claude"
         if path == "/v1/redirect" {
             respond(connection, code: 302, json: [:], extra: "Location: http://127.0.0.1:\(port)/v1/leaked\r\n"); return
@@ -325,6 +337,33 @@ final class FixtureCredentials: ControllerCredentialVault {
         try await freshStore.pair(URL(string:"genesiscontroller://pair?data=\(firstPairingData)")!)
         expect(freshStore.hosts.count == 1 && freshStore.selectedHost?.hostID == first.hostID && freshStore.isPaired,
                "First QR pairing adds and selects the verified Mac")
+
+        // Version 2 pairing: the QR code carries a single-use code, which is
+        // traded for a secret that belongs to this device alone.
+        let singleUse = String(repeating:"single-use-code-", count:3)
+        let codePairing = PairingPayload(v:2,name:first.name,hostID:first.hostID,baseURL:first.baseURL,token:singleUse)
+        let codePairingData = try JSONEncoder().encode(codePairing).base64EncodedString()
+            .replacingOccurrences(of:"+",with:"-").replacingOccurrences(of:"/",with:"_").replacingOccurrences(of:"=",with:"")
+        let codePairingURL = URL(string:"genesiscontroller://pair?data=\(codePairingData)")!
+        let codeCredentials = FixtureCredentials()
+        let codeStore = ControllerStore(client: client, credentials: codeCredentials,
+            persistence: ControllerPersistence(directory: temporary.appendingPathComponent("code")))
+        ControllerStore.deviceName = { "Fixture phone" }
+        first.offerPairingCode(singleUse)
+        try await codeStore.pair(codePairingURL)
+        expect(codeStore.isPaired && codeStore.selectedHost?.hostID == first.hostID, "A single-use code pairs the Mac")
+        let kept = codeStore.selectedHost.flatMap { codeCredentials.token(for: $0.id) }
+        expect(kept == first.token && kept != singleUse, "The device keeps the secret it was issued, never the single-use code")
+        expect(first.pairedDeviceNames.last == "Fixture phone", "Pairing tells the Mac what this device is called")
+        let reuseCredentials = FixtureCredentials()
+        let reuseStore = ControllerStore(client: client, credentials: reuseCredentials,
+            persistence: ControllerPersistence(directory: temporary.appendingPathComponent("reuse")))
+        do {
+            try await reuseStore.pair(codePairingURL)
+            fatalError("A used pairing code was accepted")
+        } catch RemoteError.server(let code, _) { expect(code == 403, "A used pairing code is refused") }
+        expect(reuseStore.hosts.isEmpty && !reuseStore.isPaired && reuseCredentials.token(for: first.hostID) == nil,
+               "A refused code pairs nothing and saves no secret")
         let persistence = ControllerPersistence(directory: temporary)
         let credentials = FixtureCredentials()
         try credentials.save(first.token, for: first.name); try credentials.save(second.token, for: second.name)

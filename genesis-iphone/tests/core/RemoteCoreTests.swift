@@ -153,8 +153,12 @@ import Foundation
             baseURL: "https://test-mac.example.ts.net:8451", token: String(repeating: "t", count: 64))
         let restored = try PairingPayload.decode(pairingURL(valid))
         expect(restored == valid, "Pairing round trip")
-        var bad = valid; bad.v = 2
+        var codeBased = valid; codeBased.v = 2
+        expect((try? PairingPayload.decode(pairingURL(codeBased))) == codeBased, "Single-use code pairing (version 2) round trip")
+        var bad = valid; bad.v = 3
         expect(rejects(try pairingURL(bad)), "Unknown protocol rejected")
+        bad.v = 0
+        expect(rejects(try pairingURL(bad)), "Protocol version zero rejected")
         bad = valid; bad.hostID = "not-a-host-uuid"
         expect(rejects(try pairingURL(bad)), "Host identity required")
         bad = valid; bad.token = "short"

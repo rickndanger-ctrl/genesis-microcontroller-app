@@ -5,7 +5,7 @@ Agent Micro Controller is a remote control for apps on your own Mac. It has no a
 ## What stays on your iPhone or iPad
 
 - **Drafts.** Text you type or dictate is saved on the device so it survives closing the app. It is protected by the device's passcode encryption.
-- **Pairings and key mappings.** The address of each Mac you pair, and which chat or action each key opens. The pairing secret is kept in the device keychain.
+- **Pairings and key mappings.** The address of each Mac you pair, and which chat or action each key opens. Each device gets its own pairing secret, kept in the device keychain; the Mac stores only a fingerprint of it, with the device's name and when it was last seen, so you can revoke one device.
 - **Speech.** Dictation uses Apple's on-device speech recognition only. The app requires on-device recognition and will not dictate without it, so your audio is not sent to Apple or to anyone else. Audio is never stored.
 - **Diagnostics.** A small local log of dictation events (names and counts only, such as "recording started") to help fix problems. It contains no transcript, audio, chat names, addresses or secrets, and it never leaves the device.
 

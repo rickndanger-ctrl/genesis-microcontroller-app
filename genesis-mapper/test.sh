@@ -27,4 +27,6 @@ xcrun swiftc -parse-as-library "$ROOT/Sources/SelfCheck.swift" "$ROOT/tests/Self
 "$ROOT/test-build/self-check"
 xcrun swiftc -parse-as-library "$ROOT/Sources/MacInput.swift" "$ROOT/tests/MacInputTests.swift" -o "$ROOT/test-build/mac-input"
 "$ROOT/test-build/mac-input"
+xcrun swiftc -parse-as-library "$ROOT/Sources/DeviceRegistry.swift" "$ROOT/tests/DeviceRegistryTests.swift" -o "$ROOT/test-build/device-registry"
+"$ROOT/test-build/device-registry"
 sh "$ROOT/test-display-session.sh"

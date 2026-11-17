@@ -18,11 +18,12 @@ final class RemoteHTTPServer: @unchecked Sendable {
     private var peers:[UUID:NWConnection] = [:]
     /// Connections that have not yet sent a complete request. Touched only on `queue`.
     private var waiting:Set<UUID> = []
-    private let token:String
     private let port:UInt16
     private let handler:@MainActor (RemoteHTTPRequest) async -> RemoteHTTPResponse
     var stateChanged:((String)->Void)?
-    init(token:String,port:UInt16=18765,handler:@escaping @MainActor (RemoteHTTPRequest) async -> RemoteHTTPResponse) {self.token=token;self.port=port;self.handler=handler}
+    /// The handler decides who may ask: it holds the list of paired devices,
+    /// which lives on the main actor and can change while the server runs.
+    init(port:UInt16=18765,handler:@escaping @MainActor (RemoteHTTPRequest) async -> RemoteHTTPResponse) {self.port=port;self.handler=handler}
     func start() throws {
         let parameters = NWParameters.tcp
         parameters.requiredLocalEndpoint = .hostPort(host:"127.0.0.1",port:NWEndpoint.Port(rawValue:port)!)
@@ -66,7 +67,6 @@ final class RemoteHTTPServer: @unchecked Sendable {
             do {
                 if let request=try RemoteHTTPRequest.parse(all) {
                     self.waiting.remove(id)
-                    guard RemotePolicy.equalToken(request.headers["authorization"] ?? "","Bearer "+self.token) else {self.send(.error(401,"Pair this iPhone with the Mac first."),on:connection);return}
                     if ["POST","PUT"].contains(request.method),request.headers["content-type"]?.lowercased().hasPrefix("application/json") != true {self.send(.error(415,"JSON content type required."),on:connection);return}
                     Task { @MainActor in let response = await self.handler(request);self.queue.async {self.send(response,on:connection)} }
                 } else if complete || error != nil {self.send(.error(400,"Incomplete request."),on:connection)}

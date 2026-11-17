@@ -402,9 +402,25 @@ final class ControllerStore: ObservableObject {
         let payload = try PairingPayload.decode(url, allowLocalhost: RemoteClient.localDevelopmentAllowed)
         try await installPairing(payload, activate: true)
     }
-    private func installPairing(_ payload: PairingPayload, activate: Bool) async throws {
+    /// What this device is called in the Mac's list of paired devices. The app
+    /// sets it at launch; the core has no access to the device's name.
+    static var deviceName: () -> String = { "iPhone or iPad" }
+    private struct PairExchange: Encodable { let code: String; let deviceName: String }
+    private struct PairIssued: Decodable { let token: String }
+
+    private func installPairing(_ scanned: PairingPayload, activate: Bool) async throws {
         let generation = gate.generation
+        var payload = scanned
         let candidate = RemoteHost(id: payload.hostID, name: payload.name, baseURL: payload.baseURL, hostID: payload.hostID)
+        if payload.v == 2 {
+            // The code is good once. Trade it for a secret that belongs to this
+            // device alone, which the Mac can later revoke without touching others.
+            let body = try JSONEncoder().encode(PairExchange(code: payload.token, deviceName: Self.deviceName()))
+            let issued = try await client.fetch(PairIssued.self, host: candidate, token: "", path: "/v1/pair", method: "POST", body: body)
+            guard issued.token.count >= 32, issued.token.count <= 1024,
+                  issued.token.unicodeScalars.allSatisfy({ $0.value >= 33 && $0.value <= 126 }) else { throw RemoteError.invalidPairing }
+            payload.token = issued.token
+        }
         let remote = try await client.fetch(HostStatus.self, host: candidate, token: payload.token, path: "/v1/status")
         try validate(remote, host: candidate)
         guard !activate || gate.accepts(generation) else { throw CancellationError() }

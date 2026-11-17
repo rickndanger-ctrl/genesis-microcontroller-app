@@ -9,6 +9,7 @@ struct GenesisControllerApp: App {
     @Environment(\.scenePhase) private var scenePhase
 
     private static func makeStore() -> ControllerStore {
+        ControllerStore.deviceName = { UIDevice.current.name }
         let arguments = ProcessInfo.processInfo.arguments
         #if DEBUG
         // UI tests use this to see what a brand-new install shows, whatever

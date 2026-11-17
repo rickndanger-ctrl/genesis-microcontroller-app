@@ -266,6 +266,9 @@ struct ArtifactRecord: Codable, Identifiable, Equatable {
 struct ChatsResponse: Codable { var chats: [ChatRecord] }
 struct ArtifactsResponse: Codable { var artifacts: [ArtifactRecord] }
 
+/// What a pairing QR code carries. In version 1 `token` is the Mac's one
+/// shared secret. In version 2 it is a single-use code, which is traded for a
+/// secret belonging to this device alone.
 struct PairingPayload: Codable, Equatable {
     var v: Int
     var name: String
@@ -281,7 +284,7 @@ struct PairingPayload: Codable, Equatable {
         var b64 = encoded.replacingOccurrences(of: "-", with: "+").replacingOccurrences(of: "_", with: "/")
         b64 += String(repeating: "=", count: (4 - b64.count % 4) % 4)
         guard let data = Data(base64Encoded: b64), let payload = try? JSONDecoder().decode(PairingPayload.self, from: data),
-              payload.v == 1, UUID(uuidString: payload.hostID) != nil,
+              [1, 2].contains(payload.v), UUID(uuidString: payload.hostID) != nil,
               !payload.name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty, payload.name.count <= 100,
               payload.token.count >= 32, payload.token.count <= 1024,
               payload.token.unicodeScalars.allSatisfy({ $0.value >= 33 && $0.value <= 126 }),

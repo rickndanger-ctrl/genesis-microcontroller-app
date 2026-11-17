@@ -6,6 +6,8 @@ Agent Micro Controller is an iPhone and iPad controller for Codex, Claude Code a
 
 Version **0.5.0 / build 29**, with companion **0.6.0**, adds diagnostics and two guards. **Settings → Check this Mac** asks the companion what it can find in Claude, Muse and Codex and lists each control as found or not, with what to do; the same screen shows recent commands and how they ended. The phone warns when a Mac is running an older companion. When an app is installed but shut, the controller offers **Open Claude on …** (or Muse) so you are not stuck away from the Mac. On the Mac, the companion now waits for a quiet moment on the keyboard and mouse before it clicks or pastes, so its input cannot collide with someone typing; it does not refuse just because the Mac is in use.
 
+Companion 0.7.0 and app version 0.5.1 / build 30 give each phone and tablet its own pairing secret. The QR code now carries a single-use code instead of the Mac's one shared secret, and the companion lists paired devices with a Revoke button for each.
+
 Version 0.4.0 / build 28 renamed the app to **Agent Micro Controller** (Home Screen label: Agent Micro) and adds **Try the demo** on the unpaired screen. The demo is a sample controller with no Mac behind it; it never reads or writes your pairings, and **Exit demo** is always on screen. Mentions of the physical Genesis controller and of the separate Genesis G2 glasses app are unchanged, because those are their names.
 
 Version 0.3.3 / build 27 added two things. While you dictate, the draft box stays on the newest words: it used to show only the first lines of a long dictation, so it looked as if recording had stopped. And **Settings → Glasses → I use Even G2 glasses** shows or hides everything to do with the glasses. It is off on a fresh install and stays on for anyone who already had a Mac paired; turning it off also stops Follow.
@@ -51,7 +53,11 @@ The Mac build uses an ad hoc signature by default. Set `CLAUDE_CONTROLLER_SIGN_I
 
 1. Connect the Mac and your iPhone or iPad to the same Tailscale network. On the Mac, give the companion Accessibility access if you use Claude Code or native desktop menu controls.
 2. From the menu-bar dial, open **Pair iPhone / Artifacts** and enable private remote access. The companion listens on loopback port 18765. On the Mac, `tailscale serve --bg --https=8451 http://127.0.0.1:18765` makes the service available on a private HTTPS port to the tailnet. If you already use that port, choose a free port and enter its HTTPS URL in the pairing panel.
-3. In the app, open **Settings → Scan pairing code** and scan the QR code from the companion. Pair each Mac separately. The pairing code contains a private credential.
+3. In the app, open **Settings → Scan pairing code** and scan the QR code from the companion. Pair each Mac separately. The code pairs one device, once, and stops working after ten minutes; the device trades it for a secret of its own, kept in its keychain.
+
+**What pairing grants.** A paired device can open chats and send prompts to the agents on that Mac. If an agent is running with permissions bypassed, that amounts to running commands on the Mac. Pair only devices you own, and keep the companion on a private network such as Tailscale; never expose port 18765 or the Serve address to the public internet.
+
+**Paired devices.** The pairing window lists every device paired this way, when it paired and when it was last seen. **Revoke** cuts off one device at once without touching the others. Devices paired before companion 0.7 share one older secret and cannot be told apart; once each has scanned a new code (this needs app build 30 or later), choose **Stop accepting…** to retire that secret.
 4. Choose a provider and chat. Hold **Talk**, release to review the draft, then tap **Send**. Grant microphone and speech recognition access when prompted.
 
 Codex Send uses the [bundled Codex queue command](https://learn.chatgpt.com/docs/developer-commands#codex-queue) to target the exact selected chat. **Queued** means Codex accepted the message. If the chat is busy, it can process the draft after the current turn. Open the chat on the Mac if it is unloaded. Claude Code uses the Mac composer and presents its own delivery status.
