@@ -144,6 +144,91 @@ final class ControllerStore: ObservableObject {
         if ["previousControllerChat", "nextControllerChat"].contains(id) { return historyDestination(id) != nil }
         return true
     }
+    /// A press that could not act: what it needs and how to get there. The
+    /// deck shows this in place of a general error.
+    @Published var hint: ControllerHint?
+
+    /// Why an action cannot run right now, as something to do about it.
+    func hint(forAction id: String) -> ControllerHint {
+        let app = selectedProvider.name, mac = selectedHost?.name ?? "your Mac"
+        let name: String = id == "dictate" ? "Hold to Talk" : id == "sendPrompt" ? "Send" : (action(id)?.title ?? "This key")
+        if !isPaired {
+            return .init(title: "Pair a Mac first", message: "\(name) needs a Mac to work with. Pair one in Settings.", step: .pairMac, stepLabel: "Open Settings")
+        }
+        if id == "sendPrompt", isRecording || isFinalizing {
+            return .init(title: "Still recording", message: "Release the microphone and check the draft, then press Send.")
+        }
+        // Recording a draft only needs a chat; everything else needs the Mac and the app.
+        let needsMac = id != "dictate" && id != "artifacts"
+        if needsMac {
+            guard status != nil, let info = providerInfo else {
+                return .init(title: "Can’t reach \(mac)", message: "\(name) needs the Mac. Check that it is awake and on your private network, then try again.", step: .refresh, stepLabel: "Refresh")
+            }
+            switch info.readiness {
+            case "locked":
+                return .init(title: "\(mac) is locked", message: "Unlock the Mac to use \(name).")
+            case "needsAccessibility":
+                return .init(title: "Setup needed on \(mac)", message: "Allow Accessibility for Agent Micro Controller in System Settings on that Mac, then refresh.", step: .refresh, stepLabel: "Refresh")
+            case "closed":
+                if providerNeedsWiderWindow {
+                    return .init(title: "\(app)’s window is too narrow", message: "\(app) hides its chats in a narrow window. Widen it from here and \(name) will work.", step: .openApp, stepLabel: "Widen \(app)")
+                }
+                if info.supports("launchApp") {
+                    return .init(title: "\(app) is closed on \(mac)", message: "Open it from here, then \(name) will work.", step: .openApp, stepLabel: "Open \(app)")
+                }
+                return .init(title: "\(app) is closed on \(mac)", message: "Open \(app) on the Mac to use \(name).")
+            case "unavailable":
+                if info.supports("restartService") {
+                    return .init(title: "\(app)’s background service stopped answering", message: info.reason ?? "Restart it from here to bring your chats back.", step: .restartService, stepLabel: "Restart service")
+                }
+            default: break
+            }
+        }
+        if id == "stop", selectedProvider == .muse {
+            return .init(title: "Stop isn’t available for Muse", message: "Muse can’t be stopped from the controller. Stop it in Muse on the Mac.")
+        }
+        if id == "nativeVoice", providerInfo?.supports("nativeVoice") != true {
+            return .init(title: "Voice isn’t connected here", message: "Two-way voice mode is not connected here yet. Use Hold to talk to dictate a draft, then Send.")
+        }
+        if id == "sendPrompt", macIsReady, providerInfo?.supports("sendPrompt") != true {
+            return .init(title: "Send isn’t connected for \(app) here", message: "This Mac can open \(app) chats from the controller, but it can’t send to them yet.")
+        }
+        let wantsChat = id == "sendPrompt" || id == "dictate" || (action(id).map(needsChat) ?? false)
+        if wantsChat, selectedChat == nil {
+            let chatKeys = profile.slots.filter { $0.kind == "chat" }
+            if chatKeys.isEmpty {
+                let free = (0..<6).first { index in !profile.slots.contains { $0.index == index && $0.kind != "empty" } } ?? 0
+                return .init(title: "No chat on any key yet", message: "\(name) works on the chat you have open. Put a chat on a key to begin.", step: .assignKey(free), stepLabel: "Assign a chat")
+            }
+            return .init(title: "Choose a chat first", message: "\(name) works on the chat you have open. Tap one of your chat keys, then try again.")
+        }
+        if id == "sendPrompt" {
+            if hasUnresolvedSend {
+                return .init(title: "Check the last Send first", message: "The Mac never confirmed your previous Send to this chat. Look at it before sending again, so nothing goes twice.", step: .reviewSend, stepLabel: "Review it")
+            }
+            if draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                return .init(title: "Nothing to send yet", message: "Hold the microphone to dictate a draft, or type one. Then press Send.", step: .writeDraft, stepLabel: "Type a draft")
+            }
+        }
+        if id == "dictate", !canDictate {
+            let control = dictationControl
+            return .init(title: control.summary ?? "Hold to Talk isn’t ready", message: control.explanation ?? "Finish the current recording first.")
+        }
+        if id == "previousControllerChat", historyDestination(id) == nil {
+            return .init(title: "No earlier chat", message: "This key steps back through chats you opened from the controller. Open another chat first.")
+        }
+        if id == "nextControllerChat", historyDestination(id) == nil {
+            return .init(title: "No later chat", message: "This key steps forward again after you have gone back. You are on the latest chat.")
+        }
+        if isBusy { return .init(title: "One moment", message: "Another action is still finishing. Try again in a second.") }
+        return .init(title: "\(name) isn’t available right now", message: actionUnavailableReason(id) ?? "This action is not available for \(app) on this Mac.")
+    }
+    /// A key whose chat is gone from the Mac: say so, and offer to choose another for that key.
+    func hint(forMissingChatOn slot: SlotMapping) -> ControllerHint? {
+        guard let message = missingChatMessage(slot) else { return nil }
+        return .init(title: "This key’s chat can’t be found", message: message, step: .assignKey(slot.index), stepLabel: "Choose a chat")
+    }
+
     func actionUnavailableReason(_ id: String) -> String? {
         if id == "dictate", isRecording { return nil }
         if id == "nativeVoice", providerInfo?.supports("nativeVoice") != true {
@@ -617,7 +702,7 @@ final class ControllerStore: ObservableObject {
             let missing = missingChatMessage(slot)
             let chat = chats.first { $0.id == slot.targetID } ?? ChatRecord(id: slot.targetID, title: slot.title, state: "Unknown")
             await selectChat(chat, preferredSlotIndex: index)
-            if let missing, selectedChat?.id != chat.id, lastError != nil { lastError = missing }
+            if missing != nil, selectedChat?.id != chat.id, lastError != nil { lastError = nil; hint = hint(forMissingChatOn: slot) }
         } else if slot.kind == "action" {
             await runAction(slot.targetID)
         }
@@ -636,8 +721,9 @@ final class ControllerStore: ObservableObject {
     @discardableResult func runAction(_ id: String) async -> Bool {
         guard let action = action(id), canRunAction(id) else {
             let message = actionUnavailableReason(id) ?? "This action is not available."
-            if id == "sendPrompt", let route = currentRoute, let pending = settings.ledger.pendingSends[route.storageKey] { commandError(message,id:pending.commandID) }
-            else { lastError = message }
+            if id == "sendPrompt", let route = currentRoute, let pending = settings.ledger.pendingSends[route.storageKey] { errorCommandID = pending.commandID }
+            _ = message
+            hint = hint(forAction: id)
             return false
         }
         lastError = nil

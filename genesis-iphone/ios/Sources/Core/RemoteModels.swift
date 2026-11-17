@@ -137,6 +137,27 @@ enum ControllerShortcut: String, CaseIterable, Identifiable {
         }
     }
 }
+/// What a press needs before it can do anything, said in terms of that press,
+/// with the one step that gets there when there is one. Shown instead of a
+/// catch-all message, so a key that cannot act yet says why and offers the way.
+struct ControllerHint: Equatable, Identifiable {
+    enum Step: Equatable {
+        case assignKey(Int)     // choose a chat for this key
+        case writeDraft         // put the cursor in the draft
+        case reviewSend         // look at the Send whose result is unknown
+        case pairMac            // open Settings to pair
+        case openApp            // open (or widen) the app on the Mac
+        case restartService     // restart the app's background service on the Mac
+        case refresh            // ask the Mac again
+    }
+    var title: String
+    var message: String
+    var step: Step? = nil
+    /// The button that takes the step. Present exactly when `step` is.
+    var stepLabel: String? = nil
+    var id: String { title + "\n" + message }
+}
+
 struct DictationControlPresentation: Equatable {
     var label: String
     var accessibilityLabel: String

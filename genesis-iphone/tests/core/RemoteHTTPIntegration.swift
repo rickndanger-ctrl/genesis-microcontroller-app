@@ -413,6 +413,39 @@ final class FixtureCredentials: ControllerCredentialVault {
         expect(requests("GET /v1/chats") == offlineChats, "No lights refresh is attempted while the Mac is unreachable")
         first.setStatusUnavailable(false); first.setChatState("Idle"); await store.refresh()
         expect(store.lightsAreLive && store.activity(slot: 0) == .idle, "The lights come back with the Mac")
+
+        // A press that cannot act says what it needs, and offers the step when there is one.
+        let keptDraft = store.draft
+        store.draft = ""
+        var need = store.hint(forAction: "sendPrompt")
+        expect(need.title == "Nothing to send yet" && need.step == .writeDraft && need.stepLabel == "Type a draft",
+               "Send with an empty draft says there is nothing to send and offers the draft box")
+        store.lastError = nil
+        let ran = await store.runAction("sendPrompt")
+        expect(!ran && store.hint?.title == "Nothing to send yet" && store.lastError == nil,
+               "A key mapped to Send shows that hint, not a general error")
+        store.hint = nil
+        store.returnHome()
+        expect(store.selectedChat == nil && store.selectedSlotIndex == nil, "Home leaves no chat selected")
+        need = store.hint(forAction: "sendPrompt")
+        expect(need.title == "Choose a chat first" && need.step == nil && need.message.contains("Send"),
+               "Send with no chat open says to choose one, by name")
+        need = store.hint(forAction: "dictate")
+        expect(need.title == "Choose a chat first" && need.message.contains("Hold to Talk"), "Hold to Talk with no chat says the same in its own words")
+        first.setStatusUnavailable(true); await store.refresh()
+        need = store.hint(forAction: "sendPrompt")
+        expect(need.title.hasPrefix("Can’t reach") && need.step == .refresh && need.stepLabel == "Refresh",
+               "With the Mac away, Send says so and offers to try again")
+        need = store.hint(forAction: "dictate")
+        expect(need.title == "Choose a chat first", "Recording a draft does not need the Mac, only a chat")
+        first.setStatusUnavailable(false); await store.refresh()
+        await store.openSlot(0)
+        expect(store.selectedChat != nil && store.selectedSlotIndex == 0, "Pressing the key opens the chat again")
+        store.draft = keptDraft
+        let emptyKeys = ControllerStore(client: client, credentials: FixtureCredentials(),
+            persistence: ControllerPersistence(directory: temporary.appendingPathComponent("hints-unpaired")))
+        need = emptyKeys.hint(forAction: "sendPrompt")
+        expect(need.title == "Pair a Mac first" && need.step == .pairMac && need.stepLabel == "Open Settings", "An unpaired device is sent to pair, with the button")
         let beforeVoice = first.received.count
         await store.startNativeVoice()
         expect(first.received.count == beforeVoice, "Unavailable native voice cannot issue a network command")
@@ -734,7 +767,7 @@ final class FixtureCredentials: ControllerCredentialVault {
                "Denied microphone permission preserves the local Codex draft and offers typed input")
         _ = await codexStore.saveSlot(.init(index:1,kind:"action",title:"Legacy Send shortcut",targetID:"sendPrompt"))
         await codexStore.openSlot(1)
-        expect(codexStore.lastError?.contains("not available") == true && codexStore.draft == "Existing local Codex draft" &&
+        expect(codexStore.hint?.title == "Send isn’t connected for Codex here" && codexStore.hint?.step == nil && codexStore.draft == "Existing local Codex draft" &&
                codexFixture.received.filter { $0.0.hasPrefix("POST /v1/commands ") }.count == commandCount,
                "An older unsupported Send mapping explains its limitation without dispatching or discarding text")
         let capturePersistence = ControllerPersistence(directory:temporary.appendingPathComponent("codex-capture"))

@@ -794,9 +794,28 @@ final class ControllerUITests: XCTestCase {
         app.launch()
         XCTAssertTrue(app.buttons["Voice"].waitForExistence(timeout: 8))
         app.buttons["Voice"].tap()
-        XCTAssertTrue(app.alerts["Controller update"].waitForExistence(timeout: 3))
+        // A key that cannot act says why in its own words, not as a general error.
+        XCTAssertTrue(app.alerts["Voice isn’t connected here"].waitForExistence(timeout: 3))
         XCTAssertTrue(app.staticTexts["Two-way voice mode is not connected here yet. Use Hold to talk to dictate a draft, then Send."].exists)
+        XCTAssertFalse(app.alerts["Controller update"].exists)
         app.alerts.buttons["OK"].tap()
+        // Send with an empty draft offers the way forward, and the button takes it.
+        app.buttons["Send"].tap()
+        let nothing = app.alerts["Nothing to send yet"]
+        XCTAssertTrue(nothing.waitForExistence(timeout: 3))
+        XCTAssertTrue(nothing.buttons["Type a draft"].exists && nothing.buttons["Not now"].exists)
+        nothing.buttons["Type a draft"].tap()
+        XCTAssertTrue(app.keyboards.firstMatch.waitForExistence(timeout: 4), "Type a draft puts the cursor in the draft box")
+        app.textFields["controller.draft"].typeText("x")
+        if app.keyboards.buttons["Return"].exists { app.keyboards.buttons["Return"].tap() }
+        app.swipeDown()
+        // Home leaves no chat open; Send then says to choose one.
+        if !app.buttons["Return to chat selection"].isHittable { app.swipeDown() }
+        app.buttons["Return to chat selection"].tap()
+        app.buttons["Send"].tap()
+        XCTAssertTrue(app.alerts["Choose a chat first"].waitForExistence(timeout: 3))
+        app.alerts.buttons["OK"].tap()
+        app.buttons["C1, Controller app"].tap()
         for (index,title) in ["Send", "Stop", "Voice", "Artifacts"].enumerated() {
             app.buttons[title].press(forDuration: 0.8)
             XCTAssertTrue(app.navigationBars["Map quick key \(index + 1)"].waitForExistence(timeout: 3))

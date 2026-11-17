@@ -22,6 +22,7 @@ struct ControllerScreen: View {
     @State private var resolvingSend = false
     @State private var fullScreenController: Bool
     @State private var showDraftReview = false
+    @FocusState private var draftFocused: Bool
     @State private var showGlassesControls = false
     @State private var chatDialRotation: Double
     @State private var artifactDialRotation = 0.0
@@ -118,6 +119,15 @@ struct ControllerScreen: View {
         .sheet(item: Binding(get: { mappingIndex.map { MappingSelection(id: $0) } }, set: { mappingIndex = $0?.id })) { selection in
             MappingScreen(store: store, index: selection.id)
         }
+        // A press that cannot act yet: what it needs, and a button for the next step when there is one.
+        .alert(store.hint?.title ?? "", isPresented: Binding(get: { store.hint != nil }, set: { if !$0 { store.hint = nil } }), presenting: store.hint) { hint in
+            if let step = hint.step, let label = hint.stepLabel {
+                Button(label) { ControllerSound.shared.keyClick(); store.hint = nil; take(step) }
+                Button("Not now", role: .cancel) { ControllerSound.shared.keyClick(); store.hint = nil }
+            } else {
+                Button("OK", role: .cancel) { ControllerSound.shared.keyClick(); store.hint = nil }
+            }
+        } message: { hint in Text(hint.message) }
         .alert("Controller update", isPresented: Binding(get: { store.lastError != nil }, set: { if !$0 { store.lastError = nil; store.macDraftBlocksSend = false } })) {
             if store.macDraftBlocksSend {
                 // The one case with a way forward from here, and it throws away text on the Mac, so it is asked for.
@@ -625,6 +635,21 @@ struct ControllerScreen: View {
 
     /// Runs a key that was held back while the Mac finished the one before
     /// it. It is dropped instead if that command failed or took too long.
+    /// Does what a hint's button offers.
+    private func take(_ step: ControllerHint.Step) {
+        switch step {
+        case .assignKey(let index): dialSlot = index; mappingIndex = index
+        case .writeDraft:
+            // Full screen keeps the draft in its review sheet; the main layout has the box on screen.
+            if fullScreenController { showDraftReview = true } else { draftFocused = true }
+        case .reviewSend: showDraftReview = true
+        case .pairMac: showSettings = true
+        case .openApp: Task { await store.openProviderApp() }
+        case .restartService: Task { await store.restartProviderService() }
+        case .refresh: Task { await store.refresh() }
+        }
+    }
+
     private func runDeferredTap() {
         guard let tap = deferredTap else { return }
         deferredTap = nil
@@ -876,7 +901,7 @@ struct ControllerScreen: View {
         if dictationAction { UIImpactFeedbackGenerator(style: .soft).impactOccurred() }
         else if !replayed { ControllerSound.shared.keyClick() }
         guard store.canRunAction(id) else {
-            store.lastError = store.actionUnavailableReason(id) ?? "This action is not available."
+            store.hint = store.hint(forAction: id)
             return
         }
         Task {
@@ -889,7 +914,7 @@ struct ControllerScreen: View {
         let reason = blockedTalkReason
         blockedTalkReason = nil
         guard heldTalk else {
-            if let reason { store.lastError = reason }
+            if reason != nil { store.hint = store.hint(forAction: "dictate") }
             return
         }
         heldTalk = false
@@ -943,7 +968,7 @@ struct ControllerScreen: View {
                     UIImpactFeedbackGenerator(style: .soft).impactOccurred()
                     Task { await store.startDictation() }
                 }
-                else { ControllerSound.shared.keyClick(); store.lastError = store.dictationControl.explanation }
+                else { ControllerSound.shared.keyClick(); store.hint = store.hint(forAction: "dictate") }
             }
     }
 
@@ -962,6 +987,7 @@ struct ControllerScreen: View {
                 Text(providerName).font(isPad ? .caption : .caption2).foregroundStyle(GenesisPalette.dim)
             }
             TextField(codexDraftOnly ? "Local draft — Send is not connected yet" : "Hold the microphone, or type a draft…", text: $store.draft, axis: .vertical)
+                .focused($draftFocused)
                 .font(.system(size: isPad ? 17 : 14)).lineLimit(isPad ? 3...8 : 2...5).disabled(store.selectedChat == nil || store.isRecording || store.isFinalizing)
                 // The field shows its first lines and cannot scroll while it
                 // is disabled for dictation, so new words past the last line
