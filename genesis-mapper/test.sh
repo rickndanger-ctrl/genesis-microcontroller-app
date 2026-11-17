@@ -21,4 +21,8 @@ xcrun swiftc "$ROOT/Sources/RemoteNavigationLease.swift" "$ROOT/tests/RemoteNavi
 "$ROOT/test-build/remote-navigation-lease"
 xcrun swiftc -parse-as-library "$ROOT/Sources/MuseChatList.swift" "$ROOT/tests/MuseChatListTests.swift" -o "$ROOT/test-build/muse-chat-list"
 "$ROOT/test-build/muse-chat-list"
+xcrun swiftc -parse-as-library "$ROOT/Sources/ActivityLog.swift" "$ROOT/tests/ActivityLogTests.swift" -o "$ROOT/test-build/activity-log"
+"$ROOT/test-build/activity-log"
+xcrun swiftc -parse-as-library "$ROOT/Sources/SelfCheck.swift" "$ROOT/tests/SelfCheckTests.swift" -o "$ROOT/test-build/self-check"
+"$ROOT/test-build/self-check"
 sh "$ROOT/test-display-session.sh"

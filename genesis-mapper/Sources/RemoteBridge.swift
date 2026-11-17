@@ -11,6 +11,12 @@ import CoreImage.CIFilterBuiltins
     @Published var chats:[RemoteChat]=[]
     @Published var artifacts:[RemoteArtifact]=[]
     @Published var lastResult="No remote commands yet."
+    /// The newest command results, newest first, for the companion's window.
+    @Published var recentActivity:[ActivityEntry]=[]
+    @Published var lastSelfCheck:RemoteSelfCheck?
+    @Published var checking=false
+    private var activity:ActivityLog?
+    static let companionVersion=Bundle.main.object(forInfoDictionaryKey:"CFBundleShortVersionString") as? String ?? "development"
     private(set) var store:RemoteStore?
     private var server:RemoteHTTPServer?
     private let access=ClaudeAccess()
@@ -109,7 +115,7 @@ import CoreImage.CIFilterBuiltins
             let reason=readiness=="ready" ? "Native live voice is not yet available on the phone.":readiness=="locked" ? "Unlock this Mac to use desktop controls.":readiness=="closed" ? "Open Claude on this Mac.":"Enable Accessibility for Agent Micro Controller."
             return RemoteProvider(id:provider,name:"Claude",installed:installed,readiness:readiness,capabilities:readiness=="ready" ? ["openChat","sendPrompt","stop","artifacts","menuNavigation"] + RemoteActionCatalog.claude.map{$0.action.id}:["artifacts"],reason:reason,actions:RemoteActionCatalog.claude.map(\.action))
         }
-        return RemoteHostStatus(hostID:store?.hostID ?? "",hostName:hostName,providers:providers)
+        return RemoteHostStatus(hostID:store?.hostID ?? "",hostName:hostName,providers:providers,companionVersion:Self.companionVersion)
     }
     func loadCodexChats(force:Bool=false) async -> [RemoteChat] {
         guard !isLocked,NSWorkspace.shared.urlForApplication(withBundleIdentifier:"com.openai.codex") != nil else{return []}
@@ -131,6 +137,46 @@ import CoreImage.CIFilterBuiltins
             }
             return []
         }
+    }
+    /// Records what a command was and how it ended. Never the prompt: a
+    /// command's text does not reach this function, only its action and result.
+    private func note(_ command:RemoteCommand,status:String,message:String,started:Date) {
+        if activity==nil,let store {activity=ActivityLog(url:store.directory.appendingPathComponent("activity.jsonl"))}
+        activity?.record(provider:command.provider,action:command.action,status:status,message:message,durationMs:Int(Date().timeIntervalSince(started)*1000))
+        recentActivity=Array((activity?.recent(40) ?? []).reversed())
+    }
+    func loadActivity() {
+        if activity==nil,let store {activity=ActivityLog(url:store.directory.appendingPathComponent("activity.jsonl"))}
+        recentActivity=Array((activity?.recent(40) ?? []).reversed())
+    }
+    /// Looks at each app the controller drives and reports what it can find.
+    /// Read-only, except that counting Muse's chats shows Muse's chat panel.
+    func selfCheck() async -> RemoteSelfCheck {
+        checking=true;defer{checking=false}
+        func installed(_ bundle:String)->Bool {NSWorkspace.shared.urlForApplication(withBundleIdentifier:bundle) != nil}
+        func running(_ bundle:String)->Bool {NSRunningApplication.runningApplications(withBundleIdentifier:bundle).contains{!$0.isTerminated}}
+        let mac=SelfCheck.Mac(unlocked:!isLocked,accessibility:AXIsProcessTrusted())
+        var items=SelfCheck.mac(mac)
+        let readable=mac.unlocked && mac.accessibility
+        items += SelfCheck.claude(readable ? access.readSnapshot {access.selfCheck(installed:installed(access.bundle),running:running(access.bundle))}
+                                           : access.selfCheck(installed:installed(access.bundle),running:false),mac:mac)
+        let museSeen:SelfCheck.Muse = readable && running(MuseAccess.bundle) ? await muse.selfCheck(installed:installed(MuseAccess.bundle))
+            : .init(installed:installed(MuseAccess.bundle),running:running(MuseAccess.bundle),navigable:false,messageBoxes:0,answering:false,chats:0,sharedTitles:0,callControls:0)
+        items += SelfCheck.muse(museSeen,mac:mac)
+        let codexBundle="com.openai.codex"
+        let saved=mac.unlocked ? await loadCodexChats(force:true):[]
+        var menus=false
+        if readable,let app=NSRunningApplication.runningApplications(withBundleIdentifier:codexBundle).first(where:{!$0.isTerminated}) {
+            let root=AXUIElementCreateApplication(app.processIdentifier);AXUIElementSetMessagingTimeout(root,0.4)
+            var bar:CFTypeRef?
+            menus=AXUIElementCopyAttributeValue(root,kAXMenuBarAttribute as CFString,&bar) == .success
+        }
+        let queue=NSWorkspace.shared.urlForApplication(withBundleIdentifier:codexBundle).flatMap(CodexQueuePolicy.executable) != nil
+            && CodexQueuePolicy.usesDefaultHome(environment:ProcessInfo.processInfo.environment,home:FileManager.default.homeDirectoryForCurrentUser)
+        items += SelfCheck.codex(.init(installed:installed(codexBundle),running:running(codexBundle),inventoryReachable:codexInventoryAvailable,savedChats:saved.count,menuBarReadable:menus,queueAvailable:queue),mac:mac)
+        let report=RemoteSelfCheck(checkedAt:Date(),companionVersion:Self.companionVersion,summary:SelfCheck.summary(items),items:items)
+        lastSelfCheck=report
+        return report
     }
     func loadMuseChats() async -> [RemoteChat] {
         guard enabled,!isLocked,AXIsProcessTrusted(),let listing=await muse.listing() else{return []}
@@ -323,13 +369,20 @@ import CoreImage.CIFilterBuiltins
                 try RemotePolicy.validate(command,hostID:store.hostID)
                 if let receipt=try store.previous(command) {return .json(receipt)}
                 // 409, not 503: the phone must be able to tell "refused, nothing ran" from "result unknown".
-                guard !commandBusy else{return .error(409,"Another controller action is finishing. Nothing was sent.")}
+                guard !commandBusy else {
+                    note(command,status:"refused",message:"Another controller action was still finishing.",started:Date())
+                    return .error(409,"Another controller action is finishing. Nothing was sent.")
+                }
                 try store.begin(command);commandBusy=true
                 defer{commandBusy=false}
+                let started=Date()
                 let receipt=await execute(command)
+                note(command,status:receipt.status,message:receipt.message,started:started)
                 do {try store.finish(receipt)} catch{return .json(RemoteReceipt(id:command.id,status:"uncertain",message:"Could not persist the command result. Inspect the chat before sending again."))}
                 lastResult=receipt.message;return .json(receipt)
             }
+            if request.method=="GET",path=="/v1/diagnostics/selfcheck" {return .json(await selfCheck())}
+            if request.method=="GET",path=="/v1/diagnostics/activity" {return .json(RemoteActivity(entries:activity?.recent(100) ?? []))}
             if request.method=="GET",path.hasPrefix("/v1/commands/") {
                 let id=String(path.dropFirst("/v1/commands/".count))
                 guard let receipt=store.archive.ledger[id]?.receipt else{return .error(404,"Command is not known. Do not assume it is safe to resend.")}
@@ -630,7 +683,39 @@ struct RemotePairingView:View {
             ForEach(bridge.artifacts.filter{$0.provider==provider},id:\.id) { item in HStack {Image(systemName:item.kind=="web" ? "globe":"doc");Text(item.title);Spacer();Button("Remove"){bridge.removeArtifact(item.id)}}.padding(8).background(.quaternary,in:RoundedRectangle(cornerRadius:8)) }
             Divider()
             Text(bridge.lastResult).font(.callout).textSelection(.enabled)
+            Divider()
+            HStack {
+                Text("Check this Mac").font(.title3.bold())
+                Spacer()
+                Text("Version \(GenesisRemoteBridge.companionVersion)").font(.caption).foregroundStyle(.secondary)
+                Button(bridge.checking ? "Checking…":"Run check"){Task{_ = await bridge.selfCheck()}}.disabled(bridge.checking)
+            }
+            Text("Looks for each control the phone relies on in Claude, Muse and Codex. Nothing is sent or changed, except that Muse’s chat list is shown so its chats can be counted.").font(.caption).foregroundStyle(.secondary)
+            if let report=bridge.lastSelfCheck {
+                Text(report.summary).font(.callout.weight(.semibold))
+                ForEach(Array(report.items.enumerated()),id:\.offset) { _,item in
+                    HStack(alignment:.firstTextBaseline,spacing:8) {
+                        Image(systemName:item.ok ? "checkmark.circle.fill":"exclamationmark.triangle.fill").foregroundStyle(item.ok ? .green:.orange)
+                        Text("\(item.provider.capitalized) · \(item.name)").font(.callout.weight(.medium)).frame(width:210,alignment:.leading)
+                        Text(item.detail).font(.callout).foregroundStyle(.secondary).textSelection(.enabled)
+                        Spacer(minLength:0)
+                    }
+                }
+            }
+            Divider()
+            Text("Recent activity").font(.title3.bold())
+            Text("What each phone command was and how it ended. Message text is never recorded.").font(.caption).foregroundStyle(.secondary)
+            if bridge.recentActivity.isEmpty {Text("No commands yet.").font(.callout).foregroundStyle(.secondary)}
+            ForEach(Array(bridge.recentActivity.enumerated()),id:\.offset) { _,entry in
+                HStack(alignment:.firstTextBaseline,spacing:8) {
+                    Text(entry.time,format:.dateTime.month(.abbreviated).day().hour().minute().second()).font(.caption.monospacedDigit()).foregroundStyle(.secondary).frame(width:128,alignment:.leading)
+                    Text("\(entry.provider.capitalized) · \(entry.action)").font(.callout.weight(.medium)).frame(width:190,alignment:.leading)
+                    Text(entry.status).font(.caption.weight(.semibold)).foregroundStyle(entry.status=="confirmed" || entry.status=="queued" ? .green:.orange).frame(width:74,alignment:.leading)
+                    Text(entry.message).font(.callout).foregroundStyle(.secondary).lineLimit(2).textSelection(.enabled)
+                    Spacer(minLength:0)
+                }
+            }
             Text("Claude desktop controls require Claude to be open, an unlocked Mac, and Accessibility. Codex supports saved-chat selection, phone Send, and available Mac menu controls. Stop and native live voice are not connected for Codex; native live voice is also unavailable for Claude. Muse needs to be open: its chats, Send, New side chat and Call are connected, and side chats that share a title are left out.").font(.caption).foregroundStyle(.secondary)
-        }.padding(28)}.frame(minWidth:740,minHeight:640)
+        }.padding(28)}.frame(minWidth:740,minHeight:640).task{bridge.loadActivity()}
     }
 }

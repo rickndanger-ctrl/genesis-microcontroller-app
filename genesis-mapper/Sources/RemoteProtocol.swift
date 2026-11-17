@@ -3,7 +3,10 @@ import CryptoKit
 import Security
 
 struct RemoteProvider: Codable { var id: String; var name: String; var installed: Bool; var readiness: String; var capabilities: [String]; var reason: String?; var actions: [RemoteAction]? = nil }
-struct RemoteHostStatus: Codable { var protocolVersion = 1; var hostID: String; var hostName: String; var providers: [RemoteProvider]; var displaySession: Bool = true }
+struct RemoteHostStatus: Codable { var protocolVersion = 1; var hostID: String; var hostName: String; var providers: [RemoteProvider]; var displaySession: Bool = true; var companionVersion: String? = nil }
+/// The result of "Check this Mac": what the companion could and could not find.
+struct RemoteSelfCheck: Codable { var checkedAt: Date; var companionVersion: String; var summary: String; var items: [SelfCheckItem] }
+struct RemoteActivity: Codable { var entries: [ActivityEntry] }
 struct RemoteChat: Codable { var id: String; var title: String; var state: String }
 struct RemoteSlot: Codable { var index: Int; var kind: String; var title: String; var targetID: String }
 struct RemoteProfile: Codable { var provider: String; var revision: Int; var slots: [RemoteSlot]; var quickActions: [String]? = nil }

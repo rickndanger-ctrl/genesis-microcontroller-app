@@ -60,6 +60,23 @@ final class ClaudeAccess {
     }
     var lastActivitySnapshot=""
     let states=["Awaiting input","Something went wrong","Needs input","Working","Running","Idle","Unread"]
+    /// What a self-check needs to know about Claude's window, from one read.
+    func selfCheck(installed:Bool,running:Bool)->SelfCheck.Claude {
+        guard running,AXIsProcessTrusted() else {
+            return .init(installed:installed,running:running,sessionRows:0,promptFields:0,sendOrStopButtons:0,modelChoosers:0,permissionChooserFound:false)
+        }
+        let all=nodes()
+        func role(_ e:AXUIElement)->String {value(e,kAXRoleAttribute) as? String ?? ""}
+        let prompts=all.filter {role($0)==kAXTextAreaRole && value($0,kAXDescriptionAttribute) as? String=="Prompt"}.count
+        let send=all.filter {role($0)==kAXButtonRole && ["Send","Stop"].contains(text($0))}.count
+        let models=all.filter {role($0)==kAXPopUpButtonRole && text($0).hasPrefix("Model:")}
+        var permission=false
+        if models.count==1,let parent=value(models[0],kAXParentAttribute),CFGetTypeID(parent)==AXUIElementGetTypeID(),
+           let row=value(parent as! AXUIElement,kAXChildrenAttribute) as? [AXUIElement] {
+            permission=ControllerAction.permissionChooser(among:row.map {(role:role($0),text:text($0))}) != nil
+        }
+        return .init(installed:installed,running:running,sessionRows:sessions(all).count,promptFields:prompts,sendOrStopButtons:send,modelChoosers:models.count,permissionChooserFound:permission)
+    }
     func sessions(_ nodes: [AXUIElement]) -> [Session] {
         var result=[Session]()
         for e in nodes where value(e,kAXRoleAttribute) as? String == kAXButtonRole {

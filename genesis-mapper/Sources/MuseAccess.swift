@@ -166,6 +166,18 @@ final class MuseAccess {
         return texts
     }
 
+    /// What a self-check needs to know about Muse's window. Counting the chats
+    /// means showing the chat panel, which is the only thing this changes.
+    @MainActor func selfCheck(installed: Bool) async -> SelfCheck.Muse {
+        guard let seen = snapshot() else {
+            return .init(installed: installed, running: app != nil, navigable: false, messageBoxes: 0, answering: false, chats: 0, sharedTitles: 0, callControls: 0)
+        }
+        let listed = await listing()
+        return .init(installed: installed, running: true, navigable: seen.toggle != nil || !seen.backToMain.isEmpty,
+                     messageBoxes: seen.boxes.count, answering: !seen.answering.isEmpty,
+                     chats: listed?.chats.count ?? 0, sharedTitles: listed?.ambiguous.count ?? 0, callControls: seen.call.count)
+    }
+
     /// How many times this draft appears among the newest messages of the open chat.
     func deliveries(of prompt: String) -> Int {
         MuseChatList.deliveries(in: recentHistory(snapshot()?.history), prompt: prompt)
