@@ -29,6 +29,7 @@ struct ProviderInfo: Codable, Equatable, Identifiable {
     func supports(_ action: String) -> Bool {
         guard capabilities.contains(action) else { return false }
         if action == "artifacts" { return true } // Registered exports do not require an interactive desktop.
+        if action == "launchApp" { return installed && readiness == "closed" } // Only offered while the app is shut.
         if id == "codex", ["newChat", "openSettings", "openSkills"].contains(action) {
             return installed && readiness != "locked" // Explicit launch routes do not need saved-chat inventory.
         }
@@ -175,6 +176,8 @@ struct HostStatus: Codable, Equatable {
     var hostID: String
     var hostName: String
     var providers: [ProviderInfo]
+    /// Absent from companions older than 0.6.0. See `CompanionSupport`.
+    var companionVersion: String? = nil
 }
 struct ChatRecord: Codable, Identifiable, Equatable {
     var id: String

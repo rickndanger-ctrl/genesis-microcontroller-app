@@ -363,6 +363,36 @@ final class ControllerUITests: XCTestCase {
     }
 
     @MainActor
+    func testCheckThisMacShowsSelfCheckAndActivity() {
+        continueAfterFailure = false
+        let app = XCUIApplication()
+        app.launchArguments = ["--demo"]
+        XCUIDevice.shared.orientation = .portrait
+        app.launch()
+        XCTAssertTrue(app.buttons["Settings and Mac pairing"].waitForExistence(timeout: 8))
+        XCTAssertFalse(app.descendants(matching: .any)["controller.companionNotice"].exists, "The demo has no Mac to be out of date")
+        XCTAssertFalse(app.buttons["controller.openApp"].exists, "Nothing to open while the sample apps are ready")
+        app.buttons["Settings and Mac pairing"].tap()
+        XCTAssertTrue(app.navigationBars["Your controller"].waitForExistence(timeout: 5))
+        let link = app.buttons["settings.diagnostics"]
+        for _ in 0..<6 where !link.isHittable { app.swipeUp() }
+        XCTAssertTrue(link.isHittable, "Check this Mac can be reached in Settings")
+        link.tap()
+        let run = app.buttons["diagnostics.run"]
+        XCTAssertTrue(run.waitForExistence(timeout: 5))
+        XCTAssertTrue(app.staticTexts["Opened Design studio."].waitForExistence(timeout: 5), "Recent activity loads with the screen")
+        XCTAssertFalse(app.staticTexts["diagnostics.summary"].exists, "No result is shown before a check is run")
+        run.tap()
+        let summary = app.staticTexts["diagnostics.summary"]
+        XCTAssertTrue(summary.waitForExistence(timeout: 5))
+        XCTAssertEqual(summary.label, "1 of 8 checks needs attention: Codex – Menu controls.")
+        XCTAssertTrue(app.staticTexts["This Mac"].exists && app.staticTexts["Claude"].exists, "Results are grouped by app")
+        saveFullscreenScreenshot("Check this Mac, results")
+        app.navigationBars.buttons.element(boundBy: 0).tap()
+        XCTAssertTrue(app.navigationBars["Your controller"].waitForExistence(timeout: 5), "Back returns to Settings")
+    }
+
+    @MainActor
     func testGlassesSwitchHidesGlassesControls() {
         continueAfterFailure = false
         let app = XCUIApplication()

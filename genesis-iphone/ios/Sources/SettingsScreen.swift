@@ -88,6 +88,15 @@ struct SettingsScreen: View {
                         Text(info.reason ?? "Select a mapped chat to begin.").font(.caption).foregroundStyle(.secondary)
                     }
                     Button("Refresh") { ControllerSound.shared.keyClick(); Task { await store.refresh() } }
+                    if let notice = store.companionNotice {
+                        Label(notice, systemImage: "arrow.down.circle").font(.caption).foregroundStyle(.orange)
+                    }
+                    if store.isPaired {
+                        NavigationLink { DiagnosticsScreen(store: store) } label: {
+                            Label("Check \(store.selectedHost?.name ?? "this Mac")", systemImage: "stethoscope")
+                        }
+                        .accessibilityIdentifier("settings.diagnostics")
+                    }
                 }
                 Section("Glasses") {
                     Toggle("I use Even G2 glasses", isOn: Binding(get: { glassesFeature }, set: { enabled in

@@ -109,11 +109,11 @@ import CoreImage.CIFilterBuiltins
                 // message box and read back before Return; see MuseAccess.
                 let readiness=isLocked ? "locked":!AXIsProcessTrusted() ? "needsAccessibility":!running ? "closed":"ready"
                 let reason=readiness=="ready" ? "Chats, Send, New side chat and Call are connected. Send briefly brings Muse to the front and uses the clipboard, which is restored afterwards. Chats that share a title are left out.":readiness=="locked" ? "Unlock this Mac to use Muse.":readiness=="closed" ? "Open Muse on this Mac.":"Enable Accessibility for Agent Micro Controller."
-                return RemoteProvider(id:provider,name:"Muse",installed:installed,readiness:readiness,capabilities:readiness=="ready" ? RemoteMuse.capabilities:["artifacts"],reason:reason,actions:RemoteMuse.actions)
+                return RemoteProvider(id:provider,name:"Muse",installed:installed,readiness:readiness,capabilities:readiness=="ready" ? RemoteMuse.capabilities:readiness=="closed" && installed ? ["artifacts","launchApp"]:["artifacts"],reason:reason,actions:RemoteMuse.actions)
             }
             let readiness=isLocked ? "locked":!AXIsProcessTrusted() ? "needsAccessibility":!running ? "closed":"ready"
             let reason=readiness=="ready" ? "Native live voice is not yet available on the phone.":readiness=="locked" ? "Unlock this Mac to use desktop controls.":readiness=="closed" ? "Open Claude on this Mac.":"Enable Accessibility for Agent Micro Controller."
-            return RemoteProvider(id:provider,name:"Claude",installed:installed,readiness:readiness,capabilities:readiness=="ready" ? ["openChat","sendPrompt","stop","artifacts","menuNavigation"] + RemoteActionCatalog.claude.map{$0.action.id}:["artifacts"],reason:reason,actions:RemoteActionCatalog.claude.map(\.action))
+            return RemoteProvider(id:provider,name:"Claude",installed:installed,readiness:readiness,capabilities:readiness=="ready" ? ["openChat","sendPrompt","stop","artifacts","menuNavigation"] + RemoteActionCatalog.claude.map{$0.action.id}:readiness=="closed" && installed ? ["artifacts","launchApp"]:["artifacts"],reason:reason,actions:RemoteActionCatalog.claude.map(\.action))
         }
         return RemoteHostStatus(hostID:store?.hostID ?? "",hostName:hostName,providers:providers,companionVersion:Self.companionVersion)
     }
@@ -181,6 +181,24 @@ import CoreImage.CIFilterBuiltins
     func loadMuseChats() async -> [RemoteChat] {
         guard enabled,!isLocked,AXIsProcessTrusted(),let listing=await muse.listing() else{return []}
         return listing.chats.map{RemoteChat(id:RemotePolicy.chatID("muse",$0.title),title:$0.title,state:$0.current ? "Current":$0.unread ? "Unread":"Open")}
+    }
+    /// Opens a provider's app so someone away from the Mac is not stuck at
+    /// "open it on the Mac". It only opens the app; it sends and changes nothing.
+    private func launchApp(_ command:RemoteCommand) async -> RemoteReceipt {
+        func result(_ state:String,_ message:String)->RemoteReceipt {RemoteReceipt(id:command.id,status:state,message:message)}
+        let names=["claude":"Claude","muse":"Muse","codex":"Codex"],bundles=["claude":access.bundle,"muse":MuseAccess.bundle,"codex":"com.openai.codex"]
+        guard let name=names[command.provider],let bundle=bundles[command.provider] else{return result("failed","Unknown app.")}
+        guard !isLocked else{return result("failed","Unlock this Mac to open \(name).")}
+        func running()->Bool {NSRunningApplication.runningApplications(withBundleIdentifier:bundle).contains{!$0.isTerminated}}
+        if running() {return result("confirmed","\(name) is already open on this Mac.")}
+        guard let url=NSWorkspace.shared.urlForApplication(withBundleIdentifier:bundle) else{return result("failed","\(name) is not installed on this Mac.")}
+        let configuration=NSWorkspace.OpenConfiguration();configuration.activates=true
+        do {_ = try await NSWorkspace.shared.openApplication(at:url,configuration:configuration)} catch{return result("failed","macOS could not open \(name).")}
+        for _ in 0..<40 {
+            if running() {return result("confirmed","Opened \(name) on this Mac. Give it a moment to load, then refresh.")}
+            try? await Task.sleep(nanoseconds:250_000_000)
+        }
+        return result("uncertain","\(name) was asked to open but has not appeared yet. Refresh in a moment.")
     }
     private func executeMuse(_ command:RemoteCommand) async -> RemoteReceipt {
         func result(_ outcome:MuseAccess.Outcome)->RemoteReceipt {RemoteReceipt(id:command.id,status:outcome.status,message:outcome.message)}
@@ -523,6 +541,7 @@ import CoreImage.CIFilterBuiltins
             }
             return NSWorkspace.shared.open(url) ? result("confirmed","Opened artifact on this Mac."):result("failed","The Mac could not open this artifact.")
         }
+        if command.action=="launchApp" {return await launchApp(command)}
         if command.provider=="muse" {return await executeMuse(command)}
         if command.provider=="codex" {
             if command.action=="sendPrompt" {
@@ -598,6 +617,8 @@ import CoreImage.CIFilterBuiltins
             let fields=access.nodes().filter{access.value($0,kAXRoleAttribute) as? String==kAXTextAreaRole && access.value($0,kAXDescriptionAttribute) as? String=="Prompt"}
             return fields.count==1 ? fields[0]:nil
         }
+        // Wait for hands to be off the keys so nothing typed on the Mac lands in the draft.
+        guard await MacInput.waitForQuiet() else{return result("failed","\(MacInput.busyMessage); nothing was inserted.")}
         guard let field=composer() else{return result("failed","Send could not find one Claude Prompt composer in this chat. Nothing was inserted or replaced.")}
         guard let existing=access.value(field,kAXValueAttribute) as? String else{return result("failed","Send could not read the Mac composer to check for an existing draft. Nothing was inserted or replaced.")}
         guard RemoteComposerPolicy.isBlank(existing) else{return result("failed","The Mac composer already contains a draft. Clear it on the Mac first; nothing was replaced or sent.")}

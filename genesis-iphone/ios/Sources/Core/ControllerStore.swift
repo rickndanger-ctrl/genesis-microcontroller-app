@@ -143,6 +143,48 @@ final class ControllerStore: ObservableObject {
         if ["previousControllerChat", "nextControllerChat"].contains(id), historyDestination(id) == nil { return "No \(id == "previousControllerChat" ? "earlier" : "later") chat opened from this controller." }
         return nil
     }
+    /// A sentence to show when the selected Mac's companion is older than this app is written for.
+    var companionNotice: String? {
+        guard !isDemo, let status else { return nil }
+        return CompanionSupport.notice(hostName: selectedHost?.name ?? "", reported: status.companionVersion)
+    }
+    /// The selected app is installed but shut, and the Mac can open it for us.
+    var canOpenProviderApp: Bool { !isBusy && providerInfo?.supports("launchApp") == true }
+    /// Opens the selected app on the Mac. It sends nothing to it.
+    func openProviderApp() async {
+        guard canOpenProviderApp else { return }
+        let receipt = await execute(action: "launchApp", chatID: nil)
+        guard receipt?.isConfirmed == true else { return }
+        // Give the app a moment to draw its window before asking what it shows.
+        try? await Task.sleep(nanoseconds: 2_000_000_000)
+        await refresh()
+    }
+    /// Asks the selected Mac what it can find in the apps it controls.
+    func selfCheck() async throws -> SelfCheckReport {
+        if isDemo { return Self.demoSelfCheck }
+        let (host, token) = try connection()
+        return try await client.fetch(SelfCheckReport.self, host: host, token: token, path: "/v1/diagnostics/selfcheck", deadline: 45)
+    }
+    func recentActivity() async throws -> ActivityReport {
+        if isDemo { return Self.demoActivity }
+        let (host, token) = try connection()
+        return try await client.fetch(ActivityReport.self, host: host, token: token, path: "/v1/diagnostics/activity", deadline: 10)
+    }
+    private static let demoSelfCheck = SelfCheckReport(checkedAt: Date(), companionVersion: "0.6.0", summary: "1 of 8 checks needs attention: Codex – Menu controls.", items: [
+        .init(provider: "mac", name: "Unlocked", ok: true, detail: "This Mac is unlocked."),
+        .init(provider: "mac", name: "Accessibility", ok: true, detail: "Agent Micro Controller is allowed to control other apps."),
+        .init(provider: "claude", name: "Session list", ok: true, detail: "6 sessions found."),
+        .init(provider: "claude", name: "Message box", ok: true, detail: "One message box found."),
+        .init(provider: "muse", name: "Chats", ok: true, detail: "4 chats offered."),
+        .init(provider: "muse", name: "Message box", ok: true, detail: "One message box found."),
+        .init(provider: "codex", name: "Saved chats", ok: true, detail: "12 saved chats found."),
+        .init(provider: "codex", name: "Menu controls", ok: false, detail: "Open Codex to use its menu controls."),
+    ])
+    private static let demoActivity = ActivityReport(entries: [
+        .init(time: Date().addingTimeInterval(-180), provider: "claude", action: "openChat", status: "confirmed", message: "Opened Design studio.", durationMs: 640),
+        .init(time: Date().addingTimeInterval(-95), provider: "claude", action: "sendPrompt", status: "confirmed", message: "Prompt sent; Claude is responding.", durationMs: 1820),
+        .init(time: Date().addingTimeInterval(-20), provider: "codex", action: "toggleSidebar", status: "failed", message: "Open Codex on this Mac before using its menu controls.", durationMs: 40),
+    ])
     var chatAvailabilityMessage: String {
         if !isPaired { return "Pair this Mac to see its available chats." }
         guard let info = providerInfo else {

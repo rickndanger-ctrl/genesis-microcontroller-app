@@ -121,7 +121,12 @@ final class MuseAccess {
     /// command after a quiet spell failed and the second one worked.
     @MainActor private func settled() async -> Snapshot? {
         var seen = snapshot()
-        for _ in 0..<12 {
+        // A cold start takes Muse several seconds to draw its chat screen, so
+        // an app launched moments ago gets longer than one that is merely idle.
+        let justLaunched = app?.launchDate.map { Date().timeIntervalSince($0) < 30 } ?? false
+        // The phone gives a command twelve seconds, so the waits here and in
+        // `panel` together stay under nine.
+        for _ in 0..<(justLaunched ? 24 : 12) {
             if let seen, seen.isRecognisable { return seen }
             try? await Task.sleep(nanoseconds: 250_000_000)
             seen = snapshot()
@@ -134,6 +139,18 @@ final class MuseAccess {
     /// main chat, which abandons it, so that step is taken only when asked.
     @MainActor private func panel(leavingUnnamedChat: Bool = false) async -> Snapshot? {
         guard var first = await settled() else { return nil }
+        // Muse draws its message box before the button that shows the chat
+        // list, so a screen can be recognisable and still have no way to the
+        // list. Wait for one: the button, the open panel, or a way back.
+        if first.toggle == nil, !first.panelOpen, first.backToMain.isEmpty {
+            let justLaunched = app?.launchDate.map { Date().timeIntervalSince($0) < 30 } ?? false
+            for _ in 0..<(justLaunched ? 12 : 10) {
+                try? await Task.sleep(nanoseconds: 250_000_000)
+                guard let fresh = snapshot() else { continue }
+                first = fresh
+                if fresh.toggle != nil || fresh.panelOpen || !fresh.backToMain.isEmpty { break }
+            }
+        }
         if first.toggle == nil, !first.panelOpen, leavingUnnamedChat, first.backToMain.count == 1 {
             let back = first.backToMain[0]
             _ = AXUIElementPerformAction(back, kAXPressAction as CFString)
@@ -147,13 +164,21 @@ final class MuseAccess {
                 }
             }
         }
-        guard !first.panelOpen, let toggle = first.toggle,
-              AXUIElementPerformAction(toggle, kAXPressAction as CFString) == .success else { return first }
-        for _ in 0..<10 {
-            try? await Task.sleep(nanoseconds: 150_000_000)
-            if let fresh = snapshot(), fresh.panelOpen { return fresh }
+        if !first.panelOpen, let toggle = first.toggle, AXUIElementPerformAction(toggle, kAXPressAction as CFString) == .success {
+            for _ in 0..<10 {
+                try? await Task.sleep(nanoseconds: 150_000_000)
+                if let fresh = snapshot(), fresh.panelOpen { first = fresh; break }
+            }
         }
-        return snapshot()
+        // The panel always lists at least the main chat. An open panel with no
+        // rows has not finished loading, as happens just after Muse starts.
+        if first.panelOpen, first.rows.isEmpty {
+            for _ in 0..<16 {
+                try? await Task.sleep(nanoseconds: 250_000_000)
+                if let fresh = snapshot(), fresh.panelOpen, !fresh.rows.isEmpty { return fresh }
+            }
+        }
+        return first
     }
 
     /// The chats that can be addressed. While an unnamed side chat is open
@@ -299,6 +324,8 @@ final class MuseAccess {
               isMuseWindow(at: point, pid: pid) else {
             return .failed("The Muse chat row is covered or off-screen. No click was sent.")
         }
+        // Never click through someone's drag.
+        guard await MacInput.waitForQuiet(needed: 0, timeout: 1.5) else { return .failed("\(MacInput.busyMessage); no chat was opened.") }
         let pointer = CGEvent(source: nil)?.location
         click(point)
         defer { if let pointer { CGEvent(mouseEventSource: nil, mouseType: .mouseMoved, mouseCursorPosition: pointer, mouseButton: .left)?.post(tap: .cghidEventTap) } }
@@ -436,6 +463,9 @@ final class MuseAccess {
         let clear = shown.panel.flatMap(frame).map { !$0.contains(point) } ?? true
         guard clear, isMuseWindow(at: point, pid: pid) else { return .failed("Muse’s message box is covered by another window or panel. Nothing was typed.") }
 
+        // The next steps click and paste. Wait for hands to be off the keys
+        // so nothing the person types lands in the draft.
+        guard await MacInput.waitForQuiet() else { return .failed("\(MacInput.busyMessage); nothing was typed.") }
         let pointer = CGEvent(source: nil)?.location
         let clipboard = saveClipboard()
         defer {
@@ -461,6 +491,7 @@ final class MuseAccess {
         NSPasteboard.general.clearContents(); NSPasteboard.general.setString(prompt, forType: .string)
         guard ready() else { return .failed("Muse changed before the draft was pasted. Nothing was typed.") }
         post(9, command: true, to: pid)      // paste
+        let pastedAt = ProcessInfo.processInfo.systemUptime
         try? await Task.sleep(nanoseconds: 350_000_000)
         let pasted = await copyAll(pid)
         guard MuseChatList.holdsDraft(pasted, prompt: prompt) else {
@@ -474,6 +505,13 @@ final class MuseAccess {
         }
         let before = deliveries(of: prompt)
         let entriesBefore = snapshot()?.historyEntries ?? 0
+        // A key pressed on the Mac since the paste may have gone into the box.
+        // Read it once more; send only what was verified.
+        if MacInput.secondsSinceKey <= ProcessInfo.processInfo.systemUptime - pastedAt + 0.05 {
+            guard ready(), MuseChatList.holdsDraft(await copyAll(pid), prompt: prompt) else {
+                return .failed("Keys were pressed on this Mac while the draft was going in. Check Muse’s message box; nothing was sent.")
+            }
+        }
         if rehearsal {
             post(51, to: pid)                // the read-back left the draft selected: delete it
             try? await Task.sleep(nanoseconds: 300_000_000)

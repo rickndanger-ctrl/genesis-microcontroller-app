@@ -204,6 +204,8 @@ final class ClaudeAccess {
         // it is scrolled to, and the hit test below would refuse it. Bring it
         // into view first; the positions are read again after it settles.
         if AXUIElementPerformAction(element,"AXScrollToVisible" as CFString) == .success {try? await Task.sleep(nanoseconds:220_000_000)}
+        // Never click through someone's drag.
+        guard await MacInput.waitForQuiet(needed:0,timeout:1.5) else {return false}
         guard NSWorkspace.shared.frontmostApplication?.processIdentifier == app.processIdentifier,
               let pv=value(element,kAXPositionAttribute), let sv=value(element,kAXSizeAttribute),
               CFGetTypeID(pv)==AXValueGetTypeID(), CFGetTypeID(sv)==AXValueGetTypeID() else {return false}

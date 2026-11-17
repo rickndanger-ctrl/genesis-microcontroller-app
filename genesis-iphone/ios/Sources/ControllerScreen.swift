@@ -409,6 +409,26 @@ struct ControllerScreen: View {
         header
         switches
         connection
+        if let notice = store.companionNotice {
+            Label(notice, systemImage: "arrow.down.circle")
+                .font(.system(size: isPad ? 13 : 11, weight: .medium)).foregroundStyle(.orange)
+                .frame(maxWidth: .infinity, alignment: .leading).padding(.horizontal, 7)
+                .accessibilityIdentifier("controller.companionNotice")
+        }
+        if store.providerInfo?.supports("launchApp") == true {
+            // The app is installed but shut. Someone away from the Mac can open it from here.
+            Button {
+                ControllerSound.shared.keyClick()
+                Task { await store.openProviderApp() }
+            } label: {
+                Label("Open \(store.selectedProvider.name) on \(selectedComputerName)", systemImage: "arrow.up.forward.app")
+                    .font(.system(size: isPad ? 14 : 12, weight: .semibold))
+                    .frame(maxWidth: .infinity, minHeight: isPad ? 46 : 40)
+                    .genesisPanel(radius: 13, raised: true)
+            }
+            .disabled(!store.canOpenProviderApp)
+            .accessibilityIdentifier("controller.openApp")
+        }
     }
 
     @ViewBuilder

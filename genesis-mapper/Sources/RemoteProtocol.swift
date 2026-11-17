@@ -75,7 +75,7 @@ enum RemoteActionCatalog {
 
 enum RemotePolicy {
     static let providers = ["codex", "claude", "muse"]
-    static let commands = ["openChat", "sendPrompt", "stop", "openArtifact", "nativeVoice"] + RemoteActionCatalog.commandIDs
+    static let commands = ["openChat", "sendPrompt", "stop", "openArtifact", "nativeVoice", "launchApp"] + RemoteActionCatalog.commandIDs
     static let maximumBody = 131_072
     static func digest(_ bytes: Data) -> String { SHA256.hash(data: bytes).map { String(format:"%02x", $0) }.joined() }
     static func chatID(_ provider: String, _ title: String) -> String { "\(provider)-" + String(digest(Data(title.utf8)).prefix(32)) }
