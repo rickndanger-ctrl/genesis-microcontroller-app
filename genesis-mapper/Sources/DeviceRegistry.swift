@@ -211,6 +211,23 @@ struct PairingCodes {
     }
 }
 
+/// Tells a request made on this Mac from one relayed from the network.
+///
+/// The companion listens only on the loopback address, and other devices reach
+/// it through Tailscale Serve, which adds forwarding headers to everything it
+/// relays and which a remote caller cannot remove. A request without any of
+/// them came from a program running on this Mac.
+enum LocalCaller {
+    static let relayPrefixes = ["x-forwarded-", "tailscale-"]
+    static let relayHeaders: Set<String> = ["forwarded", "via", "x-real-ip"]
+    static func isDirect(headers: [String: String]) -> Bool {
+        !headers.keys.contains { key in
+            let name = key.lowercased()
+            return relayHeaders.contains(name) || relayPrefixes.contains { name.hasPrefix($0) }
+        }
+    }
+}
+
 /// Compares two strings without leaking, through timing, where they first differ.
 func constantTimeEquals(_ a: String, _ b: String) -> Bool {
     let left = Array(a.utf8)

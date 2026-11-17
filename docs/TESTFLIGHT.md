@@ -25,8 +25,18 @@ Pair with the Agent Micro Controller companion on your Mac, assign chats to the 
 
 Builds expire 90 days after upload. Upload a fresh one before then to keep the link working.
 
-## Not done yet
+## Ready
 
-- The app icon still shows the earlier controller render.
+- App icon: built from the Blender deck pieces (`genesis-iphone/design/build_app_icon.py`).
+- Encryption: `ITSAppUsesNonExemptEncryption` is set to false in the app's Info, so uploads are not held for that question.
+- A Release archive builds: `xcodebuild -project genesis-iphone/GenesisController.xcodeproj -scheme GenesisController -configuration Release -destination generic/platform=iOS -archivePath build/AgentMicroController.xcarchive archive`.
+- Demo for the reviewer, review notes and "What to Test" text: above.
+- Screenshots and a preview video: `genesis-iphone/scripts/record-demo.sh` records the demo run on any simulator.
+
+## Still needed from the account owner
+
+- Create the App Store Connect listing (My Apps → + → New App): platform iOS, name **Agent Micro Controller**, bundle ID `com.richardholguin.GenesisController`, any SKU. This cannot be done by a script; Apple only allows it on the website.
+- A public web address for the privacy policy. This repository is private, so a link to `PRIVACY.md` here will not open for Apple or testers. Either make the repository public or publish that one page somewhere public.
+- Upload the archive: Xcode → Window → Organizer → Distribute App → TestFlight, or from the command line with an App Store Connect API key (`xcodebuild -exportArchive` with `-authenticationKeyPath`, `-authenticationKeyID` and `-authenticationKeyIssuerID`).
 - The bundle identifier and team are written into `genesis-iphone/project.yml`. Anyone building from source must change both.
 - The third-party product names shown as tabs (Claude, Codex, Muse) are used to say what the controller works with. No logos are used; keep it that way.

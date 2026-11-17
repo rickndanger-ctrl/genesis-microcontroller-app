@@ -253,7 +253,23 @@ import CoreImage.CIFilterBuiltins
                 if attempt<7 {try? await Task.sleep(nanoseconds:750_000_000)}
             }
         }
-        let receipt=CodexService.receipt(run,answeringAfter:codexInventoryAvailable,chats:chats.count)
+        var outcome=run
+        if CodexService.shouldTryStart(after:run,answering:codexInventoryAvailable) {
+            // The restart stopped the service and could not start it again. Do not leave it down.
+            outcome=await Task.detached(priority:.userInitiated) { ()->CodexService.Run in
+                switch CodexQueueProcess.run(executable:executable,arguments:CodexService.startArguments,environment:environment,timeout:30).completion {
+                case .notLaunched:return .notLaunched
+                case .exited(let code):return .exited(code)
+                case .interrupted,.timedOut:return .timedOut
+                }
+            }.value
+            for attempt in 0..<8 {
+                chats=await loadCodexChats(force:true)
+                if codexInventoryAvailable {break}
+                if attempt<7 {try? await Task.sleep(nanoseconds:750_000_000)}
+            }
+        }
+        let receipt=CodexService.receipt(outcome,answeringAfter:codexInventoryAvailable,chats:chats.count)
         return result(receipt.status,receipt.message)
     }
     private func launchApp(_ command:RemoteCommand) async -> RemoteReceipt {
@@ -456,6 +472,14 @@ import CoreImage.CIFilterBuiltins
         // Pairing is the one request that cannot carry a secret yet.
         if request.method=="POST",path=="/v1/pair" {return pair(request)}
         guard authorized(request) else{return .error(401,"Pair this iPhone with the Mac first.")}
+        // Someone signed in on this Mac can issue a pairing code without the window, for setting
+        // devices up from the command line. Refused for anything relayed from the network.
+        if request.method=="POST",path=="/v1/pair/code" {
+            guard LocalCaller.isDirect(headers:request.headers) else{return .error(403,"Pairing codes can only be issued on the Mac itself.")}
+            let address=baseURL.trimmingCharacters(in:CharacterSet(charactersIn:"/"))
+            guard enabled,let parsed=URLComponents(string:address),parsed.scheme=="https",parsed.host?.isEmpty==false else{return .error(409,"Set this Mac\u{2019}s private address in the pairing window first.")}
+            return .json(RemotePairing(name:hostName,hostID:store.hostID,baseURL:address,token:pairingCodes.issue(now:Date())))
+        }
         func parameter(_ key:String)->String {query.first{$0.name==key}?.value ?? ""}
         do {
             if request.method=="GET",path=="/v1/status" {return .json(status())}
@@ -869,7 +893,7 @@ struct RemotePairingView:View {
                     Image(systemName:"key")
                     VStack(alignment:.leading,spacing:2) {
                         Text("Devices paired before version 0.7").font(.callout.weight(.medium))
-                        Text("They share one older secret and cannot be told apart. Stop accepting it once every device has paired again.").font(.caption).foregroundStyle(.secondary)
+                        Text("They share one older secret and cannot be told apart. The Genesis G2 glasses bridge on this Mac uses it too, so keep accepting it if you use the glasses.").font(.caption).foregroundStyle(.secondary)
                     }
                     Spacer()
                     Button("Stop accepting…",role:.destructive){retiringLegacy=true}
@@ -918,6 +942,6 @@ struct RemotePairingView:View {
             .confirmationDialog("Stop accepting the older shared secret?",isPresented:$retiringLegacy,titleVisibility:.visible) {
                 Button("Stop accepting it",role:.destructive){bridge.stopAcceptingLegacySecret()}
                 Button("Cancel",role:.cancel){}
-            } message:{Text("Every phone and tablet that paired before version 0.7 will stop working until it scans a new code. This cannot be undone.")}
+            } message:{Text("Every phone and tablet that paired before version 0.7 will stop working until it scans a new code. So will anything on this Mac that reads the secret from its file, such as the Genesis G2 glasses bridge. This cannot be undone.")}
     }
 }

@@ -22,6 +22,7 @@ import Foundation
         storage()
         pairing()
         comparison()
+        localCaller()
         print("Device registry: \(passed) checks passed")
     }
 
@@ -228,6 +229,17 @@ import Foundation
         codes = PairingCodes()
         _ = codes.issue(now: t0, code: "")
         expect(codes.redeem("", now: after(1)) == .rejected, "An empty code never matches, even if one was issued")
+    }
+
+    static func localCaller() {
+        expect(LocalCaller.isDirect(headers: [:]), "A request with no headers is local")
+        expect(LocalCaller.isDirect(headers: ["authorization": "Bearer x", "content-type": "application/json", "host": "127.0.0.1:18765"]), "Ordinary headers are local")
+        expect(!LocalCaller.isDirect(headers: ["x-forwarded-for": "100.64.0.9"]), "A forwarded request is not local")
+        expect(!LocalCaller.isDirect(headers: ["X-Forwarded-Proto": "https"]), "Header names are matched whatever their case")
+        expect(!LocalCaller.isDirect(headers: ["tailscale-user-login": "someone@example.com"]), "A request Tailscale relayed is not local")
+        expect(!LocalCaller.isDirect(headers: ["forwarded": "for=100.64.0.9"]), "The standard Forwarded header is not local")
+        expect(!LocalCaller.isDirect(headers: ["via": "1.1 proxy"]) && !LocalCaller.isDirect(headers: ["x-real-ip": "100.64.0.9"]), "Other relay headers are not local")
+        expect(LocalCaller.isDirect(headers: ["x-forward": "1", "tailscale": "1"]), "Only the relay headers themselves count")
     }
 
     static func comparison() {

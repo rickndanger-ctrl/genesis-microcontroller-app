@@ -44,6 +44,12 @@ import Foundation
         r = S.receipt(.timedOut, answeringAfter: false, chats: 0)
         expect(r.status == "uncertain", "A restart that ran out of time is uncertain")
 
+        expect(S.startArguments == ["app-server", "daemon", "start"], "The fallback is Codex's own start command")
+        expect(S.shouldTryStart(after: .exited(1), answering: false), "A failed restart that left the service silent gets one start")
+        expect(!S.shouldTryStart(after: .exited(1), answering: true), "A service that answers needs no start")
+        expect(!S.shouldTryStart(after: .exited(0), answering: false), "A clean restart is given time, not a second command")
+        expect(!S.shouldTryStart(after: .timedOut, answering: false) && !S.shouldTryStart(after: .notLaunched, answering: false), "A command that never finished or never ran is not followed by another")
+
         // The probe on a real folder.
         let home = FileManager.default.temporaryDirectory.appendingPathComponent("codex-service-\(UUID().uuidString)")
         defer { try? FileManager.default.removeItem(at: home) }

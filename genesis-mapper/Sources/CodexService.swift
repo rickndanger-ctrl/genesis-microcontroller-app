@@ -19,6 +19,14 @@ enum CodexService {
     enum Run: Equatable { case notLaunched, exited(Int32), timedOut }
 
     static let restartArguments = ["app-server", "daemon", "restart"]
+    /// A restart stops the service before starting it. If the start half fails,
+    /// one plain start is tried so the service is not left stopped.
+    static let startArguments = ["app-server", "daemon", "start"]
+    static func shouldTryStart(after run: Run, answering: Bool) -> Bool {
+        if answering { return false }
+        if case .exited(let code) = run { return code != 0 }
+        return false
+    }
 
     static func state(answering: Bool, linkPresent: Bool, targetPresent: Bool) -> State {
         if answering { return .answering }

@@ -32,6 +32,9 @@ targets:
         CFBundleShortVersionString: $(MARKETING_VERSION)
         CFBundleVersion: $(CURRENT_PROJECT_VERSION)
         UIRequiresFullScreen: true
+        # The app uses only the system's HTTPS, which is exempt from export paperwork.
+        # Declaring it here saves answering the question on every TestFlight upload.
+        ITSAppUsesNonExemptEncryption: false
         UILaunchScreen: {}
         UIApplicationSceneManifest:
           UIApplicationSupportsMultipleScenes: false
