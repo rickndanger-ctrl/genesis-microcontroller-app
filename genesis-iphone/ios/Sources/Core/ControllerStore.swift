@@ -15,6 +15,8 @@ final class ControllerStore: ObservableObject {
     @Published private(set) var artifacts: [ArtifactRecord] = []
     @Published private(set) var connectionMessage = "Pair your Mac to connect"
     @Published private(set) var isBusy = false
+    private var navigating = false
+    private var queuedMenuSteps: [String] = []
     @Published private(set) var isRefreshingChats = false
     @Published private(set) var isRecording = false
     @Published private(set) var isFinalizing = false
@@ -116,6 +118,14 @@ final class ControllerStore: ObservableObject {
               !action.requiresChat || selectedChat != nil else { return false }
         if id == "sendPrompt" { return canSend }
         if id == "dictate" { return canDictate }
+        if ["previousControllerChat", "nextControllerChat"].contains(id) { return historyDestination(id) != nil }
+        return true
+    }
+    /// True while a command in flight is the only thing stopping this action,
+    /// so its key stays lit and a press can wait its turn. See `DeferredTap`.
+    func canDeferAction(_ id: String) -> Bool {
+        guard isBusy, DeferredTap.mayWait(id), let action = action(id), providerInfo?.supportsControllerAction(action) == true,
+              !action.requiresChat || selectedChat != nil else { return false }
         if ["previousControllerChat", "nextControllerChat"].contains(id) { return historyDestination(id) != nil }
         return true
     }
@@ -584,9 +594,28 @@ final class ControllerStore: ObservableObject {
         guard !state.active || state.session.flatMap(UUID.init(uuidString:)) != nil else { navigation = .inactive; navigationGeneration = nil; return }
         navigation = state; navigationGeneration = state.active ? generation : nil
     }
+    /// Moves or acts on the menu open on the Mac. Previous and Next pressed
+    /// while a menu step is still in flight wait their turn, because moving
+    /// the highlight is harmless to repeat. Select, Back and Close never wait:
+    /// each acts on what the Mac shows at the moment it runs.
     func navigate(_ action: String) async {
         guard ["menuPrevious","menuNext","menuSelect","menuBack","menuHome"].contains(action),
-              navigation.active, navigationGeneration == gate.generation, let session = navigation.session, !isBusy else { return }
+              navigation.active, navigationGeneration == gate.generation else { return }
+        if isBusy {
+            if navigating, ["menuPrevious","menuNext"].contains(action), queuedMenuSteps.count < 8 { queuedMenuSteps.append(action) }
+            return
+        }
+        navigating = true
+        defer { navigating = false; queuedMenuSteps.removeAll() }
+        await navigateOnce(action)
+        while !queuedMenuSteps.isEmpty {
+            let next = queuedMenuSteps.removeFirst()
+            guard navigation.active, navigationGeneration == gate.generation, lastError == nil, !isBusy, !Task.isCancelled else { return }
+            await navigateOnce(next)
+        }
+    }
+    private func navigateOnce(_ action: String) async {
+        guard navigation.active, navigationGeneration == gate.generation, let session = navigation.session, !isBusy else { return }
         if isDemo {
             if action == "menuHome" { clearChatAfterNavigation(); returnHome() }
             else { navigation.selection = action == "menuPrevious" ? "Demo · Previous menu item" : action == "menuNext" ? "Demo · Next menu item" : "Demo · Selection preview" }

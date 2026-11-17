@@ -6,10 +6,16 @@ struct SettingsScreen: View {
     @ObservedObject var store: ControllerStore
     @Environment(\.dismiss) private var dismiss
     @AppStorage("controllerSoundsEnabled") private var controllerSoundsEnabled = true
+    @AppStorage(ControllerSound.packKey) private var soundPack = ControllerSound.defaultPack.id
+    @AppStorage(ControllerSound.volumeKey) private var soundVolume = ControllerSound.defaultVolume
     @State private var pairingLink = ""
     @State private var scanning = false
     @State private var pairing = false
     @State private var message: String?
+
+    private var selectedPack: ControllerSound.Pack {
+        ControllerSound.packs.first { $0.id == soundPack } ?? ControllerSound.defaultPack
+    }
 
     var body: some View {
         NavigationStack {
@@ -25,7 +31,14 @@ struct SettingsScreen: View {
                         // Enabling previews one click; disabling is immediately quiet.
                         if enabled { ControllerSound.shared.keyClick() }
                     }))
-                    Text("Quiet clicks for keys and dial detents. Muted while dictating.")
+                    if controllerSoundsEnabled {
+                        NavigationLink {
+                            ClickSoundScreen()
+                        } label: {
+                            LabeledContent("Click sound", value: "\(selectedPack.title) · \(Int((soundVolume * 100).rounded()))%")
+                        }
+                    }
+                    Text("Clicks for keys and dial detents. Muted while dictating.")
                         .font(.caption).foregroundStyle(.secondary)
                 }
                 Section("Pair a Mac") {
@@ -91,6 +104,61 @@ struct SettingsScreen: View {
             do { try await store.pair(url); pairingLink = ""; message = "Paired. Your Mac is ready in the switcher." }
             catch { message = error.localizedDescription }
         }
+    }
+}
+
+/// Volume and the choice of click pack. Every change is auditioned at once.
+struct ClickSoundScreen: View {
+    @AppStorage(ControllerSound.packKey) private var soundPack = ControllerSound.defaultPack.id
+    @AppStorage(ControllerSound.volumeKey) private var soundVolume = ControllerSound.defaultVolume
+
+    private var selectedPackID: String {
+        ControllerSound.packs.contains { $0.id == soundPack } ? soundPack : ControllerSound.defaultPack.id
+    }
+
+    var body: some View {
+        Form {
+            Section("Volume") {
+                HStack(spacing: 12) {
+                    Image(systemName: "speaker.fill").foregroundStyle(.secondary)
+                    Slider(value: $soundVolume, in: 0.1...1, step: ControllerSound.volumeStep) { editing in
+                        // One click at the new level when the thumb is released.
+                        if !editing { ControllerSound.shared.keyClick() }
+                    }
+                    .accessibilityLabel("Click volume")
+                    .accessibilityValue("\(Int((soundVolume * 100).rounded())) percent")
+                    Image(systemName: "speaker.wave.3.fill").foregroundStyle(.secondary)
+                }
+                Text("Loudness also follows this device's ringer volume and silent mode.")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+            Section("Sound") {
+                ForEach(ControllerSound.packs) { pack in
+                    Button {
+                        soundPack = pack.id
+                        ControllerSound.shared.keyClick()
+                    } label: {
+                        HStack {
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text(pack.title).foregroundStyle(Color.primary)
+                                Text(pack.detail).font(.caption).foregroundStyle(Color.secondary)
+                            }
+                            Spacer()
+                            if pack.id == selectedPackID { Image(systemName: "checkmark").fontWeight(.semibold) }
+                        }.contentShape(Rectangle())
+                    }
+                    .accessibilityLabel("\(pack.title) click sound")
+                    .accessibilityHint(pack.detail)
+                    .accessibilityAddTraits(pack.id == selectedPackID ? .isSelected : [])
+                }
+            }
+            Section {
+                Button { ControllerSound.shared.keyClick() } label: { Label("Play the key click", systemImage: "square.fill") }
+                Button { ControllerSound.shared.dialTick() } label: { Label("Play the dial tick", systemImage: "dial.medium") }
+            }
+        }
+        .navigationTitle("Click sound")
+        .navigationBarTitleDisplayMode(.inline)
     }
 }
 

@@ -942,6 +942,21 @@ final class FixtureCredentials: ControllerCredentialVault {
         let navPosted = actionsFixture.received.compactMap { try? JSONDecoder().decode(RemoteCommand.self,from:$0.2) }.last
         expect(navPosted?.navigationSession == firstLease && navPosted?.chatID == created.id && actionsFixture.navigationCount == 1,
                "Navigation input carries its exact session, chat, and generation")
+        // Previous and Next pressed while a step is in flight wait their turn. Select never waits.
+        actionsFixture.hold("/v1/commands/menuNext")
+        let heldStep = Task { await actionStore.navigate("menuNext") }
+        for _ in 0..<100 {
+            if actionsFixture.heldCount("/v1/commands/menuNext") == 1 { break }
+            try? await Task.sleep(nanoseconds: 10_000_000)
+        }
+        let postedWhileHeld = actionsFixture.received.count
+        await actionStore.navigate("menuPrevious"); await actionStore.navigate("menuSelect"); await actionStore.navigate("menuPrevious")
+        expect(actionStore.isBusy && actionsFixture.received.count == postedWhileHeld, "Menu presses during a step in flight send nothing yet")
+        actionsFixture.release("/v1/commands/menuNext")
+        await heldStep.value
+        let menuSteps = actionsFixture.received.compactMap { try? JSONDecoder().decode(RemoteCommand.self,from:$0.2) }.map(\.action).filter { $0.hasPrefix("menu") }
+        expect(Array(menuSteps.suffix(3)) == ["menuNext","menuPrevious","menuPrevious"] && !actionStore.isBusy && actionStore.navigation.active,
+               "Queued Previous and Next run in order after the step in flight, and a Select pressed meanwhile is never sent")
         actionsFixture.setActionResult("menuSelect",chat:created)
         await actionStore.navigate("menuSelect")
         expect(actionStore.selectedChat?.id == created.id && actionStore.draft == "Keep this new chat draft",

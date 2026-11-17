@@ -15,32 +15,114 @@ import Foundation
         (try? PairingPayload.decode(url, allowLocalhost: localhost)) == nil
     }
     static func dialTrackingChecks() {
+        // A face of radius 50: turns count in full from 35 out, and the
+        // middle 15 swipes. Thirty-two degree steps click over at 20.8.
         let center = CGPoint(x: 50, y: 50)
-        func facePoint(_ degrees: Double) -> CGPoint {
+        func rim(_ degrees: Double, at distance: Double = 46) -> CGPoint {
             let angle = degrees * .pi / 180
-            return CGPoint(x: center.x + 40 * cos(angle), y: center.y + 40 * sin(angle))
+            return CGPoint(x: center.x + distance * cos(angle), y: center.y + distance * sin(angle))
         }
 
-        var dial = DialTracking(start: facePoint(165), center: center, radius: 50)
-        expect(dial.move(to: facePoint(195)) == 1 && abs(dial.degrees - 30) < 0.01,
+        var dial = DialTracking(start: rim(165), center: center, radius: 50)
+        expect(dial.move(to: rim(195)) == 1 && abs(dial.degrees - 30) < 0.01,
                "A clockwise turn across the angle seam advances one step")
-        expect(dial.move(to: facePoint(249)) == 2 && dial.steps == 3,
+        expect(dial.move(to: rim(251)) == 2 && dial.steps == 3,
                "Continuing the same drag advances only the new steps")
-        expect(dial.move(to: facePoint(190)) == -2 && dial.steps == 1,
+        expect(dial.move(to: rim(190)) == -2 && dial.steps == 1,
                "Reversing a turn moves back across the same steps")
-        expect(dial.move(to: center) == 0 && dial.move(to: facePoint(10)) == 0,
+        expect(dial.move(to: center) == 0 && dial.move(to: rim(10)) == 0,
                "Crossing the center cannot jump the selection")
-        expect(dial.move(to: facePoint(-20)) == -1 && dial.steps == 0,
+        expect(dial.move(to: rim(-20)) == -1 && dial.steps == 0,
                "Circular tracking resumes after crossing the center")
 
         var swipe = DialTracking(start: center, center: center, radius: 50)
         expect(swipe.move(to: CGPoint(x: 74, y: 57)) == 1, "A center swipe advances the dial")
         expect(swipe.move(to: CGPoint(x: 22, y: 73)) == -2 && swipe.steps == -1,
                "An off-axis movement does not change the swipe direction")
+
+        // A finger wobbling around the point where the dial clicked over must not flicker.
+        var resting = DialTracking(start: rim(0), center: center, radius: 50)
+        expect(resting.move(to: rim(20)) == 0 && resting.move(to: rim(22)) == 1, "The dial clicks over past the detent hold")
+        var flicker = 0
+        for wobble in [19.0, 23, 17, 22, 14, 30, 12, 24] { flicker += abs(resting.move(to: rim(wobble))) }
+        expect(flicker == 0 && resting.steps == 1, "Wobbling around the click point neither steps back nor repeats")
+        expect(resting.move(to: rim(10)) == -1 && resting.steps == 0, "Clearly retreating steps back")
+        var reverse = DialTracking(start: rim(0), center: center, radius: 50)
+        expect(reverse.move(to: rim(-20)) == 0 && reverse.move(to: rim(-22)) == -1, "The first step takes the same turn in either direction")
+        flicker = 0
+        for wobble in [-19.0, -23, -14, -30, -12, -24] { flicker += abs(reverse.move(to: rim(wobble))) }
+        expect(flicker == 0 && reverse.steps == -1, "Counterclockwise wobble is just as steady")
+
+        // Near the hub a slip of the finger sweeps a big angle; it counts for less.
+        var hub = DialTracking(start: rim(0, at: 17.5), center: center, radius: 50)
+        expect(hub.move(to: rim(30, at: 17.5)) == 0 && abs(hub.degrees - 15) < 0.01, "The same sweep at half the leverage radius turns half as far")
+        expect(hub.move(to: rim(64, at: 17.5)) == 1, "A larger sweep near the hub still turns the dial")
+
+        // A straight swipe across the knob goes the way the finger went,
+        // whether it passes just above the center or just below it.
+        for y in [44.0, 50, 56] {
+            var across = DialTracking(start: CGPoint(x: 8, y: y), center: center, radius: 50)
+            var total = 0
+            for x in stride(from: 14.0, through: 92, by: 6) { total += across.move(to: CGPoint(x: x, y: y)) }
+            expect(total == 2 && across.steps == 2, "A swipe to the right across the knob steps forward at height \(y)")
+            var back = DialTracking(start: CGPoint(x: 92, y: y), center: center, radius: 50)
+            total = 0
+            for x in stride(from: 86.0, through: 8, by: -6) { total += back.move(to: CGPoint(x: x, y: y)) }
+            expect(total == -2, "A swipe to the left across the knob steps back at height \(y)")
+        }
+        var upward = DialTracking(start: CGPoint(x: 53, y: 90), center: center, radius: 50)
+        var climbed = 0
+        for y in stride(from: 84.0, through: 10, by: -6) { climbed += upward.move(to: CGPoint(x: 53, y: y)) }
+        expect(climbed == 2, "A swipe up across the knob steps forward")
+        // A stroke along the edge is a turn, even when it is a straight line.
+        var edge = DialTracking(start: CGPoint(x: 30, y: 12), center: center, radius: 50)
+        expect(edge.move(to: CGPoint(x: 70, y: 12)) == 2 && abs(edge.degrees - 55.5) < 0.5, "A stroke across the top of the knob turns it clockwise")
+        var under = DialTracking(start: CGPoint(x: 30, y: 88), center: center, radius: 50)
+        expect(under.move(to: CGPoint(x: 70, y: 88)) == -2, "The same stroke under the knob turns it the other way, as a real knob would")
+        var thumb = DialTracking(start: center, center: center, radius: 21, degreesPerStep: 60, swipeDistance: 28)
+        expect(thumb.move(to: CGPoint(x: 67, y: 50)) == 0 && thumb.move(to: CGPoint(x: 70, y: 50)) == 1 && thumb.move(to: CGPoint(x: 94, y: 50)) == 0,
+               "On a small knob a swipe moves one slot per thumb-sized distance")
+        var undecided = DialTracking(start: rim(0), center: center, radius: 50)
+        expect(undecided.move(to: CGPoint(x: 96, y: 53)) == 0 && undecided.degrees == 0, "A stroke too short to read does nothing yet")
+
+        // The chat dial uses one detent per slot light.
+        var slots = DialTracking(start: rim(-90), center: center, radius: 50, degreesPerStep: 60)
+        expect(slots.move(to: rim(-52)) == 0 && slots.move(to: rim(-50)) == 1, "A sixty-degree dial clicks over at thirty-nine degrees")
+        var passed = 1
+        for angle in stride(from: -30.0, through: 270, by: 30) { passed += slots.move(to: rim(angle)) }
+        expect(passed == 6 && slots.steps == 6, "A full turn passes all six slots")
+        // Circling steadily around the face clicks at even intervals, one slot at a time.
+        var circle = DialTracking(start: rim(0, at: 30), center: center, radius: 50, degreesPerStep: 60)
+        var clicks: [Double] = []
+        for angle in stride(from: 3.0, through: 720, by: 3) {
+            let change = circle.move(to: rim(angle, at: angle.truncatingRemainder(dividingBy: 90) < 45 ? 30 : 38))
+            expect(abs(change) <= 1, "A steady circle never skips a slot")
+            if change != 0 { clicks.append(circle.degrees) }
+        }
+        let gaps = zip(clicks.dropFirst(), clicks).map { $0 - $1 }
+        expect(clicks.count >= 6 && gaps.allSatisfy { abs($0 - 60) <= 3 }, "A steady circle clicks every sixty degrees of turn")
+        var slotSwipe = DialTracking(start: center, center: center, radius: 50, degreesPerStep: 60)
+        expect(slotSwipe.move(to: CGPoint(x: 74, y: 52)) == 1, "A center swipe covers the same distance per step on any dial")
+        var press = DialTracking(start: CGPoint(x: 52, y: 51), center: center, radius: 50)
+        _ = press.move(to: CGPoint(x: 58, y: 47))
+        expect(press.steps == 0 && abs(press.travel - hypot(6, 4)) < 0.001, "Travel records how far an unsteady press wandered")
+    }
+
+    static func deferredTapChecks() {
+        let pressed = Date(timeIntervalSinceReferenceDate: 1_000)
+        let tap = DeferredTap(target: .slot(2), pressed: pressed)
+        expect(tap.shouldRun(now: pressed.addingTimeInterval(1.5), previousSucceeded: true), "A key held for a finished command runs")
+        expect(!tap.shouldRun(now: pressed.addingTimeInterval(1.5), previousSucceeded: false), "A key never follows a command that failed")
+        expect(!tap.shouldRun(now: pressed.addingTimeInterval(DeferredTap.patience + 0.1), previousSucceeded: true), "A key held too long is dropped")
+        expect(!tap.shouldRun(now: pressed.addingTimeInterval(-1), previousSucceeded: true), "A clock that moved backward drops the key")
+        expect(!DeferredTap.mayWait("sendPrompt") && !DeferredTap.mayWait("dictate"), "Send and dictation never wait")
+        expect(DeferredTap.mayWait("permissionOptions") && DeferredTap.mayWait("stop"), "Other actions may wait their turn")
+        expect(DeferredTap(target: .action("stop"), pressed: pressed).target != .action("modelAndEffort"), "A waiting key is identified by its action")
     }
 
     static func main() throws {
         dialTrackingChecks()
+        deferredTapChecks()
         let valid = PairingPayload(v: 1, name: "Test Mac", hostID: "CFC99A4B-34EB-4E90-8413-97BE5866FE84",
             baseURL: "https://test-mac.example.ts.net:8451", token: String(repeating: "t", count: 64))
         let restored = try PairingPayload.decode(pairingURL(valid))

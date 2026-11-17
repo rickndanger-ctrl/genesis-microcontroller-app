@@ -380,16 +380,28 @@ final class ControllerUITests: XCTestCase {
 
         let first = chat.value as? String
         XCTAssertEqual(first, "C1, Genesis iPhone")
-        let top = chat.coordinate(withNormalizedOffset: CGVector(dx: 0.50, dy: 0.17))
-        let right = chat.coordinate(withNormalizedOffset: CGVector(dx: 0.82, dy: 0.45))
+        // A stroke up the knob's left side turns it clockwise by one slot.
+        let top = chat.coordinate(withNormalizedOffset: CGVector(dx: 0.12, dy: 0.50))
+        let right = chat.coordinate(withNormalizedOffset: CGVector(dx: 0.12, dy: 0.08))
         top.press(forDuration: 0.10, thenDragTo: right)
         let browsed = chat.value as? String
-        XCTAssertNotEqual(browsed, first, "Clockwise drag changes the selected slot")
+        XCTAssertEqual(browsed?.hasPrefix("C2, "), true, "A clockwise turn moves to the next slot, not past it")
         let key = app.buttons[browsed ?? "missing"]
         XCTAssertTrue(key.exists)
         XCTAssertEqual(key.value as? String, "Dial selection", "Drag browses without activating")
         right.press(forDuration: 0.10, thenDragTo: top)
         XCTAssertEqual(chat.value as? String, first, "Reverse drag returns to the original slot")
+        // A swipe straight across the face goes the way the finger went,
+        // wherever it passes relative to the center.
+        for height in [0.22, 0.40] {
+            let west = chat.coordinate(withNormalizedOffset: CGVector(dx: 0.25, dy: height))
+            let east = chat.coordinate(withNormalizedOffset: CGVector(dx: 0.75, dy: height))
+            west.press(forDuration: 0.10, thenDragTo: east)
+            let swiped = chat.value as? String
+            XCTAssertEqual(swiped?.hasPrefix("C2, "), true, "A swipe right moves one slot forward at height \(height), got \(swiped ?? "nothing")")
+            east.press(forDuration: 0.10, thenDragTo: west)
+            XCTAssertEqual(chat.value as? String, first, "The same swipe back returns at height \(height)")
+        }
         top.press(forDuration: 0.10, thenDragTo: right)
         chat.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.42)).tap()
         let current = NSPredicate(format: "value CONTAINS %@", "Current chat")
@@ -397,8 +409,8 @@ final class ControllerUITests: XCTestCase {
         waitForExpectations(timeout: 5)
 
         let initialArtifact = artifact.value as? String
-        let aTop = artifact.coordinate(withNormalizedOffset: CGVector(dx: 0.50, dy: 0.17))
-        let aEnd = artifact.coordinate(withNormalizedOffset: CGVector(dx: 0.77, dy: 0.28))
+        let aTop = artifact.coordinate(withNormalizedOffset: CGVector(dx: 0.12, dy: 0.42))
+        let aEnd = artifact.coordinate(withNormalizedOffset: CGVector(dx: 0.12, dy: 0.20))
         aTop.press(forDuration: 0.10, thenDragTo: aEnd)
         let chosenArtifact = artifact.value as? String
         XCTAssertNotEqual(chosenArtifact, initialArtifact, "Artifact dial browses to a different file")
