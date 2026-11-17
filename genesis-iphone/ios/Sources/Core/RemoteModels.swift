@@ -106,8 +106,8 @@ struct RemoteAction: Codable, Equatable, Identifiable {
         .init(id:"sendPrompt",title:"Send prompt",group:"Compose",detail:"Send the reviewed iPhone draft to the selected chat once.",requiresChat:true,changesChat:false),
         .init(id:"stop",title:"Stop response",group:"Compose",detail:"Stop the selected chat’s current response.",requiresChat:true,changesChat:false),
         .init(id:"nativeVoice",title:"Voice mode",group:"Compose",detail:"Start verified two-way voice in the selected chat.",requiresChat:true,changesChat:false),
-        .init(id:"previousControllerChat",title:"Previous controller chat",group:"Navigate",detail:"Go back through chats opened from Genesis on this Mac and provider.",requiresChat:false,changesChat:true),
-        .init(id:"nextControllerChat",title:"Next controller chat",group:"Navigate",detail:"Go forward through chats opened from Genesis on this Mac and provider.",requiresChat:false,changesChat:true),
+        .init(id:"previousControllerChat",title:"Previous controller chat",group:"Navigate",detail:"Go back through chats opened from this controller on this Mac and provider.",requiresChat:false,changesChat:true),
+        .init(id:"nextControllerChat",title:"Next controller chat",group:"Navigate",detail:"Go forward through chats opened from this controller on this Mac and provider.",requiresChat:false,changesChat:true),
         .init(id:"artifacts",title:"Artifact shelf",group:"Artifacts",detail:"Browse this Mac’s shared documents, images, and app links.",requiresChat:false,changesChat:false)
     ]
 }
@@ -145,9 +145,9 @@ struct DictationControlPresentation: Equatable {
         if recording { return .init(label:"RELEASE TO REVIEW",accessibilityLabel:"Stop dictation",summary:nil,explanation:nil,icon:"waveform") }
         if finalizing { return blocked("FINISHING…", "Finishing your recording.", "Your recording is being turned into text. Wait a moment before recording again.") }
         if !paired { return blocked("PAIR YOUR MAC", "Pair a Mac to use dictation.", "Open controller settings and pair this Mac before using dictation.") }
-        guard let info else { return blocked("NOT CONNECTED", "Connect to your Mac to use dictation.", "Check that Tailscale and the Genesis companion are running, then refresh the connection.") }
+        guard let info else { return blocked("NOT CONNECTED", "Connect to your Mac to use dictation.", "Check that Tailscale and the Mac companion are running, then refresh the connection.") }
         if info.readiness == "locked" { return blocked("MAC LOCKED", "Unlock your Mac to use dictation.", "Unlock the selected Mac, then refresh the controller connection.") }
-        if info.readiness == "needsAccessibility" { return blocked("SETUP NEEDED", "Allow Genesis Accessibility on your Mac.", "Enable Accessibility for Genesis Agent Micro Controller on the selected Mac, then refresh.") }
+        if info.readiness == "needsAccessibility" { return blocked("SETUP NEEDED", "Allow Accessibility for the companion on your Mac.", "Enable Accessibility for Agent Micro Controller on the selected Mac, then refresh.") }
         if info.readiness == "closed" { return blocked("OPEN THE APP", "Open \(provider.name) on your Mac.", "Open \(provider.name) on the selected Mac, then refresh the controller connection.") }
         if !info.supportsPhoneDictation {
             return blocked("NOT CONNECTED", "\(provider.name) Talk and Send aren’t connected yet.", "Talk and Send aren’t connected to \(provider.name) in this iPhone app yet. The available chat, menu, and artifact controls still work. This button will not start recording.")
@@ -300,15 +300,15 @@ enum RemoteError: LocalizedError {
     case server(Int, String), capability(String), unresolvedSend
     var errorDescription: String? {
         switch self {
-        case .invalidPairing: return "This is not a valid Genesis pairing code. Scan the code shown by your Mac companion."
+        case .invalidPairing: return "This is not a valid pairing code. Scan the code shown by your Mac companion."
         case .unpaired: return "Pair this Mac before connecting."
         case .invalidEndpoint: return "The companion must use a private HTTPS address."
         case .wrongHost: return "This connection belongs to a different Mac. Pair it again before sending."
-        case .unsupportedProtocol: return "Update the Mac companion to a compatible Genesis version."
+        case .unsupportedProtocol: return "Update the Mac companion to a compatible version."
         case .invalidResponse: return "The companion returned an unexpected response."
         case let .server(code, message):
             if code == 401 { return "Pairing expired or was revoked. Pair this Mac again." }
-            if code == 502 { return "Could not reach the Mac's Genesis companion (502). Open Genesis Agent Micro Controller on the selected Mac, then tap Refresh." }
+            if code == 502 { return "Could not reach the Mac companion (502). Open Agent Micro Controller on the selected Mac, then tap Refresh." }
             return message
         case let .capability(action): return "\(action) is not available for this Mac and provider yet."
         case .unresolvedSend: return "The previous Send is still unconfirmed. Check its receipt before sending another prompt."

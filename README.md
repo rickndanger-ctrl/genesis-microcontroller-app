@@ -1,8 +1,12 @@
-# Genesis Microcontroller App
+# Agent Micro Controller
 
-Genesis is an iPhone and iPad controller for Codex, Claude Code and Muse on a paired Mac. It provides six assignable keys, chat switching, Hold to Talk, draft review, and Send. The iPad layout adapts to portrait and landscape. Turn the dials to browse chats or artifacts, then press to select. Under **Settings → Controller sounds** you can mute the key clicks and dial ticks, set their volume, or switch between five click sounds. The Mac companion handles chat navigation and sends the reviewed draft to the selected session. This app is a separate project from the [Genesis Mini hardware and firmware](https://github.com/rickndanger-ctrl/genesis-agent-micro-controller).
+Formerly Genesis Microcontroller App. The app and its Mac companion are now named Agent Micro Controller; internal identifiers, the pairing link scheme and the repository name keep the old name so existing pairings and installs carry over.
 
-Version **0.3.3 / build 27** adds two things. While you dictate, the draft box stays on the newest words: it used to show only the first lines of a long dictation, so it looked as if recording had stopped. And **Settings → Glasses → I use Even G2 glasses** shows or hides everything to do with the glasses. It is off on a fresh install and stays on for anyone who already had a Mac paired; turning it off also stops Follow.
+Agent Micro Controller is an iPhone and iPad controller for Codex, Claude Code and Muse on a paired Mac. It provides six assignable keys, chat switching, Hold to Talk, draft review, and Send. The iPad layout adapts to portrait and landscape. Turn the dials to browse chats or artifacts, then press to select. Under **Settings → Controller sounds** you can mute the key clicks and dial ticks, set their volume, or switch between five click sounds. The Mac companion handles chat navigation and sends the reviewed draft to the selected session. This app is a separate project from the [Genesis Mini hardware and firmware](https://github.com/rickndanger-ctrl/genesis-agent-micro-controller).
+
+Version **0.4.0 / build 28** renames the app to **Agent Micro Controller** (Home Screen label: Agent Micro) and adds **Try the demo** on the unpaired screen. The demo is a sample controller with no Mac behind it; it never reads or writes your pairings, and **Exit demo** is always on screen. Mentions of the physical Genesis controller and of the separate Genesis G2 glasses app are unchanged, because those are their names.
+
+Version 0.3.3 / build 27 added two things. While you dictate, the draft box stays on the newest words: it used to show only the first lines of a long dictation, so it looked as if recording had stopped. And **Settings → Glasses → I use Even G2 glasses** shows or hides everything to do with the glasses. It is off on a fresh install and stays on for anyone who already had a Mac paired; turning it off also stops Follow.
 
 Version 0.3.2 / build 26 steadied the controls. Both knobs now measure a turn around the top face you actually see (the tilted render draws it above the middle of its frame); a stroke along the knob's edge turns it, while a stroke across it or from its middle is a swipe that moves one step per thumb-sized distance, right or up being forward. A detent clicks over at 65% of a step in either direction, so a finger resting on a boundary cannot flicker. A key pressed while the Mac is still finishing the previous command is held and runs when that command succeeds, instead of being dropped; Send and dictation never wait. Previous and Next in the menu panel queue the same way. On the Mac, the companion finds Claude's permission chooser by its place beside the model chooser rather than by the name of the current mode, which fixes Permissions in modes the catalog did not list. Installing that fix means updating the Mac companion as well as the iPhone and iPad app.
 
@@ -36,7 +40,7 @@ Build the companion from the repository root on macOS 14 or later with Xcode:
 
 ```sh
 sh genesis-mapper/build.sh
-open 'genesis-mapper/Genesis Agent Micro Controller.app'
+open 'genesis-mapper/Agent Micro Controller.app'
 ```
 
 The Mac build uses an ad hoc signature by default. Set `CLAUDE_CONTROLLER_SIGN_ID` to an Apple Development signing identity if you need a stable signature for local updates. Install under `~/Applications` if you use its launch-at-sign-in setting. The iPhone bridge runs without a USB controller. To opt into the companion’s hardware controls, run `defaults write local.richard.genesis-mapper GenesisUSBSerial -string "YOUR_GENESIS_SERIAL"` and reopen the companion.
@@ -45,7 +49,7 @@ The Mac build uses an ad hoc signature by default. Set `CLAUDE_CONTROLLER_SIGN_I
 
 1. Connect the Mac and your iPhone or iPad to the same Tailscale network. On the Mac, give the companion Accessibility access if you use Claude Code or native desktop menu controls.
 2. From the menu-bar dial, open **Pair iPhone / Artifacts** and enable private remote access. The companion listens on loopback port 18765. On the Mac, `tailscale serve --bg --https=8451 http://127.0.0.1:18765` makes the service available on a private HTTPS port to the tailnet. If you already use that port, choose a free port and enter its HTTPS URL in the pairing panel.
-3. In the Genesis app, open **Settings → Scan pairing code** and scan the QR code from the companion. Pair each Mac separately. The pairing code contains a private credential.
+3. In the app, open **Settings → Scan pairing code** and scan the QR code from the companion. Pair each Mac separately. The pairing code contains a private credential.
 4. Choose a provider and chat. Hold **Talk**, release to review the draft, then tap **Send**. Grant microphone and speech recognition access when prompted.
 
 Codex Send uses the [bundled Codex queue command](https://learn.chatgpt.com/docs/developer-commands#codex-queue) to target the exact selected chat. **Queued** means Codex accepted the message. If the chat is busy, it can process the draft after the current turn. Open the chat on the Mac if it is unloaded. Claude Code uses the Mac composer and presents its own delivery status.

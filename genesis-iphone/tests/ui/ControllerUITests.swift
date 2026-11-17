@@ -320,6 +320,49 @@ final class ControllerUITests: XCTestCase {
     }
 
     @MainActor
+    func testFreshInstallOffersDemoAndCanLeaveIt() {
+        continueAfterFailure = false
+        let app = XCUIApplication()
+        // A brand-new install: nothing paired, nothing saved.
+        app.launchArguments = ["--fresh-install"]
+        XCUIDevice.shared.orientation = .portrait
+        app.launch()
+        let tryDemo = app.buttons["controller.tryDemo"]
+        XCTAssertTrue(tryDemo.waitForExistence(timeout: 8), "An unpaired install offers the demo")
+        XCTAssertTrue(app.buttons["Pair a Mac"].firstMatch.exists, "Pairing stays the first choice")
+        XCTAssertFalse(app.buttons["controller.exitDemo"].exists)
+        saveFullscreenScreenshot("Fresh install, before pairing")
+
+        tryDemo.tap()
+        let exitDemo = app.buttons["controller.exitDemo"]
+        XCTAssertTrue(exitDemo.waitForExistence(timeout: 5), "The demo always shows its way out")
+        let chat = app.descendants(matching: .any).matching(identifier: "Chat dial").firstMatch
+        XCTAssertEqual(chat.value as? String, "C1, Controller app", "The demo opens on sample chats")
+        XCTAssertFalse(tryDemo.exists, "The demo does not offer itself again")
+        app.buttons["C2, OMAC workspace"].tap()
+        let opened = NSPredicate(format: "value CONTAINS %@", "Current chat")
+        expectation(for: opened, evaluatedWith: app.buttons["C2, OMAC workspace"])
+        waitForExpectations(timeout: 5)
+        // Full screen keeps the way out in reach too.
+        app.buttons["controller.fullscreen"].tap()
+        XCTAssertTrue(app.buttons["controller.exitFullscreen"].waitForExistence(timeout: 3))
+        XCTAssertTrue(exitDemo.isHittable, "Exit demo is reachable in full screen")
+        saveFullscreenScreenshot("In-app demo, full screen")
+
+        exitDemo.tap()
+        XCTAssertTrue(tryDemo.waitForExistence(timeout: 5), "Leaving the demo returns to the unpaired controller")
+        XCTAssertFalse(exitDemo.exists)
+        // The Settings route out works as well.
+        tryDemo.tap()
+        XCTAssertTrue(exitDemo.waitForExistence(timeout: 5))
+        app.buttons["Settings and Mac pairing"].tap()
+        let settingsExit = app.buttons["settings.exitDemo"]
+        XCTAssertTrue(settingsExit.waitForExistence(timeout: 5))
+        settingsExit.tap()
+        XCTAssertTrue(tryDemo.waitForExistence(timeout: 5), "Exit demo in Settings also returns to the unpaired controller")
+    }
+
+    @MainActor
     func testGlassesSwitchHidesGlassesControls() {
         continueAfterFailure = false
         let app = XCUIApplication()
@@ -418,7 +461,7 @@ final class ControllerUITests: XCTestCase {
         XCTAssertTrue(artifact.exists)
 
         let first = chat.value as? String
-        XCTAssertEqual(first, "C1, Genesis iPhone")
+        XCTAssertEqual(first, "C1, Controller app")
         // A stroke up the knob's left side turns it clockwise by one slot.
         let top = chat.coordinate(withNormalizedOffset: CGVector(dx: 0.12, dy: 0.50))
         let right = chat.coordinate(withNormalizedOffset: CGVector(dx: 0.12, dy: 0.08))
@@ -588,7 +631,7 @@ final class ControllerUITests: XCTestCase {
         XCUIDevice.shared.orientation = .portrait
         app.launch()
         XCTAssertTrue(app.buttons["Claude"].waitForExistence(timeout: 8))
-        let keys = ["Genesis iPhone", "OMAC workspace", "Design studio", "Weekly review", "Build notes", "Ideas & experiments"]
+        let keys = ["Controller app", "OMAC workspace", "Design studio", "Weekly review", "Build notes", "Ideas & experiments"]
         for (index,title) in keys.enumerated() {
             let key = app.buttons["C\(index+1), \(title)"]
             XCTAssertTrue(key.exists)
@@ -597,7 +640,7 @@ final class ControllerUITests: XCTestCase {
             expectation(for: active, evaluatedWith: key)
             waitForExpectations(timeout: 3)
         }
-        app.buttons["C1, Genesis iPhone"].tap()
+        app.buttons["C1, Controller app"].tap()
         let talk = app.buttons["Start dictation"]
         XCTAssertTrue(talk.waitForExistence(timeout: 3))
         talk.press(forDuration: 1)
@@ -605,7 +648,7 @@ final class ControllerUITests: XCTestCase {
         let retained = field.value as? String
         app.buttons["C2, OMAC workspace"].tap()
         XCTAssertNotEqual(field.value as? String, retained)
-        app.buttons["C1, Genesis iPhone"].tap()
+        app.buttons["C1, Controller app"].tap()
         XCTAssertEqual(field.value as? String, retained)
         for host in ["Mini 2", "Neo", "Mini 1"] {
             app.buttons[host].tap()
@@ -613,12 +656,12 @@ final class ControllerUITests: XCTestCase {
         }
         XCTAssertEqual(field.value as? String, retained)
         app.buttons["Codex"].tap()
-        XCTAssertTrue(app.buttons["A1, Genesis iPhone"].exists)
+        XCTAssertTrue(app.buttons["A1, Controller app"].exists)
         XCTAssertNotEqual(field.value as? String, retained)
         app.buttons["Claude"].tap()
         XCTAssertEqual(field.value as? String, retained)
         app.buttons["Muse"].tap()
-        XCTAssertTrue(app.buttons["M1, Genesis iPhone"].exists)
+        XCTAssertTrue(app.buttons["M1, Controller app"].exists)
         app.buttons["Claude"].tap()
         XCTAssertEqual(field.value as? String, retained)
         app.buttons["Refresh connection and chats"].tap()
@@ -632,7 +675,7 @@ final class ControllerUITests: XCTestCase {
         app.launchArguments = ["--demo"]
         XCUIDevice.shared.orientation = .portrait
         app.launch()
-        let titles = ["Genesis iPhone", "OMAC workspace", "Design studio", "Weekly review", "Build notes", "Ideas & experiments"]
+        let titles = ["Controller app", "OMAC workspace", "Design studio", "Weekly review", "Build notes", "Ideas & experiments"]
         XCTAssertTrue(app.buttons["Claude"].waitForExistence(timeout: 8))
         for (index,title) in titles.enumerated() {
             app.buttons["C\(index+1), \(title)"].press(forDuration: 0.8)
@@ -665,7 +708,7 @@ final class ControllerUITests: XCTestCase {
         XCTAssertTrue(app.buttons["Voice"].waitForExistence(timeout: 8))
         app.buttons["Voice"].tap()
         XCTAssertTrue(app.alerts["Controller update"].waitForExistence(timeout: 3))
-        XCTAssertTrue(app.staticTexts["Two-way voice mode is not connected in Genesis yet. Use Hold to talk to dictate a draft, then Send."].exists)
+        XCTAssertTrue(app.staticTexts["Two-way voice mode is not connected here yet. Use Hold to talk to dictate a draft, then Send."].exists)
         app.alerts.buttons["OK"].tap()
         for (index,title) in ["Send", "Stop", "Voice", "Artifacts"].enumerated() {
             app.buttons[title].press(forDuration: 0.8)
@@ -761,7 +804,7 @@ final class ControllerUITests: XCTestCase {
         XCTAssertTrue(app.navigationBars["Your controller"].waitForExistence(timeout: 3))
         app.buttons["Done"].tap()
         app.buttons["Codex"].tap()
-        app.buttons["A1, Genesis iPhone"].press(forDuration: 0.8)
+        app.buttons["A1, Controller app"].press(forDuration: 0.8)
         XCTAssertTrue(app.navigationBars["Map A1"].waitForExistence(timeout: 3))
         XCTAssertTrue(app.staticTexts["Chat switching, phone dictation drafts, and artifacts are available. Send is not connected for this provider yet."].exists)
         app.buttons["Cancel"].tap()

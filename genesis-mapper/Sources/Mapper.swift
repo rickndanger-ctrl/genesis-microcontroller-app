@@ -531,7 +531,7 @@ final class HIDLink {
     }
     func refresh() {
         trusted=AXIsProcessTrusted()
-        guard trusted else {status="Enable Accessibility for Genesis Agent Micro Controller to read Claude controls.";return}
+        guard trusted else {status="Enable Accessibility for Agent Micro Controller to read Claude controls.";return}
         guard !sessionScanBusy else{return}
         sessionScanBusy=true
         sessionScanQueue.async { [weak self] in

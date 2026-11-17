@@ -47,7 +47,7 @@ struct GlassesFollowPanel: View {
                     .accessibilityIdentifier("glasses.keepReading")
                 Text(follow.supportsKeepReading
                      ? "The Mac keeps this conversation readable for up to one hour. Your microphone stops and your unsent draft stays private on this device."
-                     : "Update Genesis on the selected Mac to enable reading after lock.")
+                     : "Update the companion on the selected Mac to enable reading after lock.")
                     .font(.caption).foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
                 if !follow.readingMessage.isEmpty {

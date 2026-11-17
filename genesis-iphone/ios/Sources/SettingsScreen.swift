@@ -18,8 +18,12 @@ struct SettingsScreen: View {
         ControllerSound.packs.first { $0.id == soundPack } ?? ControllerSound.defaultPack
     }
 
-    init(store: ControllerStore) {
+    /// Leaves the in-app demo, when that is what this is.
+    private let endDemo: (() -> Void)?
+
+    init(store: ControllerStore, endDemo: (() -> Void)? = nil) {
         self.store = store
+        self.endDemo = endDemo
         _glassesFeature = AppStorage(wrappedValue: false, GlassesFeature.storageKey(demo: store.isDemo))
     }
 
@@ -27,8 +31,12 @@ struct SettingsScreen: View {
         NavigationStack {
             Form {
                 Section {
-                    Label("Genesis Agent Micro Controller", systemImage: "circle.grid.3x2.fill")
+                    Label("Agent Micro Controller", systemImage: "circle.grid.3x2.fill")
                     Text("Your controller, wherever you work.").foregroundStyle(.secondary)
+                    if let endDemo {
+                        Button("Exit demo", systemImage: "xmark.circle") { ControllerSound.shared.keyClick(); endDemo() }
+                            .accessibilityIdentifier("settings.exitDemo")
+                    }
                 }
                 Section("Controller") {
                     Toggle("Controller sounds", isOn: Binding(get: { controllerSoundsEnabled }, set: { enabled in
@@ -48,7 +56,7 @@ struct SettingsScreen: View {
                         .font(.caption).foregroundStyle(.secondary)
                 }
                 Section("Pair a Mac") {
-                    Text("On the Mac, click the Genesis dial in the menu bar, then Pair iPhone / Artifacts. Scan its private pairing code while both devices are connected to Tailscale.")
+                    Text("On the Mac, click the Agent Micro Controller dial in the menu bar, then Pair iPhone / Artifacts. Scan its private pairing code while both devices are connected to Tailscale.")
                         .font(.subheadline).foregroundStyle(.secondary)
                     Button { ControllerSound.shared.keyClick(); scanning = true } label: { Label("Scan pairing code", systemImage: "qrcode.viewfinder") }
                     TextField("Or paste a private pairing link", text: $pairingLink).textInputAutocapitalization(.never).autocorrectionDisabled()
@@ -251,7 +259,7 @@ final class ScannerViewController: UIViewController, AVCaptureMetadataOutputObje
     required init?(coder: NSCoder) { fatalError("init(coder:) is unavailable") }
     override func viewDidLoad() {
         super.viewDidLoad(); view.backgroundColor = .black
-        let label = instructionLabel; label.text = "Scan your Mac’s Genesis pairing code"; label.textColor = .white; label.textAlignment = .center
+        let label = instructionLabel; label.text = "Scan your Mac’s pairing code"; label.textColor = .white; label.textAlignment = .center
         label.numberOfLines = 0; label.translatesAutoresizingMaskIntoConstraints = false; view.addSubview(label)
         NSLayoutConstraint.activate([label.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor, constant: 24), label.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 24), label.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -24)])
         AVCaptureDevice.requestAccess(for: .video) { [weak self] allowed in

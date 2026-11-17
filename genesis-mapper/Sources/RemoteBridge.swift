@@ -94,7 +94,7 @@ import CoreImage.CIFilterBuiltins
                 let nativeReady = !isLocked && running && AXIsProcessTrusted()
                 let queueAvailable=NSWorkspace.shared.urlForApplication(withBundleIdentifier:bundle).flatMap(CodexQueuePolicy.executable) != nil && CodexQueuePolicy.usesDefaultHome(environment:ProcessInfo.processInfo.environment,home:FileManager.default.homeDirectoryForCurrentUser)
                 let sendReason=queueAvailable ? "Phone Send queues to the exact selected chat; delivery is not yet confirmed.":"Phone Send needs the bundled Codex queue command and default account storage."
-                let reason=isLocked ? "Unlock this Mac to open Codex.":!installed ? "Install Codex on this Mac.":codexInventoryAvailable ? (nativeReady ? "Saved chat selection and native Mac menu controls are available. Menus act on the current Codex view on the Mac. "+sendReason+" Stop and live voice are not connected.":"New chat, Settings, and Skills can open Codex on this Mac. Other menu controls need Codex running with Genesis Accessibility enabled. "+sendReason+" Stop and live voice are not connected."):codexInventoryCheckedAt==nil ? "Checking this Mac's saved Codex chats…":"The current-account Codex chat inventory is unavailable. Open Codex on this Mac and refresh."
+                let reason=isLocked ? "Unlock this Mac to open Codex.":!installed ? "Install Codex on this Mac.":codexInventoryAvailable ? (nativeReady ? "Saved chat selection and native Mac menu controls are available. Menus act on the current Codex view on the Mac. "+sendReason+" Stop and live voice are not connected.":"New chat, Settings, and Skills can open Codex on this Mac. Other menu controls need Codex running with Accessibility enabled for Agent Micro Controller. "+sendReason+" Stop and live voice are not connected."):codexInventoryCheckedAt==nil ? "Checking this Mac's saved Codex chats…":"The current-account Codex chat inventory is unavailable. Open Codex on this Mac and refresh."
                 let capabilities=RemoteCodexAvailability.capabilities(installed:installed,running:running,unlocked:!isLocked,accessibility:AXIsProcessTrusted(),inventoryAvailable:codexInventoryAvailable,launchIDs:CodexNativeActionPolicy.pageLinks.keys.sorted(),nativeIDs:CodexNativeActions.descriptors.map(\.id),queueAvailable:queueAvailable)
                 return RemoteProvider(id:provider,name:"Codex",installed:installed,readiness:readiness,capabilities:capabilities,reason:reason,actions:CodexNativeActions.descriptors)
             }
@@ -102,11 +102,11 @@ import CoreImage.CIFilterBuiltins
                 // Chats open through Accessibility. A draft is pasted into Muse's
                 // message box and read back before Return; see MuseAccess.
                 let readiness=isLocked ? "locked":!AXIsProcessTrusted() ? "needsAccessibility":!running ? "closed":"ready"
-                let reason=readiness=="ready" ? "Chats, Send, New side chat and Call are connected. Send briefly brings Muse to the front and uses the clipboard, which is restored afterwards. Chats that share a title are left out.":readiness=="locked" ? "Unlock this Mac to use Muse.":readiness=="closed" ? "Open Muse on this Mac.":"Enable Accessibility for Genesis Agent Micro Controller."
+                let reason=readiness=="ready" ? "Chats, Send, New side chat and Call are connected. Send briefly brings Muse to the front and uses the clipboard, which is restored afterwards. Chats that share a title are left out.":readiness=="locked" ? "Unlock this Mac to use Muse.":readiness=="closed" ? "Open Muse on this Mac.":"Enable Accessibility for Agent Micro Controller."
                 return RemoteProvider(id:provider,name:"Muse",installed:installed,readiness:readiness,capabilities:readiness=="ready" ? RemoteMuse.capabilities:["artifacts"],reason:reason,actions:RemoteMuse.actions)
             }
             let readiness=isLocked ? "locked":!AXIsProcessTrusted() ? "needsAccessibility":!running ? "closed":"ready"
-            let reason=readiness=="ready" ? "Native live voice is not yet available on the phone.":readiness=="locked" ? "Unlock this Mac to use desktop controls.":readiness=="closed" ? "Open Claude on this Mac.":"Enable Accessibility for Genesis Agent Micro Controller."
+            let reason=readiness=="ready" ? "Native live voice is not yet available on the phone.":readiness=="locked" ? "Unlock this Mac to use desktop controls.":readiness=="closed" ? "Open Claude on this Mac.":"Enable Accessibility for Agent Micro Controller."
             return RemoteProvider(id:provider,name:"Claude",installed:installed,readiness:readiness,capabilities:readiness=="ready" ? ["openChat","sendPrompt","stop","artifacts","menuNavigation"] + RemoteActionCatalog.claude.map{$0.action.id}:["artifacts"],reason:reason,actions:RemoteActionCatalog.claude.map(\.action))
         }
         return RemoteHostStatus(hostID:store?.hostID ?? "",hostName:hostName,providers:providers)
@@ -138,7 +138,7 @@ import CoreImage.CIFilterBuiltins
     }
     private func executeMuse(_ command:RemoteCommand) async -> RemoteReceipt {
         func result(_ outcome:MuseAccess.Outcome)->RemoteReceipt {RemoteReceipt(id:command.id,status:outcome.status,message:outcome.message)}
-        guard !isLocked,AXIsProcessTrusted() else{return result(.failed("Unlock the Mac and enable Genesis Accessibility first."))}
+        guard !isLocked,AXIsProcessTrusted() else{return result(.failed("Unlock the Mac and enable Accessibility for Agent Micro Controller first."))}
         guard let pid=muse.app?.processIdentifier else{return result(.failed("Open Muse on this Mac first."))}
         func contextOK()->Bool {self.enabled && !self.isLocked && AXIsProcessTrusted() && self.muse.app?.processIdentifier==pid}
         if command.action=="nativeVoice" {return result(await muse.startCall(contextIsCurrent:contextOK))}
@@ -391,7 +391,7 @@ import CoreImage.CIFilterBuiltins
         }
         guard !isLocked,AXIsProcessTrusted(),let app=NSRunningApplication.runningApplications(withBundleIdentifier:access.bundle).first,
               let definition=ControllerAction.find(entry.controllerID),definition.sessionRequired==entry.action.requiresChat else {
-            return result("failed","Unlock this Mac, open Claude, and enable Genesis Accessibility first.")
+            return result("failed","Unlock this Mac, open Claude, and enable Accessibility for Agent Micro Controller first.")
         }
         // Global navigation is relative to the desktop's current view. Never
         // reselect the phone's old chat before Previous, Next, Back, or New.
@@ -484,7 +484,7 @@ import CoreImage.CIFilterBuiltins
             } catch {return result("failed","macOS could not open the existing Codex chat.")}
         }
         guard command.provider=="claude" else{return result("failed","Existing-chat control is not verified for this provider. No action was sent.")}
-        guard !isLocked,AXIsProcessTrusted() else{return result("failed","Unlock the Mac and enable Genesis Accessibility first.")}
+        guard !isLocked,AXIsProcessTrusted() else{return result("failed","Unlock the Mac and enable Accessibility for Agent Micro Controller first.")}
         guard command.action != "nativeVoice" else{return result("failed","Two-way native phone voice is not available yet.")}
         if let entry=RemoteActionCatalog.claudeEntry(command.action) {return await executeClaudeShortcut(command,entry:entry)}
         guard let id=command.chatID else{return result("failed","Choose a chat first.")}
@@ -594,7 +594,7 @@ struct RemotePairingView:View {
     @State private var linkURL=""
     var body:some View {
         ScrollView {VStack(alignment:.leading,spacing:18) {
-            Text("Genesis on iPhone").font(.largeTitle.bold())
+            Text("Agent Micro Controller on iPhone").font(.largeTitle.bold())
             Text("Pair your phone to this Mac over your private Tailscale network.").foregroundStyle(.secondary)
             Toggle("Enable private remote access",isOn:Binding(get:{bridge.enabled},set:bridge.setEnabled))
             Label(bridge.serviceStatus,systemImage:"network")
@@ -602,7 +602,7 @@ struct RemotePairingView:View {
             HStack(alignment:.top,spacing:20) {
                 if let image=bridge.qrImage {Image(nsImage:image).interpolation(.none).resizable().frame(width:220,height:220).padding(12).background(.white).clipShape(RoundedRectangle(cornerRadius:14))}
                 VStack(alignment:.leading,spacing:12) {
-                    Text("Scan from Genesis on your iPhone").font(.headline)
+                    Text("Scan from Agent Micro Controller on your iPhone").font(.headline)
                     Text("This QR code contains a private pairing key. Share it only with your own phone.").font(.callout)
                     Text("The HTTPS endpoint must be connected to this Mac’s local service on port 18765. Tailscale reachability is checked during pairing.").font(.caption).foregroundStyle(.secondary)
                     Button("Copy pairing link") {if let link=bridge.pairingLink {NSPasteboard.general.clearContents();NSPasteboard.general.setString(link.absoluteString,forType:.string)}}.disabled(bridge.pairingLink==nil)

@@ -133,14 +133,14 @@ final class ControllerStore: ObservableObject {
     func actionUnavailableReason(_ id: String) -> String? {
         if id == "dictate", isRecording { return nil }
         if id == "nativeVoice", providerInfo?.supports("nativeVoice") != true {
-            return "Two-way voice mode is not connected in Genesis yet. Use Hold to talk to dictate a draft, then Send."
+            return "Two-way voice mode is not connected here yet. Use Hold to talk to dictate a draft, then Send."
         }
         guard let action = action(id), providerInfo?.supportsControllerAction(action) == true else { return "This action is not available for this connection." }
         if isBusy { return "Another action is finishing." }
         if action.requiresChat && selectedChat == nil { return "Choose a chat first." }
         if id == "sendPrompt", !canSend { return hasUnresolvedSend ? "Check the previous Send receipt first." : "Finish and review a draft first." }
         if id == "dictate", !canDictate { return dictationControl.explanation ?? "Finish the current recording first." }
-        if ["previousControllerChat", "nextControllerChat"].contains(id), historyDestination(id) == nil { return "No \(id == "previousControllerChat" ? "earlier" : "later") chat opened from Genesis." }
+        if ["previousControllerChat", "nextControllerChat"].contains(id), historyDestination(id) == nil { return "No \(id == "previousControllerChat" ? "earlier" : "later") chat opened from this controller." }
         return nil
     }
     var chatAvailabilityMessage: String {
@@ -151,12 +151,12 @@ final class ControllerStore: ObservableObject {
                     ? "Connecting to \(selectedHost?.name ?? "your Mac"). Wait for the connection, then try again."
                     : "Refresh the connection to check this Mac’s available controls."
             }
-            return "Open \(selectedProvider.name) on \(selectedHost?.name ?? "your Mac"), then refresh Genesis to check its controls."
+            return "Open \(selectedProvider.name) on \(selectedHost?.name ?? "your Mac"), then refresh to check its controls."
         }
         if !info.installed { return "Install \(selectedProvider.name) on \(selectedHost?.name ?? "your Mac"), then refresh." }
         switch info.readiness {
         case "locked": return "Unlock \(selectedHost?.name ?? "your Mac") to open its chats."
-        case "needsAccessibility": return "Allow Accessibility for Genesis on \(selectedHost?.name ?? "your Mac")."
+        case "needsAccessibility": return "Allow Accessibility for Agent Micro Controller on \(selectedHost?.name ?? "your Mac")."
         case "closed": return "Open \(selectedProvider.name) on \(selectedHost?.name ?? "your Mac"), then refresh."
         default: break
         }
@@ -215,7 +215,7 @@ final class ControllerStore: ObservableObject {
 
     func enableGlassesFollow(takeover: Bool = false) {
         guard foreground, !isDemo, selectedProvider != .muse else {
-            glasses.stop("Glasses follow is available for Codex and Claude while Genesis is open."); return
+            glasses.stop("Glasses follow is available for Codex and Claude while this app is open."); return
         }
         do {
             let (host, token) = try connection()
@@ -890,7 +890,7 @@ final class ControllerStore: ObservableObject {
                 return .init(id:provider.rawValue,name:provider.name,installed:true,readiness:"ready",capabilities:base + actions.map(\.id),
                              reason:"Design preview only. No Mac commands are sent. Native live voice is not connected.",actions:actions)
             })
-        chats = ["Genesis iPhone", "OMAC workspace", "Design studio", "Weekly review", "Build notes", "Ideas & experiments"].enumerated().map {
+        chats = ["Controller app", "OMAC workspace", "Design studio", "Weekly review", "Build notes", "Ideas & experiments"].enumerated().map {
             ChatRecord(id: "demo-\(selectedProvider.rawValue)-\($0.offset)", title: $0.element, state: $0.offset == 0 ? "Working" : "Idle")
         }
         if settings.profiles[scope] == nil {

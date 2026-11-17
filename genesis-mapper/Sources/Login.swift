@@ -12,7 +12,7 @@ struct LoginLaunch {
             do {try p.run();p.waitUntilExit();return p.terminationStatus} catch {return -1}
         }
         if enabled {
-            let app=FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Applications/Genesis Agent Micro Controller.app").path
+            let app=FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Applications/Agent Micro Controller.app").path
             let data=try PropertyListSerialization.data(fromPropertyList:["Label":label,"ProgramArguments":["/usr/bin/open","-g","-a",app],"RunAtLoad":true,"LimitLoadToSessionType":"Aqua"],format:.xml,options:0)
             try FileManager.default.createDirectory(at:file.deletingLastPathComponent(),withIntermediateDirectories:true)
             try data.write(to:file,options:.atomic)

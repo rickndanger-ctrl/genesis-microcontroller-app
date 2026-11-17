@@ -6,8 +6,8 @@ options:
 settings:
   base:
     SWIFT_VERSION: "5.0"
-    CURRENT_PROJECT_VERSION: 27
-    MARKETING_VERSION: 0.3.3
+    CURRENT_PROJECT_VERSION: 28
+    MARKETING_VERSION: 0.4.0
     ENABLE_USER_SCRIPT_SANDBOXING: YES
     COMPRESS_PNG_FILES: NO
 targets:
@@ -28,7 +28,7 @@ targets:
     info:
       path: ios/Info.plist
       properties:
-        CFBundleDisplayName: Genesis Controller
+        CFBundleDisplayName: Agent Micro
         CFBundleShortVersionString: $(MARKETING_VERSION)
         CFBundleVersion: $(CURRENT_PROJECT_VERSION)
         UIRequiresFullScreen: true
@@ -41,10 +41,10 @@ targets:
           - UIInterfaceOrientationPortrait
           - UIInterfaceOrientationLandscapeLeft
           - UIInterfaceOrientationLandscapeRight
-        NSMicrophoneUsageDescription: Dictate a draft for your selected chat. Genesis sends only when you tap Send.
+        NSMicrophoneUsageDescription: Dictate a draft for your selected chat. Nothing is sent until you tap Send.
         NSSpeechRecognitionUsageDescription: Turn your speech into an editable chat draft.
-        NSCameraUsageDescription: Scan the pairing code shown by your Mac's Genesis controller.
-        NSLocalNetworkUsageDescription: Connect to your paired Genesis companions on your private network.
+        NSCameraUsageDescription: Scan the pairing code shown by Agent Micro Controller on your Mac.
+        NSLocalNetworkUsageDescription: Connect to the Macs you paired on your private network.
         CFBundleURLTypes:
           - CFBundleURLName: com.richardholguin.genesis.pair
             CFBundleURLSchemes:

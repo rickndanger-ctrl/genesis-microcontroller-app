@@ -292,7 +292,7 @@ final class PhoneDictation: PhoneDictationService {
         case permissions, unavailable, audioBuffer
         var errorDescription: String? {
             switch self {
-            case .permissions: return "Allow Microphone and Speech Recognition for Genesis in Settings, or type your prompt."
+            case .permissions: return "Allow Microphone and Speech Recognition for Agent Micro Controller in Settings, or type your prompt."
             case .unavailable: return "On-device dictation is unavailable for this language or audio input. You can type your prompt instead."
             case .audioBuffer: return "Dictation could not continue. Your partial draft is saved; you can edit it before sending."
             }

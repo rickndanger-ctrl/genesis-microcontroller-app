@@ -34,8 +34,15 @@ struct ControllerScreen: View {
     /// Off hides every glasses control. See `GlassesFeature`.
     @AppStorage private var glassesFeature: Bool
 
-    init(store: ControllerStore) {
+    /// Opens the sample controller. Present only on a real, unpaired install.
+    private let startDemo: (() -> Void)?
+    /// Leaves the sample controller. Present only when it was opened in the app.
+    private let endDemo: (() -> Void)?
+
+    init(store: ControllerStore, startDemo: (() -> Void)? = nil, endDemo: (() -> Void)? = nil) {
         self.store = store
+        self.startDemo = startDemo
+        self.endDemo = endDemo
         _glassesFeature = AppStorage(wrappedValue: false, GlassesFeature.storageKey(demo: store.isDemo))
         // The demo always opens on the dashboard so previews and UI tests
         // start from one known layout.
@@ -75,7 +82,23 @@ struct ControllerScreen: View {
         }
         .statusBarHidden(fullScreenController)
         .persistentSystemOverlays(fullScreenController ? .hidden : .automatic)
-        .sheet(isPresented: $showSettings) { SettingsScreen(store: store) }
+        .sheet(isPresented: $showSettings) { SettingsScreen(store: store, endDemo: endDemo) }
+        .safeAreaInset(edge: .bottom, spacing: 0) {
+            if let endDemo {
+                // Always in reach, in either layout, so the demo is never a dead end.
+                HStack(spacing: 10) {
+                    Label("Demo · sample chats, no Mac contacted", systemImage: "play.circle").lineLimit(1).minimumScaleFactor(0.8)
+                    Spacer(minLength: 4)
+                    Button("Exit demo") { ControllerSound.shared.keyClick(); endDemo() }
+                        .buttonStyle(.borderedProminent).controlSize(.small)
+                        .accessibilityIdentifier("controller.exitDemo")
+                }
+                .font(.system(size: isPad ? 14 : 12, weight: .semibold))
+                .foregroundStyle(GenesisPalette.text)
+                .padding(.horizontal, 16).padding(.vertical, 8)
+                .background(.ultraThinMaterial)
+            }
+        }
         .sheet(isPresented: $showArtifacts) { ArtifactShelf(store: store, initialIndex: artifactIndex) }
         .sheet(item: $dialArtifactPreview) { ArtifactPreview(store: store, artifact: $0) }
         .sheet(isPresented: $showActions, onDismiss: routeRequestedPanel) { ActionBrowser(store:store) }
@@ -447,7 +470,7 @@ struct ControllerScreen: View {
     private var header: some View {
         HStack(alignment: .center) {
             VStack(alignment: .leading, spacing: 3) {
-                Text("GENESIS").font(.system(size: isPad ? 14 : 12, weight: .black, design: .rounded)).tracking(5)
+                Text("CONTROL DECK").font(.system(size: isPad ? 14 : 12, weight: .black, design: .rounded)).tracking(5)
                 Text("Agent Micro Controller").font(.system(size: isPad ? 28 : 22, weight: .semibold, design: .rounded))
             }
             Spacer(minLength: 4)
@@ -475,6 +498,17 @@ struct ControllerScreen: View {
                             .font(.system(size: isPad ? 14 : 12, weight: .semibold))
                             .frame(maxWidth: .infinity, minHeight: isPad ? 48 : 42)
                             .genesisPanel(radius: 13, raised: true)
+                    }
+                    if let startDemo {
+                        // Someone without the Mac companion yet can still see what the controller does.
+                        Button { ControllerSound.shared.keyClick(); startDemo() } label: {
+                            Label("Try the demo", systemImage: "play.circle")
+                                .font(.system(size: isPad ? 14 : 12, weight: .semibold))
+                                .frame(maxWidth: .infinity, minHeight: isPad ? 48 : 42)
+                                .genesisPanel(radius: 13)
+                        }
+                        .accessibilityIdentifier("controller.tryDemo")
+                        .accessibilityHint("Opens a sample controller. No Mac is contacted.")
                     }
                 }
                 ForEach(store.hosts) { host in

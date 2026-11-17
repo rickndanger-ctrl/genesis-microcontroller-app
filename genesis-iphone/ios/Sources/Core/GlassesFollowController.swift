@@ -216,7 +216,7 @@ final class GlassesFollowController: ObservableObject {
                 self.readingMessage = requested ? "Ready: this chat can keep reading for up to one hour after lock." : "Reading after lock is off."
             } catch {
                 guard self.generation == expected, self.enabled else { return }
-                self.readingMessage = "The Mac has not confirmed this reading setting. Keep Genesis open and try again."
+                self.readingMessage = "The Mac has not confirmed this reading setting. Keep this app open and try again."
             }
             self.readingChangePending = false
             if self.keepReadingPreference != requested { self.scheduleReadingPreference(force: true) }
@@ -249,7 +249,7 @@ final class GlassesFollowController: ObservableObject {
             defer { if self.generation == expected { self.endBackgroundTask() } }
             guard self.generation == expected, self.enabled, let host = self.host, let token = self.token, let lease = self.leaseID else { return }
             guard self.supportsKeepReading else {
-                self.stop("Update Genesis on this Mac to keep reading after lock."); return
+                self.stop("Update the Mac companion to keep reading after lock."); return
             }
             do {
                 if !self.readingArmed {
@@ -272,7 +272,7 @@ final class GlassesFollowController: ObservableObject {
                 guard self.generation == expected, self.enabled else { return }
                 // A park may have succeeded despite a lost reply. Do not replay
                 // it or release an armed session. The Mac's expiry is the bound.
-                self.message = self.readingArmed ? "Reading handoff was not confirmed. The Mac's armed fallback remains available." : "Reading handoff was not confirmed. Reopen Genesis to check."
+                self.message = self.readingArmed ? "Reading handoff was not confirmed. The Mac's armed fallback remains available." : "Reading handoff was not confirmed. Reopen this app to check."
             }
         }
     }
@@ -465,7 +465,7 @@ final class GlassesFollowController: ObservableObject {
         }
         stop()
         if case RemoteError.server(let code, _) = error, [404, 405, 501].contains(code) {
-            unsupported = true; message = "Update Genesis on this Mac to use glasses follow. Other controller features still work."
+            unsupported = true; message = "Update the Mac companion to use glasses follow. Other controller features still work."
         } else if let owner {
             otherOwner = owner; message = "Glasses are following another \(owner). Take over only when you want to switch controllers."
         } else {

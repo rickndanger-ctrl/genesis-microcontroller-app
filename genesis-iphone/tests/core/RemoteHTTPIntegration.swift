@@ -1289,7 +1289,7 @@ final class FixtureCredentials: ControllerCredentialVault {
         let cases: [(String, Bool, [String], String)] = [
             ("closed", true, ["openChat"], "Open Claude on readiness-mac, then refresh."),
             ("locked", true, ["openChat"], "Unlock readiness-mac to open its chats."),
-            ("needsAccessibility", true, ["openChat"], "Allow Accessibility for Genesis on readiness-mac."),
+            ("needsAccessibility", true, ["openChat"], "Allow Accessibility for Agent Micro Controller on readiness-mac."),
             ("missing", false, [], "Install Claude on readiness-mac, then refresh."),
             ("loading", true, ["openChat"], "Claude is not ready on readiness-mac. Open it, then refresh."),
             ("ready", true, [], "Chat switching is not available for Claude on this Mac yet.")
@@ -1303,7 +1303,7 @@ final class FixtureCredentials: ControllerCredentialVault {
                    "\(readiness) blocked chat tap preserves the exact selection and draft")
         }
         mac.setProviders([]); await store.refresh(); await store.selectChat(chat)
-        expect(store.lastError == "Open Claude on readiness-mac, then refresh Genesis to check its controls.",
+        expect(store.lastError == "Open Claude on readiness-mac, then refresh to check its controls.",
                "An absent provider suggests checking the app instead of claiming an unsupported feature")
 
         mac.hold("/v1/status")

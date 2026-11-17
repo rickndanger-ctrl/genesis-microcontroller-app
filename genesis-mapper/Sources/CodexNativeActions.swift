@@ -122,7 +122,7 @@ enum CodexNativeActions {
             return failed("This Codex action is not connected to a verified native control.")
         }
         guard isCurrent(),!Task.isCancelled else {return failed("The controller selection changed. No menu action ran.")}
-        guard AXIsProcessTrusted() else {return failed("Enable Accessibility for Genesis on this Mac to use Codex menu controls.")}
+        guard AXIsProcessTrusted() else {return failed("Enable Accessibility for Agent Micro Controller on this Mac to use Codex menu controls.")}
         let bundle="com.openai.codex"
         guard let app=NSRunningApplication.runningApplications(withBundleIdentifier:bundle).first(where:{!$0.isTerminated}) else {
             return failed("Open Codex on this Mac before using its menu controls.")
