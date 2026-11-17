@@ -53,8 +53,14 @@ struct ControllerScreen: View {
     private var isPad: Bool { UIDevice.current.userInterfaceIdiom == .pad }
 
     private var browsedSlot: Int { dialSlot ?? store.selectedSlotIndex ?? 0 }
-    /// The deck's accent: what the open chat (or the one the dial rests on) is doing.
-    private var slotColor: Color { GenesisPalette.accent(store.selectedSlotIndex == nil ? store.activity(slot: browsedSlot) : store.selectedActivity) }
+    @AppStorage(DeckTheme.storageKey) private var themeID = DeckTheme.aurora.rawValue
+    private var theme: DeckTheme { DeckTheme(rawValue: themeID) ?? .aurora }
+    /// What the open chat (or the one the dial rests on) is doing.
+    private var deckActivity: ChatActivity? { store.selectedSlotIndex == nil ? store.activity(slot: browsedSlot) : store.selectedActivity }
+    /// The deck's accent: the chat's light when it has one, otherwise the theme's color.
+    private var slotColor: Color { theme.accent(deckActivity) }
+    /// The light inside the utility keys. Caps stay out of the theme: color on a cap means status.
+    private var capColor: Color { GenesisPalette.accent(deckActivity) }
     private var artifactIndex: Int { store.artifacts.firstIndex { $0.id == artifactID } ?? 0 }
     private var artifactSelectionLabel: String {
         guard store.artifacts.indices.contains(artifactIndex) else { return "No artifacts" }
@@ -78,7 +84,7 @@ struct ControllerScreen: View {
                 else { controllerLayout(in: geometry.size) }
             }
             .scrollBounceBehavior(.basedOnSize)
-            .background(GenesisBackdrop(color: slotColor))
+            .background(GenesisBackdrop(color: slotColor, theme: theme))
             .foregroundStyle(GenesisPalette.text)
         }
         .statusBarHidden(fullScreenController)
@@ -112,8 +118,17 @@ struct ControllerScreen: View {
         .sheet(item: Binding(get: { mappingIndex.map { MappingSelection(id: $0) } }, set: { mappingIndex = $0?.id })) { selection in
             MappingScreen(store: store, index: selection.id)
         }
-        .alert("Controller update", isPresented: Binding(get: { store.lastError != nil }, set: { if !$0 { store.lastError = nil } })) {
-            Button("OK", role: .cancel) { ControllerSound.shared.keyClick(); store.lastError = nil }
+        .alert("Controller update", isPresented: Binding(get: { store.lastError != nil }, set: { if !$0 { store.lastError = nil; store.macDraftBlocksSend = false } })) {
+            if store.macDraftBlocksSend {
+                // The one case with a way forward from here, and it throws away text on the Mac, so it is asked for.
+                Button("Replace it and send", role: .destructive) {
+                    ControllerSound.shared.keyClick(); store.lastError = nil
+                    Task { await store.sendDraft(replacingMacDraft: true) }
+                }
+                Button("Leave it", role: .cancel) { ControllerSound.shared.keyClick(); store.lastError = nil; store.macDraftBlocksSend = false }
+            } else {
+                Button("OK", role: .cancel) { ControllerSound.shared.keyClick(); store.lastError = nil }
+            }
         } message: { Text(store.lastError ?? "") }
         .onChange(of: talkGestureActive) { _, active in
             // onEnded is not called when the system cancels a touch.
@@ -162,6 +177,7 @@ struct ControllerScreen: View {
                 VStack(spacing: 14) {
                     focusedRoute
                     focusedStatus
+                    recoveryButtons
                     focusedDraft
                     focusedTools
                 }.frame(width: rail)
@@ -176,6 +192,7 @@ struct ControllerScreen: View {
             VStack(spacing: 10) {
                 focusedRoute
                 focusedStatus
+                recoveryButtons
                 deck(width: size.width - 16, height: max(300, size.height - chrome))
                 focusedDraft
                 focusedTools
@@ -416,13 +433,19 @@ struct ControllerScreen: View {
                 .frame(maxWidth: .infinity, alignment: .leading).padding(.horizontal, 7)
                 .accessibilityIdentifier("controller.companionNotice")
         }
+        recoveryButtons
+    }
+
+    /// Ways out of a state only the Mac can fix, offered wherever the deck is shown.
+    @ViewBuilder private var recoveryButtons: some View {
         if store.providerInfo?.supports("launchApp") == true {
             // The app is installed but shut. Someone away from the Mac can open it from here.
             Button {
                 ControllerSound.shared.keyClick()
                 Task { await store.openProviderApp() }
             } label: {
-                Label("Open \(store.selectedProvider.name) on \(selectedComputerName)", systemImage: "arrow.up.forward.app")
+                Label(store.providerNeedsWiderWindow ? "Widen \(store.selectedProvider.name)’s window on \(selectedComputerName)" : "Open \(store.selectedProvider.name) on \(selectedComputerName)",
+                      systemImage: store.providerNeedsWiderWindow ? "arrow.left.and.right" : "arrow.up.forward.app")
                     .font(.system(size: isPad ? 14 : 12, weight: .semibold))
                     .frame(maxWidth: .infinity, minHeight: isPad ? 46 : 40)
                     .genesisPanel(radius: 13, raised: true)
@@ -685,11 +708,11 @@ struct ControllerScreen: View {
         let chatDialLevel = store.selectedSlotIndex == nil ? 0.30 : browsedSlot == store.selectedSlotIndex ? 1.0 : 0.62
         let browsingUnopened = dialSlot != nil && dialSlot != store.selectedSlotIndex
         return ZStack {
-            DeckChassis(glow: slotColor, scale: scale)
+            DeckChassis(glow: slotColor, scale: scale, theme: theme)
             VStack(spacing: 0) {
                 VStack(spacing: gap) {
                     HStack(spacing: gap) {
-                        DialControl(silver: true, caption: "CHATS", color: GenesisPalette.accent(store.activity(slot: browsedSlot)), level: chatDialLevel, ringSelection: browsedSlot,
+                        DialControl(silver: true, caption: "CHATS", color: theme.accent(store.activity(slot: browsedSlot), 0), level: chatDialLevel, ringSelection: browsedSlot,
                                     ringColors: (0..<6).map { GenesisPalette.dot(store.activity(slot: $0)) },
                                     degreesPerStep: 60, restingRotation: $chatDialRotation, scale: scale,
                                     interactionChanged: { chatDialActive = $0 },
@@ -699,7 +722,7 @@ struct ControllerScreen: View {
                         }, press: { activateSlot(browsedSlot) }).frame(width: keyW, height: keyH)
                         slot(0, width: keyW, height: keyH, scale: scale)
                         slot(1, width: keyW, height: keyH, scale: scale)
-                        DialControl(silver: false, caption: "ARTIFACTS", color: slotColor, restingRotation: $artifactDialRotation, scale: scale,
+                        DialControl(silver: false, caption: "ARTIFACTS", color: theme.accent(deckActivity, 1), restingRotation: $artifactDialRotation, scale: scale,
                                     interactionChanged: { artifactDialActive = $0 },
                                     selectionDescription: artifactSelectionLabel,
                                     visibleSelection: artifactID.flatMap { id in store.artifacts.first { $0.id == id }?.title },
@@ -718,9 +741,11 @@ struct ControllerScreen: View {
                     }
                     HStack(spacing: gap) {
                         Button { ControllerSound.shared.keyClick(); dialSlot = nil; deferredTap = nil; store.returnHome() } label: {
-                            PixelLight(color: slotColor, working: store.isBusy, reduceMotion: reduceMotion, scale: scale)
+                            // Resting, the Home light plays the theme; with a chat that has something to say, it shows that.
+                            PixelLight(color: theme.accent(deckActivity, 2), working: store.isBusy, reduceMotion: reduceMotion, scale: scale,
+                                       idleColors: deckActivity == nil || deckActivity == .idle ? theme.colors : [])
                         }
-                        .buttonStyle(HomePuckStyle(color: slotColor, caption: "HOME", scale: scale))
+                        .buttonStyle(HomePuckStyle(color: theme.accent(deckActivity, 2), caption: "HOME", scale: scale))
                         .frame(width: keyW, height: keyH)
                         .accessibilityLabel("Return to chat selection")
                         talkKey(width: keyW * 2 + gap, height: keyH, scale: scale)
@@ -803,7 +828,7 @@ struct ControllerScreen: View {
                     .lineLimit(1).truncationMode(.tail).frame(width: max(0, width * 0.78 - 4 * scale))
             }.opacity(enabled ? 1 : 0.42)
         }
-        .buttonStyle(KeycapButtonStyle(led: slotColor, level: active ? 1 : enabled ? 0.10 : 0.03, scale: scale, unit: width))
+        .buttonStyle(KeycapButtonStyle(led: capColor, level: active ? 1 : enabled ? 0.10 : 0.03, scale: scale, unit: width))
         .frame(width: width, height: height)
         .disabled(!enabled).accessibilityLabel(title)
     }
@@ -819,7 +844,7 @@ struct ControllerScreen: View {
         let waiting = deferredTap?.target == .action(id)
         // Utility keys take the selected chat's color, so the whole deck
         // shifts hue together when the chat changes.
-        return HoldTapKeycap(led: slotColor, level: armed ? 0.85 : waiting ? 0.60 : enabled ? 0.10 : 0.03, scale: scale, unit: width,
+        return HoldTapKeycap(led: capColor, level: armed ? 0.85 : waiting ? 0.60 : enabled ? 0.10 : 0.03, scale: scale, unit: width,
                              tap: { runQuickAction(id) },
                              hold: { ControllerSound.shared.keyClick(); quickMappingIndex = index }) {
             VStack(spacing: 6 * scale) {
@@ -884,7 +909,7 @@ struct ControllerScreen: View {
     private func talkKey(width: CGFloat, height: CGFloat, scale: CGFloat) -> some View {
         // The cap stays down, fully lit and breathing, for as long as the
         // microphone is live. Capture start keeps its own soft haptic.
-        Keycap(led: slotColor, level: store.isRecording ? 1 : store.canDictate ? 0.13 : 0.03, breathing: store.isRecording,
+        Keycap(led: capColor, level: store.isRecording ? 1 : store.canDictate ? 0.13 : 0.03, breathing: store.isRecording,
                pressed: talkGestureActive || heldTalk || store.isRecording, scale: scale, haptic: false, unit: (width - 8 * scale) / 2) {
             VStack(spacing: 5 * scale) {
                 Image(systemName: store.dictationControl.icon).font(.system(size: 23 * scale, weight: .semibold))

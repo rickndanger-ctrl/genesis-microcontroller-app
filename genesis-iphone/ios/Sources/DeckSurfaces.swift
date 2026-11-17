@@ -65,6 +65,70 @@ enum GenesisPalette {
     static let hairline = Color.black.opacity(0.08)
 }
 
+/// The deck's decoration: color for everything that is not a status light.
+///
+/// The six chat caps belong to status (white, blue, green, yellow, red) and a
+/// theme never touches them. A theme colors the glow under and around the
+/// body, the knobs and the Home button, and only while there is nothing to
+/// report: a chat that is working, finished, waiting or failed takes those
+/// over with its own light.
+enum DeckTheme: String, CaseIterable, Identifiable {
+    case aurora, sunset, candy, mono
+    static let storageKey = "deck.theme"
+    var id: String { rawValue }
+    var name: String {
+        switch self {
+        case .aurora: return "Aurora"
+        case .sunset: return "Sunset"
+        case .candy: return "Candy"
+        case .mono: return "Mono"
+        }
+    }
+    var detail: String {
+        switch self {
+        case .aurora: return "Teal, violet and sky."
+        case .sunset: return "Coral, magenta and amber."
+        case .candy: return "Pink, lilac and aqua."
+        case .mono: return "No color until a chat has something to say."
+        }
+    }
+    /// The colors the deck drifts through. Empty for Mono.
+    var colors: [Color] {
+        switch self {
+        case .aurora: return [0x19D3C5, 0x7C5CFF, 0x3FB6FF, 0x5EF0B0].map(GenesisPalette.rgb)
+        case .sunset: return [0xFF7A59, 0xFF4FA3, 0xFFB347, 0x9B5CF6].map(GenesisPalette.rgb)
+        case .candy: return [0xFF6FB5, 0xB08CFF, 0x5CE1E6, 0xFFD166].map(GenesisPalette.rgb)
+        case .mono: return []
+        }
+    }
+    /// One of the theme's colors, or the quiet slate when the theme has none.
+    func color(_ index: Int) -> Color { colors.isEmpty ? GenesisPalette.slate : colors[index % colors.count] }
+    /// What a part of the deck shows: the chat's light when it has one, otherwise this theme's color.
+    func accent(_ activity: ChatActivity?, _ index: Int = 0) -> Color {
+        switch activity {
+        case .idle, .none: return color(index)
+        default: return GenesisPalette.light(activity)
+        }
+    }
+}
+
+/// The theme's colors turning slowly, used as the glow under the deck.
+struct ThemeDrift: View {
+    let theme: DeckTheme
+    var period: Double = 46
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @State private var turned = false
+    var body: some View {
+        let colors = theme.colors
+        AngularGradient(colors: colors + [colors.first ?? .clear], center: .center)
+            .rotationEffect(.degrees(turned ? 360 : 0))
+            // Slow enough to be felt, not watched.
+            .animation(reduceMotion ? nil : .linear(duration: period).repeatForever(autoreverses: false), value: turned)
+            .onAppear { turned = true }
+            .accessibilityHidden(true)
+    }
+}
+
 /// A soft white panel used by every surface around the deck.
 struct GenesisPanel: ViewModifier {
     var radius: CGFloat = 20
@@ -87,12 +151,18 @@ extension View {
 /// The room behind the controller: bright, with a faint wash of the selected chat's light.
 struct GenesisBackdrop: View {
     let color: Color
+    var theme: DeckTheme = .mono
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     var body: some View {
         ZStack {
             GenesisPalette.canvas
             LinearGradient(colors: [.white.opacity(0.9), .clear], startPoint: .top, endPoint: .center)
             RadialGradient(colors: [color.opacity(0.16), color.opacity(0.05), .clear], center: UnitPoint(x: 0.5, y: 0.45), startRadius: 0, endRadius: 520)
+            if !theme.colors.isEmpty {
+                // Two faint pools of the theme's other colors, off to the corners.
+                RadialGradient(colors: [theme.color(1).opacity(0.13), .clear], center: UnitPoint(x: 0.05, y: 0.88), startRadius: 0, endRadius: 360)
+                RadialGradient(colors: [theme.color(2).opacity(0.11), .clear], center: UnitPoint(x: 0.98, y: 0.12), startRadius: 0, endRadius: 340)
+            }
         }
         .animation(reduceMotion ? nil : .easeInOut(duration: 0.45), value: color)
         .ignoresSafeArea()
@@ -193,14 +263,42 @@ struct SlicedSprite: View {
 struct DeckChassis: View {
     let glow: Color
     var scale: CGFloat = 1
+    var theme: DeckTheme = .mono
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
         GeometryReader { geometry in
-            SlicedSprite(sprite: DeckArt.shell, unit: geometry.size.width, size: geometry.size)
-                .shadow(color: glow.opacity(0.28), radius: 26 * scale, y: 10 * scale)
-                .shadow(color: .black.opacity(0.24), radius: 16 * scale, y: 14 * scale)
-                .animation(reduceMotion ? nil : .easeInOut(duration: 0.4), value: glow)
+            let size = geometry.size
+            ZStack {
+                if !theme.colors.isEmpty {
+                    // Light spilling out from under the body, turning slowly.
+                    ThemeDrift(theme: theme)
+                        .frame(width: size.width * 1.5, height: size.width * 1.5)
+                        .mask(RoundedRectangle(cornerRadius: size.width * 0.11, style: .continuous)
+                            .frame(width: size.width * 1.02, height: size.height * 1.02))
+                        .blur(radius: 22 * scale)
+                        .opacity(0.62)
+                        .frame(width: size.width, height: size.height)
+                }
+                SlicedSprite(sprite: DeckArt.shell, unit: size.width, size: size)
+                    .shadow(color: glow.opacity(0.28), radius: 26 * scale, y: 10 * scale)
+                    .shadow(color: .black.opacity(0.24), radius: 16 * scale, y: 14 * scale)
+                    .animation(reduceMotion ? nil : .easeInOut(duration: 0.4), value: glow)
+                if !theme.colors.isEmpty {
+                    // The same light seen through the plate, under the keys. The keys
+                    // are drawn above it with their own shadows, so they still sit proud.
+                    let side = size.width * DeckArt.plateSide, top = size.width * DeckArt.plateTop, bottom = size.width * DeckArt.plateBottom
+                    ThemeDrift(theme: theme)
+                        .frame(width: size.width * 1.5, height: size.width * 1.5)
+                        .mask(RoundedRectangle(cornerRadius: size.width * 0.035, style: .continuous)
+                            .frame(width: max(0, size.width - side * 2), height: max(0, size.height - top - bottom))
+                            .offset(y: (top - bottom) / 2))
+                        .blur(radius: 14 * scale)
+                        .opacity(0.20)
+                        .blendMode(.multiply)
+                        .frame(width: size.width, height: size.height)
+                }
+            }
         }
         .allowsHitTesting(false)
         .accessibilityHidden(true)
@@ -576,16 +674,38 @@ struct PixelLight: View {
     let working: Bool
     let reduceMotion: Bool
     var scale: CGFloat = 1
+    /// Colors for the resting pattern. Empty keeps the three still dots.
+    var idleColors: [Color] = []
+
+    /// How brightly a pixel is lit while resting: a ring that opens out from
+    /// the centre every few seconds, then a pause. Slow and soft on purpose.
+    static func idleLevel(row: Int, column: Int, time: TimeInterval) -> Double {
+        let ring = Double(max(abs(row - 2), abs(column - 2)))      // 0 at the centre, 2 at the edge
+        let cycle = 4.8, t = time.truncatingRemainder(dividingBy: cycle)
+        let front = t / 0.55                                        // the ring the wave has reached
+        let distance = abs(front - ring)
+        let wave = front <= 3.2 ? max(0, 1 - distance) : 0          // one soft ring, then rest
+        return 0.22 + 0.78 * wave
+    }
+    /// Which resting color is showing: one per ripple.
+    static func idleColorIndex(time: TimeInterval, count: Int) -> Int { count == 0 ? 0 : Int(time / 4.8) % count }
+
     var body: some View {
-        TimelineView(.animation(minimumInterval: 0.25, paused: !working || reduceMotion)) { context in
-            let phase = Int(context.date.timeIntervalSince1970 * 4) % 12
+        let animatesIdle = !idleColors.isEmpty && !working
+        TimelineView(.animation(minimumInterval: working ? 0.25 : 0.1, paused: reduceMotion || (!working && !animatesIdle))) { context in
+            let now = context.date.timeIntervalSince1970
+            let phase = Int(now * 4) % 12
+            let resting = animatesIdle && !reduceMotion
+            let tint = resting ? idleColors[Self.idleColorIndex(time: now, count: idleColors.count)] : color
             VStack(spacing: 2 * scale) {
                 ForEach(0..<5) { row in HStack(spacing: 2 * scale) {
                     ForEach(0..<5) { column in
                         let i = row * 5 + column
-                        let lit = working ? ((i + phase) % 7 < 2) : [11, 12, 13].contains(i)
-                        Circle().fill(color.opacity(lit ? 1 : 0.22)).frame(width: 3.4 * scale, height: 3.4 * scale)
-                            .shadow(color: color.opacity(lit ? 0.9 : 0), radius: 2 * scale)
+                        let level: Double = working ? ((i + phase) % 7 < 2 ? 1 : 0.22)
+                            : resting ? Self.idleLevel(row: row, column: column, time: now)
+                            : ([11, 12, 13].contains(i) ? 1 : 0.22)
+                        Circle().fill(tint.opacity(level)).frame(width: 3.4 * scale, height: 3.4 * scale)
+                            .shadow(color: tint.opacity(level > 0.6 ? 0.9 * level : 0), radius: 2 * scale)
                     }
                 }
                 }

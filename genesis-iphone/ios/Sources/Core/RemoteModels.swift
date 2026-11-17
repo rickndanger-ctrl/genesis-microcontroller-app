@@ -148,10 +148,20 @@ struct DictationControlPresentation: Equatable {
         if recording { return .init(label:"RELEASE TO REVIEW",accessibilityLabel:"Stop dictation",summary:nil,explanation:nil,icon:"waveform") }
         if finalizing { return blocked("FINISHING…", "Finishing your recording.", "Your recording is being turned into text. Wait a moment before recording again.") }
         if !paired { return blocked("PAIR YOUR MAC", "Pair a Mac to use dictation.", "Open controller settings and pair this Mac before using dictation.") }
-        guard let info else { return blocked("NOT CONNECTED", "Connect to your Mac to use dictation.", "Check that Tailscale and the Mac companion are running, then refresh the connection.") }
-        if info.readiness == "locked" { return blocked("MAC LOCKED", "Unlock your Mac to use dictation.", "Unlock the selected Mac, then refresh the controller connection.") }
+        // Recording and the draft live on this device. With a chat chosen, a Mac
+        // that is away only blocks Send, so the draft can be ready when it is back.
+        func later(_ why: String) -> DictationControlPresentation {
+            .init(label:"HOLD TO TALK",accessibilityLabel:"Dictate a draft to send later",
+                  summary:"\(why) This records a draft here to send later.",
+                  explanation:"\(why) Hold to record; the draft is saved on this device for the selected chat. Send it once the Mac is reachable and \(provider.name) is ready.",icon:"mic")
+        }
+        let canDraft = hasChat && !busy
+        guard let info else {
+            return canDraft ? later("Your Mac isn’t answering.") : blocked("NOT CONNECTED", "Connect to your Mac to use dictation.", "Check that Tailscale and the Mac companion are running, then refresh the connection.")
+        }
+        if info.readiness == "locked" { return canDraft ? later("Your Mac is locked.") : blocked("MAC LOCKED", "Unlock your Mac to use dictation.", "Unlock the selected Mac, then refresh the controller connection.") }
         if info.readiness == "needsAccessibility" { return blocked("SETUP NEEDED", "Allow Accessibility for the companion on your Mac.", "Enable Accessibility for Agent Micro Controller on the selected Mac, then refresh.") }
-        if info.readiness == "closed" { return blocked("OPEN THE APP", "Open \(provider.name) on your Mac.", "Open \(provider.name) on the selected Mac, then refresh the controller connection.") }
+        if info.readiness == "closed" { return canDraft ? later("\(provider.name) isn’t ready on your Mac.") : blocked("OPEN THE APP", "Open \(provider.name) on your Mac.", "Open \(provider.name) on the selected Mac, then refresh the controller connection.") }
         if !info.supportsPhoneDictation {
             return blocked("NOT CONNECTED", "\(provider.name) Talk and Send aren’t connected yet.", "Talk and Send aren’t connected to \(provider.name) in this iPhone app yet. The available chat, menu, and artifact controls still work. This button will not start recording.")
         }
@@ -276,6 +286,8 @@ struct RemoteCommand: Codable, Equatable {
     var artifactID: String?
     var generation: Int
     var navigationSession: String? = nil
+    /// Sent only after you were told the Mac's message box has text in it and chose to replace it.
+    var replaceDraft: Bool? = nil
 }
 struct RemoteNavigationState: Codable, Equatable {
     var active: Bool
@@ -290,6 +302,8 @@ struct CommandReceipt: Codable, Equatable {
     var message: String
     var activeChat: ChatRecord? = nil
     var navigation: RemoteNavigationState? = nil
+    /// Why nothing was done, when there is a way past it from here. "macDraft": the Mac's message box already has text.
+    var blocker: String? = nil
     var isConfirmed: Bool { status == "confirmed" }
     var isQueued: Bool { status == "queued" }
     // Accepted queue custody ends this Send attempt, without asserting that

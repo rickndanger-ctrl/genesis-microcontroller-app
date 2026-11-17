@@ -108,8 +108,10 @@ final class ControllerStore: ObservableObject {
         return selectedProvider != .codex || isDemo || UUID(uuidString: chat.id) != nil
     }
     var canDictate: Bool {
-        isPaired && hasDictationChat && !isBusy && !isFinalizing && providerInfo?.supportsPhoneDictation == true
+        isPaired && hasDictationChat && !isBusy && !isFinalizing && (providerInfo?.supportsPhoneDictation == true || !macIsReady)
     }
+    /// The Mac is answering and the selected app is ready to be controlled.
+    private var macIsReady: Bool { status != nil && providerInfo?.readiness == "ready" }
     var dictationControl: DictationControlPresentation {
         .make(provider:selectedProvider,info:providerInfo,paired:isPaired,hasChat:hasDictationChat,
               busy:isBusy,recording:isRecording,finalizing:isFinalizing)
@@ -119,11 +121,16 @@ final class ControllerStore: ObservableObject {
     var availableShortcuts: [ControllerShortcut] { providerInfo?.controllerShortcuts ?? [] }
     var availableActions: [RemoteAction] { providerInfo?.availableActions ?? [] }
     func action(_ id: String) -> RemoteAction? { (providerInfo?.actionCatalog ?? RemoteAction.defaults).first { $0.id == id } }
+    /// Whether an action needs a chat selected. Muse's call belongs to the
+    /// assistant, not to a chat, so it works from anywhere.
+    private func needsChat(_ action: RemoteAction) -> Bool {
+        action.requiresChat && !(action.id == "nativeVoice" && selectedProvider == .muse)
+    }
     func canRunAction(_ id: String) -> Bool {
         // A local recording must remain stoppable even if the Mac disconnects.
         if id == "dictate", isRecording { return true }
         guard !isBusy, let action = action(id), providerInfo?.supportsControllerAction(action) == true,
-              !action.requiresChat || selectedChat != nil else { return false }
+              !needsChat(action) || selectedChat != nil else { return false }
         if id == "sendPrompt" { return canSend }
         if id == "dictate" { return canDictate }
         if ["previousControllerChat", "nextControllerChat"].contains(id) { return historyDestination(id) != nil }
@@ -133,7 +140,7 @@ final class ControllerStore: ObservableObject {
     /// so its key stays lit and a press can wait its turn. See `DeferredTap`.
     func canDeferAction(_ id: String) -> Bool {
         guard isBusy, DeferredTap.mayWait(id), let action = action(id), providerInfo?.supportsControllerAction(action) == true,
-              !action.requiresChat || selectedChat != nil else { return false }
+              !needsChat(action) || selectedChat != nil else { return false }
         if ["previousControllerChat", "nextControllerChat"].contains(id) { return historyDestination(id) != nil }
         return true
     }
@@ -142,9 +149,10 @@ final class ControllerStore: ObservableObject {
         if id == "nativeVoice", providerInfo?.supports("nativeVoice") != true {
             return "Two-way voice mode is not connected here yet. Use Hold to talk to dictate a draft, then Send."
         }
+        if id == "stop", selectedProvider == .muse { return "Muse can’t be stopped from the controller. Stop it in Muse on the Mac." }
         guard let action = action(id), providerInfo?.supportsControllerAction(action) == true else { return "This action is not available for this connection." }
         if isBusy { return "Another action is finishing." }
-        if action.requiresChat && selectedChat == nil { return "Choose a chat first." }
+        if needsChat(action) && selectedChat == nil { return "Choose a chat first." }
         if id == "sendPrompt", !canSend { return hasUnresolvedSend ? "Check the previous Send receipt first." : "Finish and review a draft first." }
         if id == "dictate", !canDictate { return dictationControl.explanation ?? "Finish the current recording first." }
         if ["previousControllerChat", "nextControllerChat"].contains(id), historyDestination(id) == nil { return "No \(id == "previousControllerChat" ? "earlier" : "later") chat opened from this controller." }
@@ -157,6 +165,8 @@ final class ControllerStore: ObservableObject {
     }
     /// The selected app is installed but shut, and the Mac can open it for us.
     var canOpenProviderApp: Bool { !isBusy && providerInfo?.supports("launchApp") == true }
+    /// The app is open, but in a window too narrow for the controller; "open" then means widen it.
+    var providerNeedsWiderWindow: Bool { providerInfo?.supports("launchApp") == true && providerInfo?.reason?.contains("too narrow") == true }
     /// Opens the selected app on the Mac. It sends nothing to it.
     func openProviderApp() async {
         guard canOpenProviderApp else { return }
@@ -283,8 +293,10 @@ final class ControllerStore: ObservableObject {
     /// After the key mappings change, the ring goes to whichever key now holds the
     /// open chat, or nowhere. Home (no ring, by choice) is left as it is.
     private func syncSelectedSlot() {
-        guard selectedSlotIndex != nil else { return }
-        selectedSlotIndex = profile.slots.first { $0.kind == "chat" && $0.targetID == selectedChat?.id }?.index
+        guard let current = selectedSlotIndex else { return }
+        let holders = profile.slots.filter { $0.kind == "chat" && $0.targetID == selectedChat?.id }.map(\.index)
+        // The same chat may sit on two keys; stay on the one that was pressed.
+        selectedSlotIndex = holders.contains(current) ? current : holders.first
     }
     private func restoreSelection() {
         profile = settings.profiles[scope] ?? .empty(selectedProvider)
@@ -312,7 +324,13 @@ final class ControllerStore: ObservableObject {
         persistDraft(); invalidateSelection(); selectedProvider = provider; restoreSelection(); persist()
         if isDemo { loadDemo() } else { connectionMessage = isPaired ? "Connecting…" : "Pair this Mac"; Task { await refresh() } }
     }
-    func returnHome() { selectedSlotIndex = nil }
+    /// Home is "no chat selected", on the deck and in the menus alike. The
+    /// chat's draft stays saved for when its key is pressed again. Nothing is
+    /// sent to the Mac.
+    func returnHome() {
+        guard !isRecording, !isFinalizing else { return }
+        clearChatAfterNavigation()
+    }
 
     func enableGlassesFollow(takeover: Bool = false) {
         guard foreground, !isDemo, selectedProvider != .muse else {
@@ -391,7 +409,8 @@ final class ControllerStore: ObservableObject {
         case "ready": connectionMessage = "Connected · \(selectedHost?.name ?? status.hostName)"
         case "locked": connectionMessage = "Mac locked · unlock to control"
         case "needsAccessibility": connectionMessage = "Allow Accessibility on this Mac"
-        case "closed": connectionMessage = "Open \(selectedProvider.name) on this Mac"
+        case "closed": connectionMessage = provider?.reason?.contains("too narrow") == true
+            ? "\(selectedProvider.name)’s window is too narrow on this Mac" : "Open \(selectedProvider.name) on this Mac"
         default:
             if provider?.id == "codex", provider?.supports("newChat") == true { connectionMessage = "New chat ready · saved chats unavailable" }
             else { connectionMessage = provider?.supports("artifacts") == true ? "Artifacts ready · chat controls unavailable" : (provider?.reason ?? "Provider unavailable") }
@@ -593,13 +612,27 @@ final class ControllerStore: ObservableObject {
         guard !isBusy, let slot = profile.slots.first(where: { $0.index == index }) else { return }
         lastError = nil
         if slot.kind == "chat" {
+            // The Mac gets the first word: it can sometimes reach a chat the list
+            // does not show. If it cannot, say why in terms of this key.
+            let missing = missingChatMessage(slot)
             let chat = chats.first { $0.id == slot.targetID } ?? ChatRecord(id: slot.targetID, title: slot.title, state: "Unknown")
             await selectChat(chat, preferredSlotIndex: index)
+            if let missing, selectedChat?.id != chat.id, lastError != nil { lastError = missing }
         } else if slot.kind == "action" {
             await runAction(slot.targetID)
         }
     }
 
+    /// Why a key's chat probably cannot be opened: the Mac has just listed its
+    /// chats and this one is not among them. Nil when it is there, or when the
+    /// list is not fresh enough to say. Used to explain a failed open.
+    func missingChatMessage(_ slot: SlotMapping) -> String? {
+        guard !isDemo, lightsAreLive, !chats.isEmpty, !chats.contains(where: { $0.id == slot.targetID }) else { return nil }
+        if leftOutChatTitles.contains(slot.title) {
+            return "More than one \(selectedProvider.name) chat is titled “\(slot.title)”, so this key can’t tell them apart. Rename one on the Mac, or hold the key to choose another chat."
+        }
+        return "“\(slot.title)” isn’t in \(selectedProvider.name) on this Mac any more. It may have been renamed or closed. Hold the key to choose a chat for it."
+    }
     @discardableResult func runAction(_ id: String) async -> Bool {
         guard let action = action(id), canRunAction(id) else {
             let message = actionUnavailableReason(id) ?? "This action is not available."
@@ -661,7 +694,10 @@ final class ControllerStore: ObservableObject {
         }
         guard providerInfo?.supports("openChat") == true else { lastError = chatAvailabilityMessage; return }
         let receipt = await execute(action: "openChat", chatID: chat.id)
-        if receipt?.isConfirmed == true { acknowledgeCompletion(chat.id); changeChat(chat, preferredSlotIndex: preferredSlotIndex) }
+        guard let receipt, receipt.isConfirmed else { return }
+        acknowledgeCompletion(chat.id)
+        if let named = receipt.activeChat, !named.id.isEmpty, named.id != chat.id { changeChat(named) }
+        else { changeChat(chat, preferredSlotIndex: preferredSlotIndex) }
     }
     /// Opening a finished chat is what clears its green light. The Mac reports
     /// that on the next refresh; this keeps the key from staying green until then.
@@ -834,7 +870,11 @@ final class ControllerStore: ObservableObject {
         if intent == dictationIntent { captureRoute = nil; sendReady = !draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
     }
 
-    func sendDraft() async {
+    /// The last Send was refused because the Mac's message box already has text
+    /// in it. The alert then offers to replace that text, which is your call.
+    @Published var macDraftBlocksSend = false
+    func sendDraft(replacingMacDraft: Bool = false) async {
+        macDraftBlocksSend = false
         guard canSend, let route = currentRoute, let chat = selectedChat else {
             if let route = currentRoute, let pending = settings.ledger.pendingSends[route.storageKey] {
                 commandError(RemoteError.unresolvedSend.localizedDescription, id: pending.commandID)
@@ -853,9 +893,10 @@ final class ControllerStore: ObservableObject {
             guard persist() else { settings.ledger.pendingSends.removeValue(forKey: route.storageKey); return }
         }
         catch { lastError = error.localizedDescription; return }
-        let receipt = await execute(action: "sendPrompt", chatID: chat.id, text: text, id: id)
+        let receipt = await execute(action: "sendPrompt", chatID: chat.id, text: text, id: id, replaceDraft: replacingMacDraft)
         guard let receipt else { return }
         finishSend(receipt, pending: pending)
+        macDraftBlocksSend = receipt.status == "failed" && receipt.blocker == "macDraft"
         // A first prompt turns a new, unnamed session into a named chat. The Mac
         // says which; keep working in it instead of in a session that is gone.
         if receipt.isAcceptedSend, let named = receipt.activeChat, !named.id.isEmpty, named.id != chat.id, selectedChat?.id == chat.id {
@@ -916,7 +957,7 @@ final class ControllerStore: ObservableObject {
     func startNativeVoice() async { _ = await execute(action: "nativeVoice", chatID: selectedChat?.id) }
 
     private func execute(action: String, chatID: String?, text: String? = nil, artifactID: String? = nil, id: String = UUID().uuidString,
-                         navigationSession: String? = nil) async -> CommandReceipt? {
+                         navigationSession: String? = nil, replaceDraft: Bool = false) async -> CommandReceipt? {
         guard !isBusy else { return nil }
         if isDemo {
             let receipt = CommandReceipt(id: id, status: "confirmed", message: "Demo only — no Mac action performed.")
@@ -937,7 +978,8 @@ final class ControllerStore: ObservableObject {
             let (host, token) = try connection()
             requestContext = (host, token)
             let command = RemoteCommand(id: id, hostID: host.hostID!, provider: provider.rawValue, chatID: chatID,
-                action: action, text: text, artifactID: artifactID, generation: generation, navigationSession:navigationSession)
+                action: action, text: text, artifactID: artifactID, generation: generation, navigationSession:navigationSession,
+                replaceDraft: replaceDraft ? true : nil)
             let body = try JSONEncoder().encode(command)
             posted = true
             let receipt = try await client.fetch(CommandReceipt.self, host: host, token: token, path: "/v1/commands", method: "POST", body: body)

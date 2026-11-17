@@ -256,6 +256,17 @@ import Foundation
         expect(!launchOnly.supports("newChat"), "Unadvertised Codex launch routes remain disabled")
         launchOnly.capabilities = ["newChat"]; launchOnly.installed = false
         expect(!launchOnly.supports("newChat"), "Missing Codex installation cannot enable a launch route")
+        // Replacing text on the Mac is only ever asked for explicitly.
+        let plainSend = RemoteCommand(id: "1", hostID: "h", provider: "claude", chatID: "c", action: "sendPrompt", text: "hi", artifactID: nil, generation: 0)
+        let plainJSON = String(data: try JSONEncoder().encode(plainSend), encoding: .utf8) ?? ""
+        expect(!plainJSON.contains("replaceDraft"), "An ordinary Send never mentions replacing the Mac's draft")
+        var replacing = plainSend; replacing.replaceDraft = true
+        expect((String(data: try JSONEncoder().encode(replacing), encoding: .utf8) ?? "").contains("\"replaceDraft\":true"), "A replace is sent only when set")
+        let blockedReceipt = try JSONDecoder().decode(CommandReceipt.self, from: Data(#"{"id":"1","status":"failed","message":"m","blocker":"macDraft"}"#.utf8))
+        expect(blockedReceipt.blocker == "macDraft" && !blockedReceipt.isConfirmed, "The Mac can say a Send was held back by text in its message box")
+        let olderReceipt = try JSONDecoder().decode(CommandReceipt.self, from: Data(#"{"id":"1","status":"confirmed","message":"m"}"#.utf8))
+        expect(olderReceipt.blocker == nil, "A companion that does not send the field still decodes")
+
         // What a chat is doing, from the state its app reports.
         for (state, expected) in [("Working", ChatActivity.thinking), ("Running", .thinking), ("Unread", .complete),
                                   ("Awaiting input", .needsInput), ("Needs input", .needsInput), ("Something went wrong", .error),
@@ -302,7 +313,22 @@ import Foundation
         let busyMic = DictationControlPresentation.make(provider:.claude,info:ready,paired:true,hasChat:true,busy:true,recording:false,finalizing:false)
         expect(busyMic.label == "PLEASE WAIT", "Busy state does not falsely claim dictation is unimplemented")
         let lockedMic = DictationControlPresentation.make(provider:.claude,info:locked,paired:true,hasChat:true,busy:false,recording:false,finalizing:false)
-        expect(lockedMic.label == "MAC LOCKED", "Locked Mac gives an actionable temporary reason")
+        expect(lockedMic.label == "HOLD TO TALK" && lockedMic.summary?.contains("locked") == true && lockedMic.summary?.contains("send later") == true,
+               "With a chat chosen, a locked Mac still lets you record a draft, and says it will be sent later")
+        let lockedNoChat = DictationControlPresentation.make(provider:.claude,info:locked,paired:true,hasChat:false,busy:false,recording:false,finalizing:false)
+        expect(lockedNoChat.label == "MAC LOCKED", "Without a chat, a locked Mac gives its actionable temporary reason")
+        let offlineMic = DictationControlPresentation.make(provider:.claude,info:nil,paired:true,hasChat:true,busy:false,recording:false,finalizing:false)
+        expect(offlineMic.label == "HOLD TO TALK" && offlineMic.summary?.contains("isn’t answering") == true, "An unreachable Mac does not stop a draft being recorded")
+        let offlineNoChat = DictationControlPresentation.make(provider:.claude,info:nil,paired:true,hasChat:false,busy:false,recording:false,finalizing:false)
+        expect(offlineNoChat.label == "NOT CONNECTED", "Without a chat there is nothing to draft for")
+        var closedInfo = ready; closedInfo.readiness = "closed"
+        expect(DictationControlPresentation.make(provider:.muse,info:closedInfo,paired:true,hasChat:true,busy:false,recording:false,finalizing:false).label == "HOLD TO TALK",
+               "A closed app does not stop a draft either")
+        var setupInfo = ready; setupInfo.readiness = "needsAccessibility"
+        expect(DictationControlPresentation.make(provider:.claude,info:setupInfo,paired:true,hasChat:true,busy:false,recording:false,finalizing:false).label == "SETUP NEEDED",
+               "A Mac that was never set up still says so")
+        let unpairedDraftMic = DictationControlPresentation.make(provider:.claude,info:nil,paired:false,hasChat:true,busy:false,recording:false,finalizing:false)
+        expect(unpairedDraftMic.label == "PAIR YOUR MAC", "An unpaired device is told to pair first")
         let recordingMic = DictationControlPresentation.make(provider:.claude,info:locked,paired:true,hasChat:true,busy:false,recording:true,finalizing:false)
         expect(recordingMic.label == "RELEASE TO REVIEW" && recordingMic.accessibilityLabel == "Stop dictation", "An active recording always retains its stop control")
         let previous = codex.availableActions.first { $0.id == "previousControllerChat" }

@@ -6,6 +6,15 @@ Agent Micro Controller is an iPhone and iPad controller for Codex, Claude Code a
 
 Version **0.5.0 / build 29**, with companion **0.6.0**, adds diagnostics and two guards. **Settings → Check this Mac** asks the companion what it can find in Claude, Muse and Codex and lists each control as found or not, with what to do; the same screen shows recent commands and how they ended. The phone warns when a Mac is running an older companion. When an app is installed but shut, the controller offers **Open Claude on …** (or Muse) so you are not stuck away from the Mac. On the Mac, the companion now waits for a quiet moment on the keyboard and mouse before it clicks or pastes, so its input cannot collide with someone typing; it does not refuse just because the Mac is in use.
 
+App 0.7.0 (build 35) and companion 0.7.8 add deck themes and close the rest of the flow audit:
+
+- **Deck themes** (Settings → Deck theme: Aurora, Sunset, Candy, Mono). A theme colors the glow under and around the body, the knobs and the Home light, and only while the open chat has nothing to report; a chat that is working, finished, waiting or failed takes those over with its own light. The six chat caps are never themed. Resting, the Home light plays a slow ripple in the theme's colors. Everything stops moving with Reduce Motion on.
+- **Home means one thing.** The Home button deselects the chat, as "Close menus" already did. The chat's draft stays saved for when its key is pressed again.
+- **Record a draft with the Mac away.** With a chat chosen, Hold to Talk works while the Mac is offline, locked or its app is closed: the draft is saved on the device and sent when the Mac is back. Send stays blocked until then.
+- **Muse new side chats.** The phone follows a new side chat to the name Muse gives it, so a second Send works; the other Muse keys stay lit while a side chat is unnamed; a call can be started with no chat selected; and a too-narrow Muse window is described as that, with a "Widen" button, instead of "open Muse".
+- **Text already on the Mac.** When Claude's message box already has text in it, the phone now offers "Replace it and send" instead of only telling you to clear it at the Mac. It is never replaced without that choice.
+- **Smaller things.** "Open app" and "Restart service" also appear in full screen; a key whose chat was renamed or closed says so and how to fix it; a failed key assignment is reported inside its sheet instead of behind it.
+
 App 0.6.1 (build 34) and companion 0.7.7 fix what first use of the key lights turned up:
 
 - **Done stays green until you check it.** An app only marks a chat unread while it is off screen, so the chat that was open went from working straight back to idle. The companion now remembers which chats were working; one that has since gone idle is reported as finished until a controller opens it or sends to it, or it starts working again.

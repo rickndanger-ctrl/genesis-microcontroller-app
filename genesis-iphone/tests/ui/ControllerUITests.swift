@@ -442,6 +442,46 @@ final class ControllerUITests: XCTestCase {
         XCTAssertTrue(follow.exists, "Turning it back on restores the Follow panel")
     }
 
+    /// The deck theme is chosen in Settings and never touches what a chat key says about its chat.
+    @MainActor
+    func testDeckThemeCanBeChosen() {
+        continueAfterFailure = false
+        let app = XCUIApplication()
+        app.launchArguments = ["--demo"]
+        XCUIDevice.shared.orientation = .portrait
+        app.launch()
+        let settings = app.buttons["Settings and Mac pairing"]
+        XCTAssertTrue(settings.waitForExistence(timeout: 8))
+        XCTAssertEqual(app.buttons["C5, Build notes"].value as? String, "Error")
+        func choose(_ theme: String) {
+            settings.tap()
+            XCTAssertTrue(app.navigationBars["Your controller"].waitForExistence(timeout: 5))
+            let row = app.buttons["settings.theme.\(theme)"]
+            let list = app.collectionViews.firstMatch
+            // Scroll until the row is well inside the sheet: a tap at its edge can land outside it.
+            func inReach() -> Bool { row.exists && row.isHittable && (!list.exists || row.frame.maxY <= list.frame.maxY - 28) }
+            for _ in 0..<14 where !inReach() {
+                guard list.exists else { app.swipeUp(); continue }
+                list.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.72))
+                    .press(forDuration: 0.05, thenDragTo: list.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.38)))
+            }
+            XCTAssertTrue(inReach(), "The \(theme) theme can be reached in Settings")
+            row.tap()
+            let chosen = NSPredicate { _, _ in row.isSelected }
+            expectation(for: chosen, evaluatedWith: row)
+            waitForExpectations(timeout: 3)
+            app.buttons["Done"].firstMatch.tap()
+            XCTAssertTrue(app.buttons["controller.fullscreen"].waitForExistence(timeout: 3))
+        }
+        choose("sunset")
+        XCTAssertEqual(app.buttons["C5, Build notes"].value as? String, "Error", "A theme does not change what a chat key reports")
+        XCTAssertEqual(app.buttons["C2, OMAC workspace"].value as? String, "Done")
+        choose("mono")
+        XCTAssertEqual(app.buttons["C3, Design studio"].value as? String, "Needs input")
+        // Leave the default behind for the tests and recordings that follow.
+        choose("aurora")
+    }
+
     @MainActor
     func testGlassesFollowPanel() {
         continueAfterFailure = false

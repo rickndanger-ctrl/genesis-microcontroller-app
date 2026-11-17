@@ -762,7 +762,7 @@ final class FixtureCredentials: ControllerCredentialVault {
                "Changing Macs restores its own Codex draft and rejects old microphone output")
         captureStore.selectHost(codexFixture.name)
         for _ in 0..<100 {
-            if captureStore.canDictate { break }
+            if captureStore.canDictate && captureStore.providerInfo?.readiness == "ready" { break }
             try? await Task.sleep(nanoseconds:10_000_000); await captureStore.refresh()
         }
         await captureStore.startDictation(); captureSpeech.emit("Before selecting another chat.")

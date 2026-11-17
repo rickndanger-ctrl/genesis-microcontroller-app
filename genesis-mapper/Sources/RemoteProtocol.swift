@@ -19,8 +19,12 @@ enum RemoteLeftOut {
 }
 struct RemoteSlot: Codable { var index: Int; var kind: String; var title: String; var targetID: String }
 struct RemoteProfile: Codable { var provider: String; var revision: Int; var slots: [RemoteSlot]; var quickActions: [String]? = nil }
-struct RemoteCommand: Codable { var id: String; var hostID: String; var provider: String; var chatID: String?; var action: String; var text: String?; var artifactID: String?; var generation: Int; var navigationSession: String? = nil }
-struct RemoteReceipt: Codable { var id: String; var status: String; var message: String; var activeChat: RemoteChat? = nil; var navigation: RemoteNavigationState? = nil }
+struct RemoteCommand: Codable { var id: String; var hostID: String; var provider: String; var chatID: String?; var action: String; var text: String?; var artifactID: String?; var generation: Int; var navigationSession: String? = nil
+    /// Set only after the person holding the controller was told the Mac's message box has text in it and chose to replace it.
+    var replaceDraft: Bool? = nil }
+struct RemoteReceipt: Codable { var id: String; var status: String; var message: String; var activeChat: RemoteChat? = nil; var navigation: RemoteNavigationState? = nil
+    /// Why nothing was done, when the controller can offer a way past it. "macDraft": the Mac's message box already has text.
+    var blocker: String? = nil }
 struct RemoteArtifact: Codable { var id: String; var title: String; var kind: String; var url: String?; var mimeType: String?; var hostID: String; var provider: String; var chatID: String }
 /// What the pairing QR code carries. Version 1 put the Mac's one shared secret
 /// in `token`. Version 2 puts a single-use code there, which the phone trades

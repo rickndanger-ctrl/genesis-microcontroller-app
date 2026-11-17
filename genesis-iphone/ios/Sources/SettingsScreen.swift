@@ -3,6 +3,7 @@ import AVFoundation
 import UIKit
 
 struct SettingsScreen: View {
+    @AppStorage(DeckTheme.storageKey) private var themeID = DeckTheme.aurora.rawValue
     @ObservedObject var store: ControllerStore
     @Environment(\.dismiss) private var dismiss
     @AppStorage("controllerSoundsEnabled") private var controllerSoundsEnabled = true
@@ -97,6 +98,30 @@ struct SettingsScreen: View {
                         }
                         .accessibilityIdentifier("settings.diagnostics")
                     }
+                }
+                Section {
+                    ForEach(DeckTheme.allCases) { theme in
+                        Button { ControllerSound.shared.keyClick(); themeID = theme.rawValue } label: {
+                            HStack(spacing: 12) {
+                                HStack(spacing: -5) {
+                                    ForEach(0..<3, id: \.self) { index in
+                                        Circle().fill(theme.color(index)).frame(width: 18, height: 18)
+                                            .overlay(Circle().strokeBorder(.white, lineWidth: 1.5))
+                                    }
+                                }
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text(theme.name).font(.callout.weight(.semibold)).foregroundStyle(.primary)
+                                    Text(theme.detail).font(.caption).foregroundStyle(.secondary)
+                                }
+                                Spacer()
+                                if themeID == theme.rawValue { Image(systemName: "checkmark").font(.callout.weight(.semibold)) }
+                            }
+                        }
+                        .accessibilityIdentifier("settings.theme.\(theme.rawValue)")
+                        .accessibilityAddTraits(themeID == theme.rawValue ? .isSelected : [])
+                    }
+                } header: { Text("Deck theme") } footer: {
+                    Text("Colors the glow under the deck, the knobs and the Home light. The six chat keys are never themed: their color always means what the chat is doing.")
                 }
                 Section {
                     ForEach(ChatActivity.allCases, id: \.self) { activity in
@@ -225,6 +250,8 @@ struct MappingScreen: View {
     @Environment(\.dismiss) private var dismiss
     @State private var query = ""
     @State private var saving = false
+    /// Why the last change did not save. Shown here: an alert behind this sheet would never be seen.
+    @State private var failure: String?
     private var prefix: String { store.selectedProvider == .codex ? "A" : store.selectedProvider == .claude ? "C" : "M" }
 
     var body: some View {
@@ -237,6 +264,11 @@ struct MappingScreen: View {
                         Text("\(prefix)\(index + 1)").font(.title2.bold())
                         Text("Chat or shortcut").foregroundStyle(.secondary)
                     }.padding(.vertical, 8)
+                    if let failure {
+                        Label(failure, systemImage: "exclamationmark.triangle.fill")
+                            .font(.callout).foregroundStyle(.red)
+                            .accessibilityIdentifier("slot.saveFailure")
+                    }
                 }
                 Section("\(store.selectedProvider.name) chats on \(store.selectedHost?.name ?? "this Mac")") {
                     if store.navigationOnly {
@@ -245,7 +277,7 @@ struct MappingScreen: View {
                              : "Chat switching and artifacts are available. Send is not connected for this provider yet.")
                             .font(.caption).foregroundStyle(.secondary)
                     }
-                    ForEach(store.chats.filter { query.isEmpty || $0.title.localizedCaseInsensitiveContains(query) }) { chat in
+                    ForEach(store.chats.filter { $0.state != "New" && (query.isEmpty || $0.title.localizedCaseInsensitiveContains(query)) }) { chat in
                         Button { ControllerSound.shared.keyClick(); save(kind: "chat", title: chat.title, id: chat.id) } label: {
                             Label(chat.title, systemImage: "bubble.left.and.bubble.right")
                         }.disabled(!store.canMapChats)
@@ -273,7 +305,11 @@ struct MappingScreen: View {
 
     private func save(kind: String, title: String, id: String) {
         saving = true
-        Task { let saved = await store.saveSlot(SlotMapping(index: index, kind: kind, title: title, targetID: id)); saving = false; if saved { dismiss() } }
+        failure = nil
+        Task {
+            let saved = await store.saveSlot(SlotMapping(index: index, kind: kind, title: title, targetID: id)); saving = false
+            if saved { dismiss() } else { failure = store.lastError ?? "This key could not be changed. Check the connection to your Mac and try again." }
+        }
     }
 }
 

@@ -743,7 +743,11 @@ import CoreImage.CIFilterBuiltins
         }
         guard let field=composer() else{return result("failed","Send could not find one message box in the new session. Nothing was inserted.")}
         guard let existing=access.value(field,kAXValueAttribute) as? String else{return result("failed","Send could not read the Mac’s message box to check for an existing draft. Nothing was inserted.")}
-        guard RemoteComposerPolicy.isBlank(existing) else{return result("failed","The Mac’s message box already contains a draft. Clear it on the Mac first; nothing was replaced or sent.")}
+        // Text already in the Mac's message box is someone's work. It is replaced only when the
+        // person holding the controller was told about it and asked for that.
+        guard RemoteComposerPolicy.isBlank(existing) || command.replaceDraft==true else {
+            var blocked=result("failed","The Mac’s message box already has text in it. Nothing was replaced or sent.");blocked.blocker="macDraft";return blocked
+        }
         var settable=DarwinBoolean(false)
         guard AXUIElementIsAttributeSettable(field,kAXValueAttribute as CFString,&settable) == .success,settable.boolValue else{return result("failed","Claude does not expose a writable message box in this view. No text was inserted.")}
         guard AXUIElementSetAttributeValue(field,kAXValueAttribute as CFString,prompt as CFString) == .success else{return result("failed","Claude did not accept the draft. Nothing was sent.")}
@@ -928,7 +932,11 @@ import CoreImage.CIFilterBuiltins
         guard await MacInput.waitForQuiet() else{return result("failed","\(MacInput.busyMessage); nothing was inserted.")}
         guard let field=composer() else{return result("failed","Send could not find one Claude Prompt composer in this chat. Nothing was inserted or replaced.")}
         guard let existing=access.value(field,kAXValueAttribute) as? String else{return result("failed","Send could not read the Mac composer to check for an existing draft. Nothing was inserted or replaced.")}
-        guard RemoteComposerPolicy.isBlank(existing) else{return result("failed","The Mac composer already contains a draft. Clear it on the Mac first; nothing was replaced or sent.")}
+        // Text already in the Mac's message box is someone's work. It is replaced only when the
+        // person holding the controller was told about it and asked for that.
+        guard RemoteComposerPolicy.isBlank(existing) || command.replaceDraft==true else {
+            var blocked=result("failed","The Mac’s message box already has text in it. Nothing was replaced or sent.");blocked.blocker="macDraft";return blocked
+        }
         var settable=DarwinBoolean(false)
         guard AXUIElementIsAttributeSettable(field,kAXValueAttribute as CFString,&settable) == .success,settable.boolValue else{return result("failed","Claude does not expose a writable composer in this view. No text was inserted.")}
         guard AXUIElementSetAttributeValue(field,kAXValueAttribute as CFString,prompt as CFString) == .success else{return result("failed","Claude did not accept the draft. Nothing was sent.")}
