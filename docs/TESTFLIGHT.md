@@ -9,7 +9,9 @@ Agent Micro Controller is being prepared for iPhone and iPad distribution throug
 - **Public privacy and support site live:** privacy <https://rickndanger-ctrl.github.io/agent-micro-controller-site/privacy/> and support <https://rickndanger-ctrl.github.io/agent-micro-controller-site/> both return HTTP 200 without sign-in and were checked in Chrome. The URLs are saved in App Store Connect. Only the support/policy site is public; app source remains private.
 - **Local validation:** Release archive succeeded, code signature verifies, embedded bundle/version/manifest match, and all 367 remote core checks pass. These are local checks, not Apple processing or physical-device acceptance.
 - **Listing preparation:** review demo notes saved, reviewer sign-in disabled, and App Store release set to manual. The initial store-version draft remains 1.0; the TestFlight candidate is 0.5.2 (32).
-- **Not yet done:** App Store distribution export, upload, Apple processing and TestFlight distribution. Export/upload awaits the owner's approval.
+- **Owner-approved upload completed:** 0.5.2 (32) was distribution-signed and uploaded on November 16, 2026 at 22:08 Pacific. Xcode returned `EXPORT SUCCEEDED` and `Upload succeeded`. The copied IPA is `genesis-iphone/build/appstore-build32/AgentMicroController-0.5.2-32.ipa`; its signature, version and embedded privacy manifest verify. Apple processing is verified `VALID`; App Store Connect reports `READY_FOR_BETA_TESTING` internally and `READY_FOR_BETA_SUBMISSION` externally.
+- **Apple build record:** `b293dc9c-448c-40e4-8995-262c518039bf`, version 0.5.2, build 32, uploaded November 16, 2026 at 22:08:48 Pacific, expires February 14, 2027.
+- **Not yet done:** assigning testers, external Beta App Review, public TestFlight link, or App Store review/release.
 - **Separate later decisions:** adding external testers, submitting for Beta App Review and enabling a public TestFlight link. None is implied by approving an upload. App Store release is also separate.
 
 ## Review notes (paste into "Beta App Review Information")
@@ -53,10 +55,16 @@ The archive is a build artifact, not an uploaded TestFlight build. App Store dis
 1. Privacy and support URLs are saved and publicly reachable. Keep the pages aligned with future feature changes; a link into this private source repository is not a public privacy policy.
 2. Complete the account's App Privacy answers and review the encryption declaration against the final build.
 3. Fill in the feedback email and reviewer contact name and phone. Reviewer sign-in is not required; use the demo instructions above.
-4. After owner approval, export and upload the archive through Xcode Organizer or the approved App Store Connect upload workflow. Verify the uploaded version/build and wait for Apple's processing result; a successful local export does not establish either.
+4. The owner approved use of the existing API key; build 32 uploaded and passed processing. Its Apple build record is verified above. Tester assignment and availability are separate from this processing result.
 5. Add the processed build to an approved TestFlight testing group only when authorized. Check tester availability separately from upload success.
 6. Before external testing, confirm testers can obtain and set up the matching Mac companion, provide the review notes, and obtain the owner's approval for the external group. Submit for Beta App Review as required. Enable a public link only with separate approval.
 
-There is no TestFlight download link to publish yet. Once a build is available, record the actual group and distribution state here without including credentials or personal device details.
+Build 32 is ready for internal beta testing, but no tester group or public link has been configured by this setup. Record the actual group and tester availability after that step, without including credentials or personal device details.
 
 The third-party product names shown as tabs (Claude, Codex, Muse) describe compatibility. No logos are used; keep it that way.
+
+## Build 32 signing recovery
+
+Automatic cloud signing was denied by Apple before upload. The existing API key could create a standard Apple Distribution certificate and an active App Store profile for the explicit bundle ID. The private signing key stays outside the repository on this Mac. No account permissions were changed or existing certificates revoked.
+
+`genesis-iphone/ExportOptions-AppStoreConnect.plist` now selects manual distribution signing and the `Agent Micro Controller App Store` profile, while preserving build 32. The profile was checked for the correct team/bundle and `get-task-allow=false`. Xcode successfully signed and uploaded the package with those settings.
