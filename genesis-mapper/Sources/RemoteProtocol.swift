@@ -99,7 +99,9 @@ enum RemotePolicy {
     static func validate(_ command: RemoteCommand, hostID: String) throws {
         guard UUID(uuidString: command.id) != nil, command.hostID == hostID,
               providers.contains(command.provider), commands.contains(command.action), command.generation >= 0 else { throw RemoteFault(status:422,message:"Invalid command or host identity.") }
-        if (["openChat", "sendPrompt", "stop", "nativeVoice"].contains(command.action) || (command.provider == "claude" && RemoteActionCatalog.claudeEntry(command.action)?.action.requiresChat == true)), command.chatID?.isEmpty != false { throw RemoteFault(status:422,message:"Choose a chat first.") }
+        // Muse's call belongs to the assistant, not to a chat, so it needs none.
+        let needsChat = command.action == "nativeVoice" ? command.provider != "muse" : ["openChat", "sendPrompt", "stop"].contains(command.action)
+        if (needsChat || (command.provider == "claude" && RemoteActionCatalog.claudeEntry(command.action)?.action.requiresChat == true)), command.chatID?.isEmpty != false { throw RemoteFault(status:422,message:"Choose a chat first.") }
         if RemoteActionCatalog.menuIDs.contains(command.action), UUID(uuidString:command.navigationSession ?? "") == nil {throw RemoteFault(status:422,message:"Open and refresh a controller menu first.")}
         if command.action == "sendPrompt", command.text?.trimmingCharacters(in:.whitespacesAndNewlines).isEmpty != false { throw RemoteFault(status:422,message:"The prompt is empty.") }
         if (command.text?.utf8.count ?? 0) > 64_000 { throw RemoteFault(status:413,message:"The prompt is too long.") }
@@ -180,8 +182,12 @@ enum RemoteClaudeLookup {
         // Inactive Electron rows may omit their text descendants and append a
         // status to the button's AXTitle. Match the complete known suffix, and
         // still require the independently named menu in this same row.
-        let suffixes=statuses+["Unread response","Cloud"]
-        let knownStatusSuffix=suffixes.contains{label==title+" "+$0}
+        // The suffix may be a state, a tag, or several of them ("Something went
+        // wrong Merged", "Cloud · Draft"), so it is recognised by how it begins.
+        // The row's own "More options for <title>" menu is what ties it to this title.
+        let suffixes=statuses+["Unread response","Cloud","Draft","Merged","Closed","Archived"]
+        let rest=label.hasPrefix(title+" ") ? String(label.dropFirst(title.count+1)):""
+        let knownStatusSuffix = !rest.isEmpty && suffixes.contains{rest==$0 || rest.hasPrefix($0+" ")}
         return hasMatchingRowMenu && (label==title || label.hasSuffix(" "+title) || knownStatusSuffix || (hasExactTitleChild && label.contains(title)))
     }
     // Cached labels can locate a hidden sidebar, but never authorize a Send.

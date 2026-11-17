@@ -91,8 +91,8 @@ enum CodexNativeActions {
         } + [
             RemoteAction(id:CodexNativeActionPolicy.modelPickerID,title:"Change model",group:"Compose",detail:"Open model and reasoning choices for the current Codex view on your Mac (Control–Shift–M).",requiresChat:false,changesChat:false,opensNavigation:true),
             RemoteAction(id:"newChat",title:"New chat",group:"Chat",detail:"Open a new local Codex chat on the Mac, launching Codex if needed. No prompt is sent.",requiresChat:false,changesChat:true),
-            RemoteAction(id:"openSettings",title:"Codex settings",group:"App",detail:"Open Codex's settings page on the Mac. Does not change settings.",requiresChat:false,changesChat:true),
-            RemoteAction(id:"openSkills",title:"Browse skills",group:"App",detail:"Open Codex's skills page on the Mac. Does not invoke a skill.",requiresChat:false,changesChat:true)
+            RemoteAction(id:"openSettings",title:"Codex settings",group:"App",detail:"Open Codex's settings page on the Mac. Does not change settings.",requiresChat:false,changesChat:false),
+            RemoteAction(id:"openSkills",title:"Browse skills",group:"App",detail:"Open Codex's skills page on the Mac. Does not invoke a skill.",requiresChat:false,changesChat:false)
         ]
     }
 

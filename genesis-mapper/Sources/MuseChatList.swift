@@ -47,6 +47,13 @@ enum MuseChatList {
         let x = max(screenMinX, min(window.minX, screenMaxX - wanted))
         return CGRect(x: x, y: window.minY, width: wanted, height: window.height)
     }
+    /// The state of the placeholder for a side chat that has no name yet. The
+    /// phone works in it but does not offer it for a key: its name will change.
+    static let unnamedState = "New"
+    /// True when the list holds only that placeholder, which is all Muse shows
+    /// while an unnamed side chat is open.
+    static func isUnnamedOnly(_ chats: [Chat]) -> Bool { chats.count == 1 && chats[0].title == unnamedSideChat }
+
     /// The state reported for a chat, which the phone shows as its key's light:
     /// the open chat is working while Muse replies in it, and a chat with
     /// updates you have not seen has finished.
@@ -175,5 +182,31 @@ enum MuseChatList {
     /// message box is seen to be empty. Neither alone is enough.
     static func deliveredByEffect(entriesBefore: Int, entriesAfter: Int, answering: Bool, boxEmpty: Bool) -> Bool {
         entriesAfter > entriesBefore && (answering || boxEmpty)
+    }
+}
+
+/// Follows a new side chat from having no name to the name Muse gives it.
+///
+/// The phone is handed a placeholder for the new chat. Once Muse names the
+/// chat the placeholder matches nothing, and a second Send had nowhere to go.
+/// A chat title that was not in the list before the new chat was made, and is
+/// now the open chat, is that chat under its new name.
+struct NewSideChatTracker {
+    private(set) var knownTitles: Set<String> = []
+    private(set) var awaiting = false
+    private(set) var became: String?
+
+    /// A new side chat was just opened from a controller.
+    mutating func started() { awaiting = true; became = nil }
+    /// Feed every full chat list (not the placeholder-only one).
+    mutating func observe(titles: [String], current: String?) {
+        if awaiting, let current, current != MuseChatList.unnamedSideChat {
+            // A title that did not exist before is the new chat, now named.
+            // A title that did exist means you went elsewhere and left it.
+            if !knownTitles.contains(current) { became = current }
+            awaiting = false
+        }
+        if let named = became, !titles.contains(named) { became = nil }
+        knownTitles = Set(titles)
     }
 }

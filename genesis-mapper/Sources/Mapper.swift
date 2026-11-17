@@ -98,8 +98,8 @@ final class ClaudeAccess {
                 let e=children[index];index+=1;labels.append(text(e))
                 if let nested=value(e,kAXChildrenAttribute) as? [AXUIElement] {children.append(contentsOf:nested)}
             }
-            let state=states.first {state in labels.contains{ $0==title+" "+state || $0==state+" "+title || $0==state }} ?? "Open"
-            result.append(Session(title:title,state:state))
+            // Claude words a row's state differently between versions; see ClaudeSidebar.
+            result.append(Session(title:title,state:ClaudeSidebar.state(title:title,labels:labels)))
         }
         // An open fork may lack a recognized status prefix in the sidebar.
         // The session header is also used to verify navigation and dictation.
@@ -123,6 +123,43 @@ final class ClaudeAccess {
             result.append(Session(title:title,state:state))
         }
         return result
+    }
+    /// What Claude shows for a session that has just been created and has no name yet.
+    struct NewSession {
+        let headings:Int        // headings that read "New session"
+        let namedHeaders:Int    // "<title>, rename session" controls, which only a named session has
+        let composers:Int       // message boxes
+        let folderLabel:String? // the "Folder: …" control
+        var showing:Bool {headings==1 && namedHeaders==0}
+    }
+    func newSession(_ nodes:[AXUIElement]?=nil)->NewSession {
+        let all=nodes ?? self.nodes()
+        return NewSession(
+            headings:all.filter{value($0,kAXRoleAttribute) as? String=="AXHeading" && text($0)==ClaudeSidebar.newSessionTitle}.count,
+            namedHeaders:all.filter{text($0).hasSuffix(", rename session")}.count,
+            composers:all.filter{value($0,kAXRoleAttribute) as? String==kAXTextAreaRole && value($0,kAXDescriptionAttribute) as? String=="Prompt"}.count,
+            folderLabel:all.first{value($0,kAXRoleAttribute) as? String==kAXPopUpButtonRole && text($0).hasPrefix("Folder: ")}.map(text))
+    }
+    /// The sidebar's "New session in <project>" button for the project a session is
+    /// filed under. Starting the new session there gives it that project's folder.
+    /// Nil when the session sits somewhere that names no single project, such as Pinned.
+    func projectNewSessionButton(for title:String,in nodes:[AXUIElement])->AXUIElement? {
+        guard let row=sidebarTargets(title,in:nodes).first else{return nil}
+        var node:AXUIElement?=row
+        for _ in 0..<8 {
+            guard let current=node else{break}
+            var subtree=[current],index=0
+            while index<subtree.count && index<600 {
+                if let children=value(subtree[index],kAXChildrenAttribute) as? [AXUIElement] {subtree.append(contentsOf:children)}
+                index+=1
+            }
+            let buttons=subtree.filter{value($0,kAXRoleAttribute) as? String==kAXButtonRole && text($0).hasPrefix("New session in ")}
+            if buttons.count==1 {return buttons[0]}
+            if buttons.count>1 {return nil}
+            guard let parent=value(current,kAXParentAttribute),CFGetTypeID(parent)==AXUIElementGetTypeID() else{break}
+            node=(parent as! AXUIElement)
+        }
+        return nil
     }
     func press(_ e: AXUIElement) -> Bool {
         if let enabled=value(e,kAXEnabledAttribute) as? Bool, !enabled { return false }
@@ -309,13 +346,24 @@ final class ClaudeAccess {
         if let menu=action.menu {
             let bars=all.filter {value($0,kAXRoleAttribute) as? String==kAXMenuBarItemRole && text($0)==menu}
             guard bars.count==1,contextOK(),press(bars[0]) else {return "Claude’s \(menu) menu is unavailable."}
-            var descendants=[bars[0]],index=0
-            while index<descendants.count && index<300 {
-                let node=descendants[index];index+=1
-                if let children=value(node,kAXChildrenAttribute) as? [AXUIElement] {descendants.append(contentsOf:children)}
+            // A menu that has only just opened may not have filled in yet. Reading it in the
+            // same instant found nothing and reported a working command as missing.
+            var items=[AXUIElement]()
+            for attempt in 0..<8 {
+                var descendants=[bars[0]],index=0
+                while index<descendants.count && index<300 {
+                    let node=descendants[index];index+=1
+                    if let children=value(node,kAXChildrenAttribute) as? [AXUIElement] {descendants.append(contentsOf:children)}
+                }
+                items=descendants.filter {value($0,kAXRoleAttribute) as? String==kAXMenuItemRole && action.labels.contains(text($0))}
+                if items.count==1 || attempt==7 {break}
+                try? await Task.sleep(nanoseconds:120_000_000)
             }
-            let items=descendants.filter {value($0,kAXRoleAttribute) as? String==kAXMenuItemRole && action.labels.contains(text($0))}
-            guard items.count==1 else {return "This command is not available in this Claude version."}
+            guard items.count==1 else {
+                // Do not leave the menu hanging open over the user's work.
+                _ = AXUIElementPerformAction(bars[0],kAXCancelAction as CFString)
+                return "This command is not available in this Claude version."
+            }
             guard contextOK(),press(items[0]) else {return "\(action.title) is disabled in this view."}
             return "Requested \(action.title)"
         }

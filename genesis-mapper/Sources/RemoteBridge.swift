@@ -38,6 +38,25 @@ import CoreImage.CIFilterBuiltins
     private var ambiguousClaudeIDs=Set<String>()
     /// Titles carried by more than one chat at the last listing, per app.
     private var claudeLeftOut=Set<String>(),museLeftOut=Set<String>()
+    /// Chats that finished working and have not been looked at from a controller; see DoneLatch.
+    private var claudeLatch=DoneLatch(),museLatch=DoneLatch()
+    /// Muse's last full chat list, kept for while an unnamed side chat hides it.
+    private var museLastChats=[RemoteChat]()
+    private var museNewChat=NewSideChatTracker()
+    /// Turns what Muse lists into what the phone is told, and learns from it.
+    private func museChats(from listing:MuseAccess.Listing)->[RemoteChat] {
+        let placeholder=RemoteChat(id:RemotePolicy.chatID("muse",MuseChatList.unnamedSideChat),title:MuseChatList.unnamedSideChat,state:MuseChatList.unnamedState)
+        // While a side chat has no name Muse shows only that chat. The others
+        // are still there, so keep offering them: their keys must not go dark.
+        if MuseChatList.isUnnamedOnly(listing.chats) {
+            return museLastChats.map{RemoteChat(id:$0.id,title:$0.title,state:$0.state=="Current" || $0.state=="Working" ? "Open":$0.state)}+[placeholder]
+        }
+        museNewChat.observe(titles:listing.chats.map(\.title),current:listing.chats.first{$0.current}?.title)
+        let read=listing.chats.map{RemoteChat(id:RemotePolicy.chatID("muse",$0.title),title:$0.title,state:MuseChatList.state(current:$0.current,unread:$0.unread,answering:listing.answering))}
+        let reported=museLatch.observe(read.map{(id:$0.id,state:$0.state)})
+        museLastChats=read.map{RemoteChat(id:$0.id,title:$0.title,state:reported[$0.id] ?? $0.state)}
+        return museLastChats
+    }
     /// Muse is running in a window too narrow to control; see MuseAccess.widenWindow.
     private var museChatHidden=false,museChatHiddenCheckedAt=Date.distantPast
     private var codexChats:[RemoteChat]=[]
@@ -207,8 +226,9 @@ import CoreImage.CIFilterBuiltins
             // No chat list. Find out whether Muse's window is too narrow, so the phone can say so and offer to widen it.
             museLeftOut=[];museChatHidden=muse.needsWiderWindow();museChatHiddenCheckedAt=Date();return []
         }
-        museLeftOut=listing.ambiguous;museChatHidden=false;museChatHiddenCheckedAt=Date()
-        return listing.chats.map{RemoteChat(id:RemotePolicy.chatID("muse",$0.title),title:$0.title,state:MuseChatList.state(current:$0.current,unread:$0.unread,answering:listing.answering))}
+        if !MuseChatList.isUnnamedOnly(listing.chats) {museLeftOut=listing.ambiguous}
+        museChatHidden=false;museChatHiddenCheckedAt=Date()
+        return museChats(from:listing)
     }
     /// Opens a provider's app so someone away from the Mac is not stuck at
     /// "open it on the Mac". It only opens the app; it sends and changes nothing.
@@ -310,7 +330,7 @@ import CoreImage.CIFilterBuiltins
         if command.action=="newChat" {
             // Hand the phone the new chat so a draft can go into it at once.
             let outcome=await muse.newSideChat(contextIsCurrent:contextOK)
-            var receipt=result(outcome);if outcome.status=="confirmed" {receipt.activeChat=unnamed}
+            var receipt=result(outcome);if outcome.status=="confirmed" {receipt.activeChat=unnamed;museNewChat.started()}
             return receipt
         }
         guard ["openChat","sendPrompt"].contains(command.action) else{return result(.failed("This action is not connected for Muse."))}
@@ -318,13 +338,41 @@ import CoreImage.CIFilterBuiltins
         guard let id=command.chatID,let listing=await muse.listing(leavingUnnamedChat:command.chatID != unnamed.id) else{return result(.failed("Muse’s chat list could not be read. Open Muse on this Mac and refresh."))}
         // The opaque ID only names a title. The fresh listing above decides
         // whether that title still points at exactly one chat.
-        guard let target=listing.chats.first(where:{RemotePolicy.chatID("muse",$0.title)==id}) else {
+        _ = museChats(from:listing)
+        // A side chat the phone still knows by its placeholder may have been named since.
+        var renamed:RemoteChat?
+        var target=listing.chats.first(where:{RemotePolicy.chatID("muse",$0.title)==id})
+        if target==nil,id==unnamed.id,let named=museNewChat.became,let match=listing.chats.first(where:{$0.title==named}) {
+            target=match;renamed=RemoteChat(id:RemotePolicy.chatID("muse",named),title:named,state:"Current")
+        }
+        guard let target else {
             let shared=listing.ambiguous.contains{RemotePolicy.chatID("muse",$0)==id}
+            if id==unnamed.id {return result(.failed("That new side chat is no longer open in Muse. Tap a chat key, or press New chat again; nothing was sent."))}
             return result(.failed(shared ? "More than one Muse chat has this title. Rename one in Muse before using its key.":"This Muse chat is no longer in the chat list. Refresh its mapping; nothing was opened."))
         }
-        if command.action=="openChat" {return result(await muse.open(target.title,contextIsCurrent:contextOK))}
+        let targetID=RemotePolicy.chatID("muse",target.title)
+        if command.action=="openChat" {
+            let outcome=await muse.open(target.title,contextIsCurrent:contextOK)
+            if outcome.status=="confirmed" {museLatch.acknowledge(targetID)}
+            var receipt=result(outcome);if outcome.status=="confirmed" {receipt.activeChat=renamed}
+            return receipt
+        }
         guard let prompt=command.text else{return result(.failed("The prompt is empty."))}
-        return result(await muse.send(prompt,to:target.title,contextIsCurrent:contextOK))
+        museLatch.acknowledge(targetID)
+        let outcome=await muse.send(prompt,to:target.title,contextIsCurrent:contextOK)
+        var receipt=result(outcome)
+        guard outcome.status=="confirmed" else{return receipt}
+        if target.title==MuseChatList.unnamedSideChat {
+            // Muse names a side chat from its first message. Tell the phone as soon as it does.
+            for _ in 0..<8 {
+                if let title=muse.currentChatTitle(),title != MuseChatList.unnamedSideChat {
+                    renamed=RemoteChat(id:RemotePolicy.chatID("muse",title),title:title,state:"Working");break
+                }
+                try? await Task.sleep(nanoseconds:200_000_000)
+            }
+        }
+        receipt.activeChat=renamed
+        return receipt
     }
     func refreshChats() {Task {chats=loadChats("claude")}}
     func loadChats(_ provider:String,deadline:Double?=nil)->[RemoteChat] {
@@ -340,9 +388,12 @@ import CoreImage.CIFilterBuiltins
                 return RemoteChat(id:RemotePolicy.chatID(provider,title),title:title,state:values.last?.state ?? "Open")
             }.sorted{$0.title.localizedCaseInsensitiveCompare($1.title) == .orderedAscending}
         }
-        let records:[RemoteChat]
+        var records:[RemoteChat]
         if let deadline {records=access.readSnapshot(deadline:deadline,read) ?? []}
         else {records=access.readSnapshot(read)}
+        // A chat that stopped working stays "Unread" until a controller opens it.
+        let reported=claudeLatch.observe(records.map{(id:$0.id,state:$0.state)})
+        records=records.map{RemoteChat(id:$0.id,title:$0.title,state:reported[$0.id] ?? $0.state)}
         recentChats=Dictionary(uniqueKeysWithValues:records.map{($0.id,$0)})
         chats=records;return records
     }
@@ -630,6 +681,98 @@ import CoreImage.CIFilterBuiltins
             recentChats[chat.id]=chat;return chat
         }
     }
+    /// The chat the phone is given for a session that has no name yet. Its ID
+    /// names no title; every use of it is checked against the screen instead.
+    private func newClaudeSession(folder:String?=nil)->RemoteChat {RemoteChat(id:RemotePolicy.chatID("claude",ClaudeSidebar.newSessionKey),title:ClaudeSidebar.newSessionTitle(folder:folder),state:"Current")}
+    /// Opens a new session and hands it to the phone as something to work in.
+    /// It starts in the project of the chat that was open, so it already has a
+    /// folder; from Pinned or anywhere without one project, it falls back to
+    /// File > New Session, which leaves the folder to be chosen on the Mac.
+    private func openNewClaudeSession(_ command:RemoteCommand,definition:ControllerAction,app:NSRunningApplication,contextIsCurrent:@escaping ()->Bool) async ->RemoteReceipt {
+        func result(_ status:String,_ message:String,_ chat:RemoteChat?=nil)->RemoteReceipt {RemoteReceipt(id:command.id,status:status,message:message,activeChat:chat)}
+        let before=verifiedActiveClaudeChat()
+        var opened=false
+        if let before,let button=access.readSnapshot({self.access.projectNewSessionButton(for:before.title,in:self.access.nodes())}) {
+            opened=await access.navigationClick(button,app:app,contextIsCurrent:contextIsCurrent)
+        }
+        if !opened {
+            let message=await access.extraAction(definition,title:"",app:app,contextIsCurrent:contextIsCurrent)
+            guard RemoteActionCatalog.acceptsClaudeResult(message,controllerTitle:definition.title) else{return result("failed",message)}
+        }
+        var state=access.readSnapshot{self.access.newSession()}
+        for _ in 0..<12 where !state.showing {
+            try? await Task.sleep(nanoseconds:150_000_000)
+            guard !isLocked else{return result("uncertain","A new session was requested, but the Mac locked before it could be checked.")}
+            state=access.readSnapshot{self.access.newSession()}
+        }
+        guard state.showing else {
+            // Something else came up. Never hand the previous conversation back as the new one.
+            let current=RemoteActionCatalog.changedChat(previousID:before?.id,candidate:verifiedActiveClaudeChat())
+            return result("confirmed","Requested \(definition.title)"+(current==nil ? ". Choose a named chat before sending from the phone.":"."),current)
+        }
+        if let folder=ClaudeSidebar.chosenFolder(state.folderLabel) {
+            return result("confirmed","Opened a new session in \(folder). Dictate or type its first prompt.",newClaudeSession(folder:folder))
+        }
+        return result("confirmed","Opened a new session. It has no folder yet: choose one in Claude on the Mac before sending.",newClaudeSession())
+    }
+    /// Open, Stop and Send for the session that has no name yet.
+    private func executeNewClaudeSession(_ command:RemoteCommand) async ->RemoteReceipt {
+        func result(_ status:String,_ message:String,_ chat:RemoteChat?=nil)->RemoteReceipt {RemoteReceipt(id:command.id,status:status,message:message,activeChat:chat)}
+        guard let app=NSRunningApplication.runningApplications(withBundleIdentifier:access.bundle).first else{return result("failed","Open Claude first.")}
+        let gone="The new session is no longer open on the Mac. Press New chat again."
+        if command.action=="openChat" {
+            let now=access.readSnapshot({self.access.newSession()})
+            return now.showing ? result("confirmed","The new session is open.",newClaudeSession(folder:ClaudeSidebar.chosenFolder(now.folderLabel))):result("failed",gone)
+        }
+        guard command.action=="sendPrompt",let prompt=command.text else{return result("failed","Nothing is running in a new session yet.")}
+        if NSWorkspace.shared.frontmostApplication?.processIdentifier != app.processIdentifier {
+            NSApp.yieldActivation(to:app)
+            if let url=app.bundleURL {let configuration=NSWorkspace.OpenConfiguration();configuration.activates=true;_ = try? await NSWorkspace.shared.openApplication(at:url,configuration:configuration)}
+            try? await Task.sleep(nanoseconds:150_000_000)
+        }
+        // Wait for hands to be off the keys so nothing typed on the Mac lands in the draft.
+        guard await MacInput.waitForQuiet() else{return result("failed","\(MacInput.busyMessage); nothing was inserted.")}
+        func composer()->AXUIElement? {
+            let fields=access.nodes().filter{access.value($0,kAXRoleAttribute) as? String==kAXTextAreaRole && access.value($0,kAXDescriptionAttribute) as? String=="Prompt"}
+            return fields.count==1 ? fields[0]:nil
+        }
+        func stillNew()->Bool {!self.isLocked && self.access.newSession().showing}
+        let state=access.readSnapshot{self.access.newSession()}
+        if let blocker=ClaudeSidebar.sendBlocker(showing:state.showing,namedHeaders:state.namedHeaders,composers:state.composers,folder:ClaudeSidebar.chosenFolder(state.folderLabel)) {
+            return result("failed",blocker)
+        }
+        guard let field=composer() else{return result("failed","Send could not find one message box in the new session. Nothing was inserted.")}
+        guard let existing=access.value(field,kAXValueAttribute) as? String else{return result("failed","Send could not read the Mac’s message box to check for an existing draft. Nothing was inserted.")}
+        guard RemoteComposerPolicy.isBlank(existing) else{return result("failed","The Mac’s message box already contains a draft. Clear it on the Mac first; nothing was replaced or sent.")}
+        var settable=DarwinBoolean(false)
+        guard AXUIElementIsAttributeSettable(field,kAXValueAttribute as CFString,&settable) == .success,settable.boolValue else{return result("failed","Claude does not expose a writable message box in this view. No text was inserted.")}
+        guard AXUIElementSetAttributeValue(field,kAXValueAttribute as CFString,prompt as CFString) == .success else{return result("failed","Claude did not accept the draft. Nothing was sent.")}
+        try? await Task.sleep(nanoseconds:150_000_000)
+        guard stillNew(),let fresh=composer(),RemoteComposerPolicy.matchesInserted(access.value(fresh,kAXValueAttribute) as? String,prompt:prompt) else{return result("uncertain","The draft could not be verified in the new session. Inspect the Mac before sending again.")}
+        let buttons=access.nodes().filter{access.text($0)=="Send" && access.value($0,kAXRoleAttribute) as? String==kAXButtonRole}
+        guard buttons.count==1 else{return result("failed","The draft is in the new session on the Mac, but no single Send control is available.")}
+        let sent=await access.navigationClick(buttons[0],app:app,contextIsCurrent:{
+            guard stillNew(),let field=composer() else{return false}
+            return RemoteComposerPolicy.matchesInserted(self.access.value(field,kAXValueAttribute) as? String,prompt:prompt)
+        })
+        guard sent else{return result("failed","The draft remains on the Mac; Send was not clicked because the new session changed or was unavailable.")}
+        // Sending the first prompt turns the new session into a named one.
+        for _ in 0..<40 {
+            try? await Task.sleep(nanoseconds:150_000_000)
+            guard !isLocked else{break}
+            let delivered=access.readSnapshot { ()->Bool in
+                let all=self.access.nodes(),now=self.access.newSession(all)
+                let working=all.contains{self.access.text($0)=="Stop" && self.access.value($0,kAXRoleAttribute) as? String==kAXButtonRole}
+                return now.namedHeaders==1 || (now.headings==0 && working)
+            }
+            guard delivered else{continue}
+            // Hand the phone the session's name as soon as Claude shows one.
+            var named=verifiedActiveClaudeChat()
+            for _ in 0..<10 where named==nil {try? await Task.sleep(nanoseconds:200_000_000);named=verifiedActiveClaudeChat()}
+            return result("confirmed","Prompt sent; Claude is responding.",named)
+        }
+        return result("uncertain","Send was clicked once in the new session, but its start could not be confirmed. Check the Mac before sending again.")
+    }
     private func executeClaudeShortcut(_ command:RemoteCommand,entry:RemoteActionCatalog.ClaudeEntry) async ->RemoteReceipt {
         func result(_ status:String,_ message:String,_ chat:RemoteChat?=nil)->RemoteReceipt {
             RemoteReceipt(id:command.id,status:status,message:message,activeChat:chat)
@@ -654,6 +797,7 @@ import CoreImage.CIFilterBuiltins
             return snapshot.isCurrent && snapshot.destinationCount==1
         }
         guard contextOK() else{return result("failed","The active Claude chat does not match this control's target. Select the chat again; no input was sent.")}
+        if command.action=="newChat" {return await openNewClaudeSession(command,definition:definition,app:app,contextIsCurrent:contextOK)}
         let previousID=entry.action.changesChat ? verifiedActiveClaudeChat()?.id:nil
         let message=await access.extraAction(definition,title:target?.title ?? "",app:app,contextIsCurrent:contextOK)
         guard RemoteActionCatalog.acceptsClaudeResult(message,controllerTitle:definition.title) else{return result("failed",message)}
@@ -735,6 +879,7 @@ import CoreImage.CIFilterBuiltins
         guard command.action != "nativeVoice" else{return result("failed","Two-way native phone voice is not available yet.")}
         if let entry=RemoteActionCatalog.claudeEntry(command.action) {return await executeClaudeShortcut(command,entry:entry)}
         guard let id=command.chatID else{return result("failed","Choose a chat first.")}
+        if id==newClaudeSession().id {return await executeNewClaudeSession(command)}
         // Saved/cached labels only resolve the opaque ID. Fresh targeted AX
         // checks below still authorize every navigation, Send, and Stop.
         let target=resolveClaudeTarget(id)
@@ -753,6 +898,8 @@ import CoreImage.CIFilterBuiltins
             if case .ambiguous=confirmation {return result("failed","This title resolves to multiple sidebar chats. No action was sent.")}
             return result("failed","Claude navigation could not be confirmed. Select the chat again; no Send or Stop action was sent.")
         }
+        // Opening a chat from a controller is what counts as having looked at it.
+        claudeLatch.acknowledge(id)
         if command.action=="openChat" {return result("confirmed","Opened \(target.title).")}
         // Sending/stopping requires a fresh unique sidebar destination as well
         // as the active header. A cached label only allowed us to navigate.

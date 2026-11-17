@@ -144,6 +144,9 @@ final class MuseAccess {
         return seen
     }
 
+    /// The title of the chat Muse is showing, if it can be read. One read; changes nothing.
+    func currentChatTitle() -> String? { snapshot()?.current }
+
     /// True when Muse's window is too narrow to control. One read; changes nothing.
     func needsWiderWindow() -> Bool { snapshot()?.needsWiderWindow ?? false }
 

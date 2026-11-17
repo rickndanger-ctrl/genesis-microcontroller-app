@@ -994,9 +994,10 @@ final class FixtureCredentials: ControllerCredentialVault {
         let priorAction = RemoteAction(id:"previousChat",title:"Previous native chat",group:"Navigate",detail:"Use the provider navigation.",requiresChat:false,changesChat:true)
         let focusAction = RemoteAction(id:"focusPrompt",title:"Focus prompt",group:"Compose",detail:"Focus the selected prompt.",requiresChat:true,changesChat:false)
         let attachAction = RemoteAction(id:"addAttachment",title:"Add attachment",group:"Compose",detail:"Choose a file.",requiresChat:true,changesChat:false,opensNavigation:true)
+        let searchAction = RemoteAction(id:"searchChats",title:"Search chats",group:"Navigate",detail:"Find a session.",requiresChat:false,changesChat:false,opensNavigation:true)
         var actionInfo = claudeInfo
-        actionInfo.capabilities += ["newChat","previousChat","focusPrompt","addAttachment","menuNavigation"]
-        actionInfo.actions = [newAction,priorAction,focusAction,attachAction]
+        actionInfo.capabilities += ["newChat","previousChat","focusPrompt","addAttachment","searchChats","menuNavigation"]
+        actionInfo.actions = [newAction,priorAction,focusAction,attachAction,searchAction]
         actionsFixture.setProviders([actionInfo,codexInfo]); try credentials.save(actionsFixture.token,for:actionsFixture.name)
         let originalChat = ChatRecord(id:"chat-\(actionsFixture.name)",title:"Original chat",state:"Idle")
         let otherChat = ChatRecord(id:"second-action-chat",title:"Second chat",state:"Idle")
@@ -1085,8 +1086,14 @@ final class FixtureCredentials: ControllerCredentialVault {
                "Verified same-chat file selection keeps the draft and target intact")
         actionsFixture.setActionResult("menuSelect")
         await actionStore.navigate("menuSelect")
+        expect(actionStore.selectedChat?.id == created.id && actionStore.draft == "Keep this new chat draft",
+               "A confirmed choice in the chat's own menu keeps that chat, even when the Mac names none")
+        // A search result may be any chat, so the same outcome there clears the target.
+        actionsFixture.setNavigation(true)
+        await actionStore.runAction("searchChats")
+        await actionStore.navigate("menuSelect")
         expect(actionStore.selectedChat == nil && !actionStore.canSend,
-               "Menu Select without verified activeChat clears a possibly changed target")
+               "Menu Select after a search, without a verified chat, clears a possibly changed target")
         await actionStore.runAction("previousControllerChat"); await actionStore.refreshNavigation()
         let acceptedBefore = actionsFixture.navigationCount
         actionsFixture.setNavigation(true,rotate:true)

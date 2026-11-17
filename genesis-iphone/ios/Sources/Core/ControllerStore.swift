@@ -20,6 +20,10 @@ final class ControllerStore: ObservableObject {
     @Published private(set) var isBusy = false
     private var navigating = false
     private var queuedMenuSteps: [String] = []
+    /// The open menu belongs to the selected chat (model, permissions, an
+    /// attachment), so choosing something in it does not leave that chat.
+    /// A search does: its result may be any chat.
+    private var navigationKeepsChat = false
     @Published private(set) var isRefreshingChats = false
     @Published private(set) var isRecording = false
     @Published private(set) var isFinalizing = false
@@ -240,11 +244,15 @@ final class ControllerStore: ObservableObject {
     var selectedActivity: ChatActivity? {
         if hasUnresolvedSend { return .error }
         guard lightsAreLive, let chat = selectedChat else { return nil }
-        return (chats.first { $0.id == chat.id } ?? chat).activity
+        // Only what the Mac just listed. A chat that has left the list has no
+        // light; its last known state would otherwise pulse on forever.
+        return chats.first { $0.id == chat.id }?.activity
     }
     /// A light is only shown while the Mac is answering and its app is ready.
     /// Offline, locked or closed, the last colors would be a guess, so the keys go dark.
-    var lightsAreLive: Bool { isDemo || (status != nil && providerInfo?.readiness == "ready") }
+    /// Codex is left out: its saved-chat list says nothing about what a chat is
+    /// doing, and a white "idle" light on a working chat would be a false claim.
+    var lightsAreLive: Bool { isDemo || (status != nil && providerInfo?.readiness == "ready" && selectedProvider != .codex) }
     /// Between full refreshes, re-reads only what the chats are doing, so a
     /// light is a few seconds old at most. Claude only: reading its sidebar
     /// changes nothing on the Mac, whereas listing Muse's chats opens its chat
@@ -271,6 +279,12 @@ final class ControllerStore: ObservableObject {
     private func persistDraft() {
         guard !loadingDraft, let route = currentRoute else { return }
         settings.ledger.set(draft, for: route); persist()
+    }
+    /// After the key mappings change, the ring goes to whichever key now holds the
+    /// open chat, or nowhere. Home (no ring, by choice) is left as it is.
+    private func syncSelectedSlot() {
+        guard selectedSlotIndex != nil else { return }
+        selectedSlotIndex = profile.slots.first { $0.kind == "chat" && $0.targetID == selectedChat?.id }?.index
     }
     private func restoreSelection() {
         profile = settings.profiles[scope] ?? .empty(selectedProvider)
@@ -395,10 +409,18 @@ final class ControllerStore: ObservableObject {
             let (host, token) = try connection()
             let live = try await client.fetch(HostStatus.self, host: host, token: token, path: "/v1/status")
             guard gate.accepts(generation) else { return }
-            try validate(live, host: host); applyStatus(live)
+            try validate(live, host: host); applyStatus(live); missedStatusPolls = 0
             await recoverPendingSend()
-        } catch { if gate.accepts(generation) { failConnection(error) } }
+        } catch {
+            guard gate.accepts(generation) else { return }
+            // One dropped poll on a phone network is common. Going offline on it made
+            // every light and the Talk key blink; a second miss in a row is believed.
+            missedStatusPolls += 1
+            if case RemoteError.unpaired = error { failConnection(error) }
+            else if missedStatusPolls >= 2 || status == nil { failConnection(error) }
+        }
     }
+    private var missedStatusPolls = 0
     func refresh() async {
         guard !isDemo, refreshGeneration != gate.generation, !isBusy else { return }
         let generation = gate.generation, provider = selectedProvider
@@ -429,7 +451,7 @@ final class ControllerStore: ObservableObject {
         // A GET started before a successful PUT may arrive last. Revisions are
         // monotonic on the host; never roll a just-saved mapping backward.
         guard gate.accepts(generation), saved.provider == provider.rawValue, saved.revision >= profile.revision else { return }
-        if profile != saved { profile = saved; settings.profiles[scope] = saved; persist() }
+        if profile != saved { profile = saved; settings.profiles[scope] = saved; syncSelectedSlot(); persist() }
     }
 
     private func refreshChats(host: RemoteHost, token: String, provider: ProviderID, generation: Int, enabled: Bool) async throws {
@@ -555,14 +577,14 @@ final class ControllerStore: ObservableObject {
     }
     private func saveProfile(_ edited: RemoteProfile) async -> Bool {
         lastError = nil
-        if isDemo { profile = edited; settings.profiles[scope] = edited; return true }
+        if isDemo { profile = edited; settings.profiles[scope] = edited; syncSelectedSlot(); return true }
         let generation = gate.generation
         isBusy = true; defer { if gate.accepts(generation) { isBusy = false } }
         do {
             let (host, token) = try connection()
             let saved = try await client.fetch(RemoteProfile.self, host: host, token: token, path: "/v1/profile", method: "PUT", body: JSONEncoder().encode(edited))
             guard gate.accepts(generation), saved.provider == selectedProvider.rawValue else { return false }
-            profile = saved; settings.profiles[scope] = saved; persist()
+            profile = saved; settings.profiles[scope] = saved; syncSelectedSlot(); persist()
             return true
         } catch { if gate.accepts(generation) { lastError = error.localizedDescription }; return false }
     }
@@ -615,6 +637,7 @@ final class ControllerStore: ObservableObject {
         }
         if action.changesChat { Task { await refresh() } }
         if receipt.isConfirmed, action.opensNavigation == true {
+            navigationKeepsChat = action.requiresChat && !action.changesChat
             let menuGeneration = gate.generation
             await refreshNavigation()
             if gate.accepts(menuGeneration), navigation.active { requestedPanel = "navigate" }
@@ -742,7 +765,11 @@ final class ControllerStore: ObservableObject {
         }
         if receipt.isConfirmed, let active = receipt.activeChat, !active.id.isEmpty {
             if active.id != selectedChat?.id { changeChat(active) }
-        } else if action == "menuSelect" { clearChatAfterNavigation() }
+        } else if action == "menuSelect", !(receipt.isConfirmed && navigationKeepsChat) {
+            // A confirmed choice in the chat's own menu (its model, an attachment)
+            // leaves the chat where it was. Anything else may have moved the Mac.
+            clearChatAfterNavigation()
+        }
         if action == "menuHome", receipt.isConfirmed { clearChatAfterNavigation(); returnHome() }
         if let state = receipt.navigation, gate.accepts(generation) { applyNavigation(state,generation:generation) }
         else { navigation = .inactive; navigationGeneration = nil; await refreshNavigation() }
@@ -829,6 +856,11 @@ final class ControllerStore: ObservableObject {
         let receipt = await execute(action: "sendPrompt", chatID: chat.id, text: text, id: id)
         guard let receipt else { return }
         finishSend(receipt, pending: pending)
+        // A first prompt turns a new, unnamed session into a named chat. The Mac
+        // says which; keep working in it instead of in a session that is gone.
+        if receipt.isAcceptedSend, let named = receipt.activeChat, !named.id.isEmpty, named.id != chat.id, selectedChat?.id == chat.id {
+            changeChat(named); Task { await refresh() }
+        }
     }
     private static func digest(_ text: String) -> String { SHA256.hash(data: Data(text.utf8)).map { String(format: "%02x", $0) }.joined() }
     private func commandError(_ message: String, id: String) {
@@ -960,7 +992,7 @@ final class ControllerStore: ObservableObject {
             if let chat { query.append(URLQueryItem(name: "chatID", value: chat.id)) }
             let result = try await client.fetch(ArtifactsResponse.self, host: host, token: token, path: "/v1/artifacts", query: query)
             guard gate.accepts(generation) else { return }
-            artifacts = result.artifacts.filter { $0.hostID == host.hostID && $0.provider == provider.rawValue && (chat == nil || $0.chatID == chat?.id) }
+            artifacts = result.artifacts.filter { $0.hostID == host.hostID && $0.provider == provider.rawValue && (chat == nil || $0.chatID.isEmpty || $0.chatID == chat?.id) }
         } catch { if gate.accepts(generation) { lastError = error.localizedDescription } }
     }
     func openArtifact(_ artifact: ArtifactRecord) async {
