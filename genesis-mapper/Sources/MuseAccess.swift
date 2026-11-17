@@ -24,6 +24,8 @@ final class MuseAccess {
     struct Listing {
         let chats: [MuseChatList.Chat]
         let ambiguous: Set<String>
+        /// Muse is replying in the chat that is open, so that chat is working.
+        var answering = false
     }
 
     private struct Snapshot {
@@ -230,7 +232,7 @@ final class MuseAccess {
         }
         guard let shown = await panel(leavingUnnamedChat: leavingUnnamedChat), shown.panelOpen else { return nil }
         let result = MuseChatList.chats(shown.rows.map(\.row))
-        return Listing(chats: result.chats, ambiguous: result.ambiguous)
+        return Listing(chats: result.chats, ambiguous: result.ambiguous, answering: !shown.answering.isEmpty)
     }
 
     /// Every string in the newest entries of the message history. Muse nests

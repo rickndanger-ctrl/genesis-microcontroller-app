@@ -18,6 +18,44 @@ enum GenesisPalette {
     static func color(_ index: Int) -> Color { rgb(hex[max(0, min(5, index))]) }
     static func glow(_ index: Int) -> Color { rgb(glowHex[max(0, min(5, index))]) }
 
+    /// The light for what a chat is doing. Idle is plain white, so an idle key is just its snow cap.
+    static func light(_ activity: ChatActivity?) -> Color {
+        switch activity {
+        case .thinking: return rgb(0x2E7DFF)
+        case .complete: return rgb(0x1FD873)
+        case .needsInput: return rgb(0xFFB81C)
+        case .error: return rgb(0xFF3B30)
+        case .idle, .none: return .white
+        }
+    }
+    /// How strongly a key is lit, 0…1. Unassigned keys are nearly dark; idle is a faint white.
+    static func level(_ activity: ChatActivity?, assigned: Bool) -> Double {
+        switch activity {
+        case .thinking: return 1.0
+        case .needsInput, .error: return 0.95
+        case .complete: return 0.85
+        case .idle: return 0.26
+        case .none: return assigned ? 0.12 : 0.05
+        }
+    }
+    /// The color for everything around the keys (the other keys, knobs, backdrop, Send).
+    /// White would vanish there, so an idle chat uses a quiet slate.
+    static let slate = rgb(0x6F7D92)
+    static func accent(_ activity: ChatActivity?) -> Color {
+        switch activity {
+        case .idle, .none: return slate
+        default: return light(activity)
+        }
+    }
+    /// A dot that shows on a white surface: the light itself, or a pale grey for idle.
+    static func dot(_ activity: ChatActivity?) -> Color {
+        switch activity {
+        case .idle: return rgb(0xD5DBE5)
+        case .none: return rgb(0xD5DBE5).opacity(0.5)
+        default: return light(activity)
+        }
+    }
+
     static let ink = Color(red: 0.10, green: 0.12, blue: 0.16)
     static let text = ink
     static let dim = Color(red: 0.36, green: 0.39, blue: 0.45)
@@ -426,6 +464,8 @@ struct DialKnob: View {
     var level: Double = 0.4
     /// The six slot lights on the chat dial; `nil` draws a single ring.
     var ringSelection: Int?
+    /// The color of each of the six lights: what each key's chat is doing.
+    var ringColors: [Color] = []
     var rotation: Double
     var active = false
     var pressed = false
@@ -509,7 +549,7 @@ struct DialKnob: View {
             ZStack {
                 ForEach(0..<6, id: \.self) { index in
                     let on = index == ringSelection
-                    let tint = GenesisPalette.glow(index)
+                    let tint = index < ringColors.count ? ringColors[index] : GenesisPalette.slate
                     let arc = Circle().inset(by: width / 2 + radius * 0.07)
                         .trim(from: CGFloat(index) / 6 + 0.018, to: CGFloat(index + 1) / 6 - 0.018)
                     ZStack {

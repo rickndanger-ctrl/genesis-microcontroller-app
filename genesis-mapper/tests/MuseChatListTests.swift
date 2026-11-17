@@ -82,6 +82,14 @@ import Foundation
         expect(MuseChatList.deliveredByEffect(entriesBefore: 10, entriesAfter: 11, answering: false, boxEmpty: true), "A new entry and an emptied box confirms it too")
         expect(!MuseChatList.deliveredByEffect(entriesBefore: 10, entriesAfter: 10, answering: true, boxEmpty: true), "No new entry is never a delivery")
         expect(!MuseChatList.deliveredByEffect(entriesBefore: 10, entriesAfter: 11, answering: false, boxEmpty: false), "A new entry alone could be Muse speaking first")
+        // The state each chat reports, which the phone shows as a light.
+        expect(MuseChatList.state(current: true, unread: false, answering: true) == "Working", "The open chat is working while Muse replies in it")
+        expect(MuseChatList.state(current: true, unread: false, answering: false) == "Current", "The open chat is otherwise just current")
+        expect(MuseChatList.state(current: false, unread: true, answering: true) == "Unread", "A reply in the open chat does not make another chat work")
+        expect(MuseChatList.state(current: false, unread: true, answering: false) == "Unread", "A chat with unseen updates has finished")
+        expect(MuseChatList.state(current: false, unread: false, answering: false) == "Open", "Any other chat is open and idle")
+        expect(MuseChatList.state(current: true, unread: true, answering: false) == "Current", "The chat you are looking at has nothing unseen")
+
         // The Status panel on its own: Muse in a narrow window.
         expect(MuseChatList.statusPanelCoversChat(chatScreenFound: false, tabs: ["Activity", "Approvals", "Identity", "Mail"]), "Four Status tabs and no chat screen is the panel covering the chat")
         expect(MuseChatList.statusPanelCoversChat(chatScreenFound: false, tabs: ["Approvals", "Identity", "Mail"]), "Three of the tabs are enough")

@@ -20,7 +20,7 @@ Pairing QR/deep link: `genesiscontroller://pair?data=<base64url JSON>` where JSO
 ## Endpoints
 
 - GET /v1/status -> HostStatus
-- GET /v1/chats?provider=... -> `{chats:[ChatRecord],leftOut?:[string]}`. `leftOut` (companion 0.7.1+) lists up to 20 titles carried by more than one chat, which the Mac cannot tell apart and so does not offer. Commands `launchApp` (capability offered while readiness is `closed`) and `restartService` (Codex only; offered while readiness is `unavailable` and the service link exists but cannot be reached) open no chat and send nothing.
+- GET /v1/chats?provider=... -> `{chats:[ChatRecord],leftOut?:[string]}`. `ChatRecord.state` is what the chat is doing, and the app turns it into one of five key lights: `Working`/`Running` (thinking, blue), `Unread` (finished, green), `Awaiting input`/`Needs input` (yellow), `Something went wrong` (red); anything else, including `Idle`, `Open`, `Current` and `Saved`, is idle (white). The app never infers work from a state it does not recognise. `leftOut` (companion 0.7.1+) lists up to 20 titles carried by more than one chat, which the Mac cannot tell apart and so does not offer. Commands `launchApp` (capability offered while readiness is `closed`) and `restartService` (Codex only; offered while readiness is `unavailable` and the service link exists but cannot be reached) open no chat and send nothing.
 - GET /v1/navigation?provider=...&generation=...&chatID=... -> RemoteNavigationState; only while the navigation sheet is visible
 - GET /v1/profile?provider=... -> RemoteProfile
 - PUT /v1/profile -> RemoteProfile with expected existing `revision`; compare-and-swap, return incremented revision; conflict HTTP 409

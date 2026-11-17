@@ -98,6 +98,20 @@ struct SettingsScreen: View {
                         .accessibilityIdentifier("settings.diagnostics")
                     }
                 }
+                Section {
+                    ForEach(ChatActivity.allCases, id: \.self) { activity in
+                        HStack(spacing: 12) {
+                            Circle().fill(GenesisPalette.dot(activity)).frame(width: 14, height: 14)
+                                .overlay(Circle().strokeBorder(.black.opacity(0.12), lineWidth: 1))
+                            Text(activity.label).font(.callout.weight(.semibold)).frame(width: 96, alignment: .leading)
+                            Text(activity.meaning).font(.caption).foregroundStyle(.secondary)
+                        }
+                        .accessibilityElement(children: .combine)
+                    }
+                } header: { Text("Key lights") } footer: {
+                    Text("Each chat key shows what its chat is doing on the Mac. A working chat pulses. The open chat has a ring around its key.")
+                }
+                .accessibilityIdentifier("settings.keyLights")
                 Section("Glasses") {
                     Toggle("I use Even G2 glasses", isOn: Binding(get: { glassesFeature }, set: { enabled in
                         guard enabled != glassesFeature else { return }
@@ -218,7 +232,8 @@ struct MappingScreen: View {
             List {
                 Section {
                     HStack(spacing: 12) {
-                        Circle().fill(GenesisPalette.color(index)).frame(width: 16, height: 16)
+                        Circle().fill(GenesisPalette.dot(store.activity(slot: index))).frame(width: 16, height: 16)
+                            .overlay(Circle().strokeBorder(.black.opacity(0.12), lineWidth: 1))
                         Text("\(prefix)\(index + 1)").font(.title2.bold())
                         Text("Chat or shortcut").foregroundStyle(.secondary)
                     }.padding(.vertical, 8)

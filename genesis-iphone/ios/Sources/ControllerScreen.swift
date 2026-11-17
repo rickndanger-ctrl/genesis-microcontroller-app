@@ -53,7 +53,8 @@ struct ControllerScreen: View {
     private var isPad: Bool { UIDevice.current.userInterfaceIdiom == .pad }
 
     private var browsedSlot: Int { dialSlot ?? store.selectedSlotIndex ?? 0 }
-    private var slotColor: Color { GenesisPalette.glow(store.selectedSlotIndex ?? browsedSlot) }
+    /// The deck's accent: what the open chat (or the one the dial rests on) is doing.
+    private var slotColor: Color { GenesisPalette.accent(store.selectedSlotIndex == nil ? store.activity(slot: browsedSlot) : store.selectedActivity) }
     private var artifactIndex: Int { store.artifacts.firstIndex { $0.id == artifactID } ?? 0 }
     private var artifactSelectionLabel: String {
         guard store.artifacts.indices.contains(artifactIndex) else { return "No artifacts" }
@@ -688,7 +689,8 @@ struct ControllerScreen: View {
             VStack(spacing: 0) {
                 VStack(spacing: gap) {
                     HStack(spacing: gap) {
-                        DialControl(silver: true, caption: "CHATS", color: GenesisPalette.glow(browsedSlot), level: chatDialLevel, ringSelection: browsedSlot,
+                        DialControl(silver: true, caption: "CHATS", color: GenesisPalette.accent(store.activity(slot: browsedSlot)), level: chatDialLevel, ringSelection: browsedSlot,
+                                    ringColors: (0..<6).map { GenesisPalette.dot(store.activity(slot: $0)) },
                                     degreesPerStep: 60, restingRotation: $chatDialRotation, scale: scale,
                                     interactionChanged: { chatDialActive = $0 },
                                     selectionDescription: "\(slotPrefix)\(browsedSlot + 1), \(slotTitle(browsedSlot))",
@@ -743,14 +745,17 @@ struct ControllerScreen: View {
         let title = slotTitle(index)
         let selected = store.selectedSlotIndex == index
         let browsed = browsedSlot == index
-        let color = GenesisPalette.glow(index)
         let assigned = store.profile.slots.contains { $0.index == index && $0.kind != "empty" }
-        return HoldTapKeycap(led: color, level: selected ? 1 : browsed ? 0.60 : assigned ? 0.30 : 0.07, breathing: selected, scale: scale, unit: width,
+        // The light says what the chat is doing, not which key it is. Only a working chat pulses.
+        let activity = selected ? store.selectedActivity : store.activity(slot: index)
+        let color = GenesisPalette.light(activity)
+        let base = GenesisPalette.level(activity, assigned: assigned)
+        return HoldTapKeycap(led: color, level: min(1, base + (selected ? 0.18 : browsed ? 0.10 : 0)), breathing: activity == .thinking, scale: scale, unit: width,
                              tap: { activateSlot(index) },
                              hold: { ControllerSound.shared.keyClick(); mappingIndex = index }) {
             VStack(spacing: 4 * scale) {
                 HStack(spacing: 4 * scale) {
-                    Circle().fill(GenesisPalette.color(index).opacity(assigned ? 1 : 0.45))
+                    Circle().fill(GenesisPalette.dot(activity))
                         .frame(width: 7 * scale, height: 7 * scale)
                         .overlay(Circle().strokeBorder(.white.opacity(0.85), lineWidth: 0.7 * scale))
                     Text("\(slotPrefix)\(index + 1)")
@@ -766,7 +771,14 @@ struct ControllerScreen: View {
         }
         .frame(width: width, height: height)
             .overlay {
-                if browsed && !selected {
+                if selected {
+                    // The open chat: a solid ring, now that color no longer marks it.
+                    RoundedRectangle(cornerRadius: 18 * scale, style: .continuous)
+                        .strokeBorder(GenesisPalette.ink.opacity(0.78), lineWidth: 1.6 * scale)
+                        .padding(-3 * scale)
+                        .allowsHitTesting(false)
+                        .accessibilityHidden(true)
+                } else if browsed {
                     // The dial's unopened selection: a bright dashed ring just outside the cap.
                     RoundedRectangle(cornerRadius: 18 * scale, style: .continuous)
                         .strokeBorder(GenesisPalette.ink.opacity(0.75), style: StrokeStyle(lineWidth: 1.4 * scale, dash: [3.5 * scale, 2.5 * scale]))
@@ -778,7 +790,7 @@ struct ControllerScreen: View {
             .accessibilityElement(children: .ignore)
             .accessibilityAddTraits(.isButton)
             .accessibilityLabel("\(slotPrefix)\(index + 1), \(title)")
-            .accessibilityValue(selected && browsed ? "Current chat, dial selection" : selected ? "Current chat" : browsed ? "Dial selection" : "")
+            .accessibilityValue(([activity?.label] + [selected && browsed ? "Current chat, dial selection" : selected ? "Current chat" : browsed ? "Dial selection" : nil]).compactMap { $0 }.joined(separator: ", "))
             .accessibilityAction { activateSlot(index) }
             .accessibilityAction(named: "Change assignment") { ControllerSound.shared.keyClick(); mappingIndex = index }
     }
@@ -916,6 +928,12 @@ struct ControllerScreen: View {
                 Circle().fill(slotColor).frame(width: 7, height: 7).shadow(color: slotColor, radius: 5)
                 Text(store.selectedChat?.title ?? "Choose a chat to begin").font(.system(size: isPad ? 17 : 13, weight: .semibold)).lineLimit(1)
                 Spacer()
+                if let activity = store.selectedActivity, activity != .idle {
+                    Text(activity.label).font(.system(size: isPad ? 12 : 10, weight: .bold)).foregroundStyle(.white)
+                        .padding(.horizontal, 7).padding(.vertical, 2)
+                        .background(Capsule().fill(GenesisPalette.light(activity)))
+                        .accessibilityIdentifier("controller.activity")
+                }
                 Text(providerName).font(isPad ? .caption : .caption2).foregroundStyle(GenesisPalette.dim)
             }
             TextField(codexDraftOnly ? "Local draft — Send is not connected yet" : "Hold the microphone, or type a draft…", text: $store.draft, axis: .vertical)
@@ -1007,6 +1025,7 @@ struct DialControl: View {
     let color: Color
     var level: Double = 0.4
     var ringSelection: Int?
+    var ringColors: [Color] = []
     var degreesPerStep = DialTracking.degreesPerStep
     @Binding var restingRotation: Double
     var scale: CGFloat = 1
@@ -1024,7 +1043,7 @@ struct DialControl: View {
         VStack(spacing: 0) {
             GeometryReader { geometry in
                 let size = geometry.size
-                DialKnob(finish: silver ? .snow : .graphite, color: color, level: level, ringSelection: ringSelection,
+                DialKnob(finish: silver ? .snow : .graphite, color: color, level: level, ringSelection: ringSelection, ringColors: ringColors,
                          rotation: restingRotation + (tracking?.degrees ?? 0), active: isDragging, pressed: pressed, scale: scale)
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
                 .contentShape(Rectangle())

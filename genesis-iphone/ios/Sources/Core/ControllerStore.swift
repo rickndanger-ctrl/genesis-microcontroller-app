@@ -225,6 +225,38 @@ final class ControllerStore: ObservableObject {
         currentRoute.map { settings.ledger.pendingSends[$0.storageKey] == nil } == true
     }
     var hasUnresolvedSend: Bool { currentRoute.map { settings.ledger.pendingSends[$0.storageKey] != nil } ?? false }
+    /// What the chat on a key is doing. Nil when the key holds no chat, or a
+    /// chat the Mac did not list this time: its light stays off, not white.
+    func activity(slot index: Int) -> ChatActivity? {
+        guard let slot = profile.slots.first(where: { $0.index == index && $0.kind == "chat" }) else { return nil }
+        // A Send whose result is unknown needs you whatever the Mac reports.
+        // That is known on this device, so it shows even while offline.
+        let route = DraftRoute(hostID: selectedHost?.hostID ?? selectedHostID, provider: selectedProvider.rawValue, chatID: slot.targetID)
+        if settings.ledger.pendingSends[route.storageKey] != nil { return .error }
+        guard lightsAreLive else { return nil }
+        return chats.first { $0.id == slot.targetID }?.activity
+    }
+    /// What the open chat is doing.
+    var selectedActivity: ChatActivity? {
+        if hasUnresolvedSend { return .error }
+        guard lightsAreLive, let chat = selectedChat else { return nil }
+        return (chats.first { $0.id == chat.id } ?? chat).activity
+    }
+    /// A light is only shown while the Mac is answering and its app is ready.
+    /// Offline, locked or closed, the last colors would be a guess, so the keys go dark.
+    var lightsAreLive: Bool { isDemo || (status != nil && providerInfo?.readiness == "ready") }
+    /// Between full refreshes, re-reads only what the chats are doing, so a
+    /// light is a few seconds old at most. Claude only: reading its sidebar
+    /// changes nothing on the Mac, whereas listing Muse's chats opens its chat
+    /// panel, and Codex's saved-chat list carries no live state.
+    func refreshLights() async {
+        guard !isDemo, !isBusy, !isRecording, !isFinalizing, refreshGeneration != gate.generation,
+              selectedProvider == .claude, lightsAreLive, providerInfo?.supports("openChat") == true else { return }
+        let generation = gate.generation, provider = selectedProvider
+        guard let (host, token) = try? connection() else { return }
+        // A failure here is left to the next status poll, which reports a lost connection.
+        try? await refreshChats(host: host, token: token, provider: provider, generation: generation, enabled: true)
+    }
     private var scope: String { "\(selectedHost?.hostID ?? selectedHostID).\(selectedProvider.rawValue)" }
     private var currentRoute: DraftRoute? {
         guard let chat = selectedChat else { return nil }
@@ -324,7 +356,8 @@ final class ControllerStore: ObservableObject {
                 try? await Task.sleep(nanoseconds: 2_000_000_000)
                 guard !Task.isCancelled, let self, self.foreground else { return }
                 tick += 1
-                if tick % 5 == 0 { await self.refresh() } else { await self.refreshStatus() }
+                if tick % 5 == 0 { await self.refresh() }
+                else { await self.refreshStatus(); if tick % 2 == 0 { await self.refreshLights() } }
             }
         }
     }
@@ -601,11 +634,17 @@ final class ControllerStore: ObservableObject {
     func selectChat(_ chat: ChatRecord, preferredSlotIndex: Int? = nil) async {
         guard !isBusy else { return }
         if isDemo {
-            changeChat(chat, preferredSlotIndex: preferredSlotIndex); return
+            acknowledgeCompletion(chat.id); changeChat(chat, preferredSlotIndex: preferredSlotIndex); return
         }
         guard providerInfo?.supports("openChat") == true else { lastError = chatAvailabilityMessage; return }
         let receipt = await execute(action: "openChat", chatID: chat.id)
-        if receipt?.isConfirmed == true { changeChat(chat, preferredSlotIndex: preferredSlotIndex) }
+        if receipt?.isConfirmed == true { acknowledgeCompletion(chat.id); changeChat(chat, preferredSlotIndex: preferredSlotIndex) }
+    }
+    /// Opening a finished chat is what clears its green light. The Mac reports
+    /// that on the next refresh; this keeps the key from staying green until then.
+    private func acknowledgeCompletion(_ id: String) {
+        guard let index = chats.firstIndex(where: { $0.id == id }), chats[index].activity == .complete else { return }
+        chats[index].state = "Idle"
     }
     private func historyDestination(_ id: String) -> (Int, ChatRecord)? {
         guard let history = settings.chatHistory?[scope],
@@ -963,7 +1002,9 @@ final class ControllerStore: ObservableObject {
                              reason:"Design preview only. No Mac commands are sent. Native live voice is not connected.",actions:actions)
             })
         chats = ["Controller app", "OMAC workspace", "Design studio", "Weekly review", "Build notes", "Ideas & experiments"].enumerated().map {
-            ChatRecord(id: "demo-\(selectedProvider.rawValue)-\($0.offset)", title: $0.element, state: $0.offset == 0 ? "Working" : "Idle")
+            // One of each light, so the demo shows what the colors mean.
+            ChatRecord(id: "demo-\(selectedProvider.rawValue)-\($0.offset)", title: $0.element,
+                       state: ["Working", "Unread", "Needs input", "Idle", "Something went wrong", "Idle"][$0.offset])
         }
         if settings.profiles[scope] == nil {
             profile = .init(provider: selectedProvider.rawValue, revision: 1, slots: chats.enumerated().map {

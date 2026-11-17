@@ -57,6 +57,9 @@ final class HTTPFixture: @unchecked Sendable {
         lock.lock(); actionResults[action] = result; lock.unlock()
     }
     func dropAction(_ action: String, value: Bool) { lock.lock(); if value { droppedActions.insert(action) } else { droppedActions.remove(action) }; lock.unlock() }
+    private var chatState = "Idle"
+    /// What the Mac says the fixture's chat is doing.
+    func setChatState(_ state: String) { lock.lock(); chatState = state; lock.unlock() }
     private var leftOutTitles: [String] = []
     /// Titles the Mac reports as shared by more than one chat.
     func setLeftOut(_ titles: [String]) { lock.lock(); leftOutTitles = titles; lock.unlock() }
@@ -167,7 +170,8 @@ final class HTTPFixture: @unchecked Sendable {
         if path == "/v1/chats" {
             let id = queryProvider == "codex" ? codexChatID : "chat-\(name)"
             lock.lock(); let shared = leftOutTitles; lock.unlock()
-            var listing: [String: Any] = ["chats":[["id":id,"title":queryProvider == "codex" ? "Existing Codex thread":"Fixture chat","state":"Idle"]]]
+            lock.lock(); let reported = chatState; lock.unlock()
+            var listing: [String: Any] = ["chats":[["id":id,"title":queryProvider == "codex" ? "Existing Codex thread":"Fixture chat","state":reported]]]
             if !shared.isEmpty { listing["leftOut"] = shared }
             respond(connection, code: 200, json: listing, holdPath: path); return
         }
@@ -383,6 +387,32 @@ final class FixtureCredentials: ControllerCredentialVault {
         await store.refresh()
         expect(store.isPaired && store.status?.hostID == first.hostID, "Store authenticates paired host")
         expect(store.profile.slots.count == 6 && store.chats.count == 1, "Mapping and chat snapshots populated through HTTP")
+        // Each key's light is what its chat is doing on the Mac.
+        expect(store.activity(slot: 0) == .idle && store.selectedActivity == .idle, "An idle chat's key is idle")
+        expect(store.activity(slot: 1) == nil && store.activity(slot: 5) == nil, "A key with no chat has no light")
+        for (reported, light) in [("Working", ChatActivity.thinking), ("Needs input", .needsInput), ("Something went wrong", .error), ("Unread", .complete)] {
+            first.setChatState(reported); await store.refresh()
+            expect(store.activity(slot: 0) == light && store.selectedActivity == light, "A chat the Mac reports as \(reported) lights its key \(light.rawValue)")
+        }
+        await store.selectChat(store.chats[0])
+        expect(store.activity(slot: 0) == .idle, "Opening a finished chat clears its light at once, without waiting for the Mac")
+        first.setChatState("Idle"); await store.refresh()
+        expect(store.activity(slot: 0) == .idle, "The Mac then agrees")
+        // Between full refreshes only the chat list is re-read.
+        func requests(_ prefix: String) -> Int { first.received.filter { $0.0.hasPrefix(prefix) }.count }
+        let before = (requests("GET /v1/chats"), requests("GET /v1/profile"), requests("GET /v1/artifacts"), requests("GET /v1/status"))
+        first.setChatState("Working"); await store.refreshLights()
+        expect(store.activity(slot: 0) == .thinking, "A lights refresh picks up a chat that started working")
+        expect(requests("GET /v1/chats") == before.0 + 1 && requests("GET /v1/profile") == before.1 && requests("GET /v1/artifacts") == before.2 && requests("GET /v1/status") == before.3,
+               "A lights refresh asks the Mac for the chat list and nothing else")
+        // A Mac that stops answering takes its lights with it: the last colors would be a guess.
+        first.setStatusUnavailable(true); await store.refresh()
+        expect(!store.lightsAreLive && store.activity(slot: 0) == nil && store.selectedActivity == nil, "An unreachable Mac shows no lights")
+        let offlineChats = requests("GET /v1/chats")
+        await store.refreshLights()
+        expect(requests("GET /v1/chats") == offlineChats, "No lights refresh is attempted while the Mac is unreachable")
+        first.setStatusUnavailable(false); first.setChatState("Idle"); await store.refresh()
+        expect(store.lightsAreLive && store.activity(slot: 0) == .idle, "The lights come back with the Mac")
         let beforeVoice = first.received.count
         await store.startNativeVoice()
         expect(first.received.count == beforeVoice, "Unavailable native voice cannot issue a network command")
@@ -399,6 +429,7 @@ final class FixtureCredentials: ControllerCredentialVault {
         await store.sendDraft()
         expect(first.sendCount == 1, "Explicit Send dispatches once")
         expect(store.hasUnresolvedSend && !store.canSend, "Uncertain delivery disables duplicate Send")
+        expect(store.activity(slot: 0) == .error && store.selectedActivity == .error, "A Send whose result is unknown turns that chat's key to error")
         await store.sendDraft()
         expect(first.sendCount == 1, "Second tap cannot dispatch while result is unresolved")
         let posted = first.received.last { $0.0.hasPrefix("POST /v1/commands ") }!

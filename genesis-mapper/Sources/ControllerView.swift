@@ -172,6 +172,14 @@ struct MainView: View {
 @main struct MapperApp: App {
  @StateObject private var model=Model()
  @StateObject private var remote=GenesisRemoteBridge.shared
+ init() {
+  // One companion per Mac: a second copy would fight the first for the port and the hardware.
+  if let id=Bundle.main.bundleIdentifier,
+     LoginLaunch.anotherCopyIsRunning(mine:ProcessInfo.processInfo.processIdentifier,
+                                      running:NSRunningApplication.runningApplications(withBundleIdentifier:id).filter{!$0.isTerminated}.map(\.processIdentifier)) {
+   exit(0)
+  }
+ }
  var body: some Scene {
   WindowGroup("Agent Micro Controller",id:"controller"){MainView(model:model)}.defaultSize(width:1040,height:740)
   WindowGroup("iPhone Pairing",id:"phone-pairing"){RemotePairingView(bridge:remote)}.defaultSize(width:800,height:760)

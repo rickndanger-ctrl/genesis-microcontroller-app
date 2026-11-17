@@ -47,6 +47,13 @@ enum MuseChatList {
         let x = max(screenMinX, min(window.minX, screenMaxX - wanted))
         return CGRect(x: x, y: window.minY, width: wanted, height: window.height)
     }
+    /// The state reported for a chat, which the phone shows as its key's light:
+    /// the open chat is working while Muse replies in it, and a chat with
+    /// updates you have not seen has finished.
+    static func state(current: Bool, unread: Bool, answering: Bool) -> String {
+        if current { return answering ? "Working" : "Current" }
+        return unread ? "Unread" : "Open"
+    }
     static let mainChat = "Main chat"
     static let unreadSuffix = " Unread updates"
     /// Controls in the panel that are buttons but not chats.

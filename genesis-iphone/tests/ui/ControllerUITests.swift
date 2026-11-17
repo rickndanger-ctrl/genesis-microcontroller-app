@@ -28,7 +28,7 @@ final class ControllerUITests: XCTestCase {
         top.press(forDuration: 0.10, thenDragTo: right)
         let browsed = chat.value as? String
         XCTAssertNotEqual(browsed, beforeBrowse)
-        XCTAssertEqual(app.buttons[browsed ?? "missing"].value as? String, "Dial selection")
+        XCTAssertEqual((app.buttons[browsed ?? "missing"].value as? String)?.hasSuffix("Dial selection"), true)
         saveFullscreenScreenshot("Before full screen, browsed dial")
 
         enter.tap()
@@ -38,7 +38,7 @@ final class ControllerUITests: XCTestCase {
         XCTAssertEqual(app.buttons["controller.chooseComputer"].value as? String, selectedComputer)
         XCTAssertEqual(app.buttons["controller.chooseProvider"].value as? String, "Claude")
         XCTAssertEqual(chat.value as? String, browsed, "Entering full screen preserves an unopened dial selection")
-        XCTAssertEqual(app.buttons[browsed ?? "missing"].value as? String, "Dial selection")
+        XCTAssertEqual((app.buttons[browsed ?? "missing"].value as? String)?.hasSuffix("Dial selection"), true)
         XCTAssertTrue(app.buttons["controller.sendDraft"].isEnabled, "The reviewed Claude draft remains ready without sending it")
         saveFullscreenScreenshot("Full screen, retained dial and draft")
 
@@ -65,7 +65,7 @@ final class ControllerUITests: XCTestCase {
         XCTAssertTrue(app.buttons["Claude"].isSelected)
         XCTAssertEqual(draft.value as? String, retainedDraft, "Exiting never clears or sends the draft")
         XCTAssertEqual(chat.value as? String, browsed)
-        XCTAssertEqual(app.buttons[browsed ?? "missing"].value as? String, "Dial selection")
+        XCTAssertEqual((app.buttons[browsed ?? "missing"].value as? String)?.hasSuffix("Dial selection"), true)
         saveFullscreenScreenshot("After full screen, same dial angle and draft")
 
         // Reentering exercises both branches a second time; Follow is the same
@@ -511,7 +511,13 @@ final class ControllerUITests: XCTestCase {
         XCTAssertEqual(browsed?.hasPrefix("C2, "), true, "A clockwise turn moves to the next slot, not past it")
         let key = app.buttons[browsed ?? "missing"]
         XCTAssertTrue(key.exists)
-        XCTAssertEqual(key.value as? String, "Dial selection", "Drag browses without activating")
+        XCTAssertEqual(key.value as? String, "Done, Dial selection", "Drag browses without activating, and the key still says what its chat is doing")
+        // Each key's light says what its chat is doing; the value carries it for VoiceOver.
+        XCTAssertEqual(app.buttons["C1, Controller app"].value as? String, "Thinking, Current chat")
+        XCTAssertEqual(app.buttons["C3, Design studio"].value as? String, "Needs input")
+        XCTAssertEqual(app.buttons["C4, Weekly review"].value as? String, "Idle")
+        XCTAssertEqual(app.buttons["C5, Build notes"].value as? String, "Error")
+        XCTAssertEqual(app.staticTexts["controller.activity"].label, "Thinking", "The open chat's state is named beside its title")
         right.press(forDuration: 0.10, thenDragTo: top)
         XCTAssertEqual(chat.value as? String, first, "Reverse drag returns to the original slot")
         // A swipe straight across the face goes the way the finger went,

@@ -256,6 +256,19 @@ import Foundation
         expect(!launchOnly.supports("newChat"), "Unadvertised Codex launch routes remain disabled")
         launchOnly.capabilities = ["newChat"]; launchOnly.installed = false
         expect(!launchOnly.supports("newChat"), "Missing Codex installation cannot enable a launch route")
+        // What a chat is doing, from the state its app reports.
+        for (state, expected) in [("Working", ChatActivity.thinking), ("Running", .thinking), ("Unread", .complete),
+                                  ("Awaiting input", .needsInput), ("Needs input", .needsInput), ("Something went wrong", .error),
+                                  ("Idle", .idle), ("Open", .idle), ("Current", .idle), ("Saved", .idle)] {
+            expect(ChatActivity(state: state) == expected, "\(state) is \(expected.rawValue)")
+            expect(ChatRecord(id: "x", title: "t", state: state).activity == expected, "A chat reads its own state as \(expected.rawValue)")
+        }
+        expect(ChatActivity(state: "  WORKING ") == .thinking, "Case and spacing do not matter")
+        expect(ChatActivity(state: "") == .idle && ChatActivity(state: "Something new") == .idle, "A state the app does not know is idle, never a claim of work")
+        expect(Set(ChatActivity.allCases.map(\.label)).count == 5 && ChatActivity.allCases.allSatisfy { !$0.meaning.isEmpty }, "Each light has its own name and meaning")
+        expect(ChatActivity.needsInput.wantsAttention && ChatActivity.error.wantsAttention && !ChatActivity.thinking.wantsAttention && !ChatActivity.complete.wantsAttention && !ChatActivity.idle.wantsAttention,
+               "Only waiting and errors ask for attention")
+
         // Restarting an app's background service is offered only while that service cannot be reached.
         var service = ProviderInfo(id: "codex", name: "Codex", installed: true, readiness: "unavailable", capabilities: ["restartService"], reason: nil)
         expect(service.supports("restartService"), "An unreachable service can be restarted when the Mac offers it")

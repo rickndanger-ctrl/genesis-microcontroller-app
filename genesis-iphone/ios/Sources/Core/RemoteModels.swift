@@ -185,6 +185,50 @@ struct ChatRecord: Codable, Identifiable, Equatable {
     var id: String
     var title: String
     var state: String
+    /// What the chat is doing, which is what its key's light shows.
+    var activity: ChatActivity { ChatActivity(state: state) }
+}
+
+/// What a chat is doing, read from the state its app reports on the Mac.
+/// The key lights mean one thing each: white is idle, blue is working, green
+/// has finished since you last looked, yellow is waiting on you, red is an error.
+enum ChatActivity: String, CaseIterable, Equatable {
+    case idle, thinking, complete, needsInput, error
+
+    /// The states the Mac companion reports today. Anything it does not
+    /// recognise is idle: a light must never claim work it cannot see.
+    init(state: String) {
+        switch state.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() {
+        case "working", "running", "thinking", "answering": self = .thinking
+        case "unread", "complete", "completed", "done": self = .complete
+        case "awaiting input", "needs input", "waiting": self = .needsInput
+        case "something went wrong", "error", "failed": self = .error
+        default: self = .idle
+        }
+    }
+
+    /// One or two words, for the chat header and for VoiceOver.
+    var label: String {
+        switch self {
+        case .idle: return "Idle"
+        case .thinking: return "Thinking"
+        case .complete: return "Done"
+        case .needsInput: return "Needs input"
+        case .error: return "Error"
+        }
+    }
+    /// A sentence for the legend in Settings.
+    var meaning: String {
+        switch self {
+        case .idle: return "Nothing is running."
+        case .thinking: return "The agent is working."
+        case .complete: return "Finished since you last opened it."
+        case .needsInput: return "Waiting for you to answer or approve."
+        case .error: return "Something went wrong, or a Send is unconfirmed."
+        }
+    }
+    /// Lights that mean "look at this" are stronger than the ones that do not.
+    var wantsAttention: Bool { self == .needsInput || self == .error }
 }
 struct ControllerChatHistory: Codable, Equatable {
     var entries: [ChatRecord] = []

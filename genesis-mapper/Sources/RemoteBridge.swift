@@ -208,7 +208,7 @@ import CoreImage.CIFilterBuiltins
             museLeftOut=[];museChatHidden=muse.needsWiderWindow();museChatHiddenCheckedAt=Date();return []
         }
         museLeftOut=listing.ambiguous;museChatHidden=false;museChatHiddenCheckedAt=Date()
-        return listing.chats.map{RemoteChat(id:RemotePolicy.chatID("muse",$0.title),title:$0.title,state:$0.current ? "Current":$0.unread ? "Unread":"Open")}
+        return listing.chats.map{RemoteChat(id:RemotePolicy.chatID("muse",$0.title),title:$0.title,state:MuseChatList.state(current:$0.current,unread:$0.unread,answering:listing.answering))}
     }
     /// Opens a provider's app so someone away from the Mac is not stuck at
     /// "open it on the Mac". It only opens the app; it sends and changes nothing.
