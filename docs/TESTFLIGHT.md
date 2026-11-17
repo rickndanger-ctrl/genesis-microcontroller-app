@@ -1,6 +1,6 @@
 # Shipping through TestFlight
 
-Agent Micro Controller is being prepared for iPhone and iPad distribution through TestFlight. This document separates the completed preparation from uploading and making a build available to testers. The source repository remains private.
+Agent Micro Controller is being prepared for iPhone and iPad distribution through TestFlight. This document separates the completed preparation from uploading and making a build available to testers. The source repository was made public on November 16, 2026, at the owner’s request, after a scan of every commit found no credentials or private addresses.
 
 ## Current status
 
@@ -52,7 +52,7 @@ The archive is a build artifact, not an uploaded TestFlight build. App Store dis
 
 ## Remaining release steps
 
-1. Privacy and support URLs are saved and publicly reachable. Keep the pages aligned with future feature changes; a link into this private source repository is not a public privacy policy.
+1. Privacy and support URLs are saved and publicly reachable. Keep the pages aligned with future feature changes; keep using the dedicated site as the privacy address, not a link into the source repository, so the address stays the same if the repository is reorganised.
 2. Complete the account's App Privacy answers and review the encryption declaration against the final build.
 3. Fill in the feedback email and reviewer contact name and phone. Reviewer sign-in is not required; use the demo instructions above.
 4. The owner approved use of the existing API key; build 32 uploaded and passed processing. Its Apple build record is verified above. Tester assignment and availability are separate from this processing result.
