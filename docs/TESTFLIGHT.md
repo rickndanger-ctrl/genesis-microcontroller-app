@@ -1,6 +1,16 @@
 # Shipping through TestFlight
 
-The iPhone and iPad app is distributed with a TestFlight link. The Mac companion is a notarized download on the GitHub release page. This file holds what Apple asks for, so each release is a matter of pasting it in.
+Agent Micro Controller is being prepared for iPhone and iPad distribution through TestFlight. This document separates the completed preparation from uploading and making a build available to testers. The source repository remains private.
+
+## Current status
+
+- **App Store Connect listing created:** Agent Micro Controller, Apple app ID `6835749940`, bundle ID `com.richardholguin.GenesisController`.
+- **Release archive built:** version **0.5.2 (32)** at `genesis-iphone/build/AgentMicroController-build32.xcarchive`. Its signature, version and embedded privacy manifest have been verified locally.
+- **Public privacy and support site live:** privacy <https://rickndanger-ctrl.github.io/agent-micro-controller-site/privacy/> and support <https://rickndanger-ctrl.github.io/agent-micro-controller-site/> both return HTTP 200 without sign-in and were checked in Chrome. The URLs are saved in App Store Connect. Only the support/policy site is public; app source remains private.
+- **Local validation:** Release archive succeeded, code signature verifies, embedded bundle/version/manifest match, and all 367 remote core checks pass. These are local checks, not Apple processing or physical-device acceptance.
+- **Listing preparation:** review demo notes saved, reviewer sign-in disabled, and App Store release set to manual. The initial store-version draft remains 1.0; the TestFlight candidate is 0.5.2 (32).
+- **Not yet done:** App Store distribution export, upload, Apple processing and TestFlight distribution. Export/upload awaits the owner's approval.
+- **Separate later decisions:** adding external testers, submitting for Beta App Review and enabling a public TestFlight link. None is implied by approving an upload. App Store release is also separate.
 
 ## Review notes (paste into "Beta App Review Information")
 
@@ -14,29 +24,39 @@ Permissions: Microphone and Speech Recognition are used only for dictating a dra
 
 Pair with the Agent Micro Controller companion on your Mac, assign chats to the six keys, and try opening a chat, dictating a draft and sending it. Tell us about any key that needs a second press, a dial that skips, or a Send that reports the wrong result.
 
-## Checklist for the first external build
+## Archive preparation
 
-- App Store Connect listing created with the name **Agent Micro Controller** for the app ID `com.richardholguin.GenesisController`. The ID is internal and cannot be changed after the listing exists.
-- Privacy policy address set to this repository's `PRIVACY.md`.
-- Encryption question answered: the app uses only standard HTTPS, which is exempt.
-- Feedback email and a contact name and phone for the reviewer filled in.
-- Reviewer sign-in: not required. Leave it unticked and rely on the demo above.
-- A build uploaded and, after processing, added to an external group with the public link turned on.
+- The app icon comes from the Blender deck pieces (`genesis-iphone/design/build_app_icon.py`).
+- `ITSAppUsesNonExemptEncryption` is false in the app's Info: the app uses standard HTTPS.
+- `genesis-iphone/ios/Resources/PrivacyInfo.xcprivacy` is bundled in build 32. It declares no tracking or collected data and UserDefaults access for the app's own settings (`CA92.1`).
+- The reviewer demo, review notes and "What to Test" copy are prepared above.
+- `genesis-iphone/scripts/record-demo.sh` can record screenshots and a preview video from a simulator. Capture and review the intended store assets before attaching them.
 
-Builds expire 90 days after upload. Upload a fresh one before then to keep the link working.
+To reproduce the build 32 archive from the repository root, regenerate the project so it includes the privacy manifest, then archive:
 
-## Ready
+```sh
+xcodegen generate --spec genesis-iphone/project.yml
+xcodebuild \
+  -project genesis-iphone/GenesisController.xcodeproj \
+  -scheme GenesisController \
+  -configuration Release \
+  -destination 'generic/platform=iOS' \
+  -archivePath genesis-iphone/build/AgentMicroController-build32.xcarchive \
+  DEVELOPMENT_TEAM=7FQA384X2F \
+  archive
+```
 
-- App icon: built from the Blender deck pieces (`genesis-iphone/design/build_app_icon.py`).
-- Encryption: `ITSAppUsesNonExemptEncryption` is set to false in the app's Info, so uploads are not held for that question.
-- A Release archive builds: `xcodebuild -project genesis-iphone/GenesisController.xcodeproj -scheme GenesisController -configuration Release -destination generic/platform=iOS -archivePath build/AgentMicroController.xcarchive archive`.
-- Demo for the reviewer, review notes and "What to Test" text: above.
-- Screenshots and a preview video: `genesis-iphone/scripts/record-demo.sh` records the demo run on any simulator.
+The archive is a build artifact, not an uploaded TestFlight build. App Store distribution export must use the appropriate distribution signing and provisioning. Anyone building their own app from source must use their own bundle identifier and signing team.
 
-## Still needed from the account owner
+## Remaining release steps
 
-- Create the App Store Connect listing (My Apps → + → New App): platform iOS, name **Agent Micro Controller**, bundle ID `com.richardholguin.GenesisController`, any SKU. This cannot be done by a script; Apple only allows it on the website.
-- A public web address for the privacy policy. This repository is private, so a link to `PRIVACY.md` here will not open for Apple or testers. Either make the repository public or publish that one page somewhere public.
-- Upload the archive: Xcode → Window → Organizer → Distribute App → TestFlight, or from the command line with an App Store Connect API key (`xcodebuild -exportArchive` with `-authenticationKeyPath`, `-authenticationKeyID` and `-authenticationKeyIssuerID`).
-- The bundle identifier and team are written into `genesis-iphone/project.yml`. Anyone building from source must change both.
-- The third-party product names shown as tabs (Claude, Codex, Muse) are used to say what the controller works with. No logos are used; keep it that way.
+1. Privacy and support URLs are saved and publicly reachable. Keep the pages aligned with future feature changes; a link into this private source repository is not a public privacy policy.
+2. Complete the account's App Privacy answers and review the encryption declaration against the final build.
+3. Fill in the feedback email and reviewer contact name and phone. Reviewer sign-in is not required; use the demo instructions above.
+4. After owner approval, export and upload the archive through Xcode Organizer or the approved App Store Connect upload workflow. Verify the uploaded version/build and wait for Apple's processing result; a successful local export does not establish either.
+5. Add the processed build to an approved TestFlight testing group only when authorized. Check tester availability separately from upload success.
+6. Before external testing, confirm testers can obtain and set up the matching Mac companion, provide the review notes, and obtain the owner's approval for the external group. Submit for Beta App Review as required. Enable a public link only with separate approval.
+
+There is no TestFlight download link to publish yet. Once a build is available, record the actual group and distribution state here without including credentials or personal device details.
+
+The third-party product names shown as tabs (Claude, Codex, Muse) describe compatibility. No logos are used; keep it that way.

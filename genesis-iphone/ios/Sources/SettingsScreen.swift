@@ -117,6 +117,14 @@ struct SettingsScreen: View {
                     Text("Live voice appears when the selected provider supports verified two-way phone audio. A connected Mac may still need its app opened or its screen unlocked.")
                         .font(.caption).foregroundStyle(.secondary)
                 }
+                Section("Privacy & support") {
+                    Link(destination: URL(string: "https://rickndanger-ctrl.github.io/agent-micro-controller-site/privacy/")!) {
+                        Label("Privacy policy", systemImage: "hand.raised")
+                    }
+                    Link(destination: URL(string: "https://rickndanger-ctrl.github.io/agent-micro-controller-site/")!) {
+                        Label("Help & support", systemImage: "questionmark.circle")
+                    }
+                }
             }
             .navigationTitle("Your controller")
             .toolbar { ToolbarItem(placement: .confirmationAction) { Button("Done") { ControllerSound.shared.keyClick(); dismiss() } } }
