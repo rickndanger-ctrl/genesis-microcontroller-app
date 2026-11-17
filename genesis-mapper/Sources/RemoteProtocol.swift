@@ -105,6 +105,13 @@ enum RemotePolicy {
     }
 }
 
+/// What the Muse connection offers. "newChat" reuses the shared action ID so
+/// the phone's existing key and icon apply; in Muse it opens a new side chat.
+enum RemoteMuse {
+    static let capabilities = ["openChat","sendPrompt","nativeVoice","newChat","artifacts"]
+    static let actions = [RemoteAction(id:"newChat",title:"New side chat",group:"Navigate",detail:"Open a new side chat in Muse.",requiresChat:false,changesChat:true)]
+}
+
 enum RemoteComposerPolicy {
     // Electron's empty editor may expose a newline through AXValue. Only
     // whitespace is blank; an unreadable value or any real text is protected.

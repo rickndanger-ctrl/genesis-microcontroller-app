@@ -19,4 +19,6 @@ xcrun swiftc "$ROOT/Sources/ReadSnapshotCache.swift" "$ROOT/Sources/ClaudeNaviga
 
 xcrun swiftc "$ROOT/Sources/RemoteNavigationLease.swift" "$ROOT/tests/RemoteNavigationLeaseTests.swift" -o "$ROOT/test-build/remote-navigation-lease"
 "$ROOT/test-build/remote-navigation-lease"
+xcrun swiftc -parse-as-library "$ROOT/Sources/MuseChatList.swift" "$ROOT/tests/MuseChatListTests.swift" -o "$ROOT/test-build/muse-chat-list"
+"$ROOT/test-build/muse-chat-list"
 sh "$ROOT/test-display-session.sh"

@@ -14,6 +14,7 @@ import CoreImage.CIFilterBuiltins
     private(set) var store:RemoteStore?
     private var server:RemoteHTTPServer?
     private let access=ClaudeAccess()
+    private let muse=MuseAccess()
     private let menuNavigation=RemoteMenuNavigation()
     private var displaySession=RemoteDisplaySession()
     private var displayExpiryTask:Task<Void,Never>?
@@ -97,7 +98,13 @@ import CoreImage.CIFilterBuiltins
                 let capabilities=RemoteCodexAvailability.capabilities(installed:installed,running:running,unlocked:!isLocked,accessibility:AXIsProcessTrusted(),inventoryAvailable:codexInventoryAvailable,launchIDs:CodexNativeActionPolicy.pageLinks.keys.sorted(),nativeIDs:CodexNativeActions.descriptors.map(\.id),queueAvailable:queueAvailable)
                 return RemoteProvider(id:provider,name:"Codex",installed:installed,readiness:readiness,capabilities:capabilities,reason:reason,actions:CodexNativeActions.descriptors)
             }
-            if provider != "claude" {return RemoteProvider(id:provider,name:provider=="codex" ? "Codex":"Muse",installed:installed,readiness:"unavailable",capabilities:["artifacts"],reason:"Registered artifacts work. Existing-chat controls and native phone voice are not verified for this provider yet.")}
+            if provider=="muse" {
+                // Chats open through Accessibility. A draft is pasted into Muse's
+                // message box and read back before Return; see MuseAccess.
+                let readiness=isLocked ? "locked":!AXIsProcessTrusted() ? "needsAccessibility":!running ? "closed":"ready"
+                let reason=readiness=="ready" ? "Chats, Send, New side chat and Call are connected. Send briefly brings Muse to the front and uses the clipboard, which is restored afterwards. Chats that share a title are left out.":readiness=="locked" ? "Unlock this Mac to use Muse.":readiness=="closed" ? "Open Muse on this Mac.":"Enable Accessibility for Genesis Agent Micro Controller."
+                return RemoteProvider(id:provider,name:"Muse",installed:installed,readiness:readiness,capabilities:readiness=="ready" ? RemoteMuse.capabilities:["artifacts"],reason:reason,actions:RemoteMuse.actions)
+            }
             let readiness=isLocked ? "locked":!AXIsProcessTrusted() ? "needsAccessibility":!running ? "closed":"ready"
             let reason=readiness=="ready" ? "Native live voice is not yet available on the phone.":readiness=="locked" ? "Unlock this Mac to use desktop controls.":readiness=="closed" ? "Open Claude on this Mac.":"Enable Accessibility for Genesis Agent Micro Controller."
             return RemoteProvider(id:provider,name:"Claude",installed:installed,readiness:readiness,capabilities:readiness=="ready" ? ["openChat","sendPrompt","stop","artifacts","menuNavigation"] + RemoteActionCatalog.claude.map{$0.action.id}:["artifacts"],reason:reason,actions:RemoteActionCatalog.claude.map(\.action))
@@ -124,6 +131,29 @@ import CoreImage.CIFilterBuiltins
             }
             return []
         }
+    }
+    func loadMuseChats() async -> [RemoteChat] {
+        guard enabled,!isLocked,AXIsProcessTrusted(),let listing=await muse.listing() else{return []}
+        return listing.chats.map{RemoteChat(id:RemotePolicy.chatID("muse",$0.title),title:$0.title,state:$0.current ? "Current":$0.unread ? "Unread":"Open")}
+    }
+    private func executeMuse(_ command:RemoteCommand) async -> RemoteReceipt {
+        func result(_ outcome:MuseAccess.Outcome)->RemoteReceipt {RemoteReceipt(id:command.id,status:outcome.status,message:outcome.message)}
+        guard !isLocked,AXIsProcessTrusted() else{return result(.failed("Unlock the Mac and enable Genesis Accessibility first."))}
+        guard let pid=muse.app?.processIdentifier else{return result(.failed("Open Muse on this Mac first."))}
+        func contextOK()->Bool {self.enabled && !self.isLocked && AXIsProcessTrusted() && self.muse.app?.processIdentifier==pid}
+        if command.action=="nativeVoice" {return result(await muse.startCall(contextIsCurrent:contextOK))}
+        if command.action=="newChat" {return result(await muse.newSideChat(contextIsCurrent:contextOK))}
+        guard ["openChat","sendPrompt"].contains(command.action) else{return result(.failed("This action is not connected for Muse."))}
+        guard let id=command.chatID,let listing=await muse.listing() else{return result(.failed("Muse’s chat list could not be read. Open Muse on this Mac and refresh."))}
+        // The opaque ID only names a title. The fresh listing above decides
+        // whether that title still points at exactly one chat.
+        guard let target=listing.chats.first(where:{RemotePolicy.chatID("muse",$0.title)==id}) else {
+            let shared=listing.ambiguous.contains{RemotePolicy.chatID("muse",$0)==id}
+            return result(.failed(shared ? "More than one Muse chat has this title. Rename one in Muse before using its key.":"This Muse chat is no longer in the chat list. Refresh its mapping; nothing was opened."))
+        }
+        if command.action=="openChat" {return result(await muse.open(target.title,contextIsCurrent:contextOK))}
+        guard let prompt=command.text else{return result(.failed("The prompt is empty."))}
+        return result(await muse.send(prompt,to:target.title,contextIsCurrent:contextOK))
     }
     func refreshChats() {Task {chats=loadChats("claude")}}
     func loadChats(_ provider:String,deadline:Double?=nil)->[RemoteChat] {
@@ -273,6 +303,7 @@ import CoreImage.CIFilterBuiltins
             if request.method=="GET",path=="/v1/chats" {
                 guard RemotePolicy.providers.contains(parameter("provider")) else{return .error(422,"Unknown provider.")}
                 if parameter("provider")=="codex" {return .json(["chats":await loadCodexChats()])}
+                if parameter("provider")=="muse" {return .json(["chats":await loadMuseChats()])}
                 return .json(["chats":loadChats(parameter("provider"))])
             }
             if request.method=="GET",path=="/v1/profile" {return .json(try seededProfile(parameter("provider")))}
@@ -424,6 +455,7 @@ import CoreImage.CIFilterBuiltins
             }
             return NSWorkspace.shared.open(url) ? result("confirmed","Opened artifact on this Mac."):result("failed","The Mac could not open this artifact.")
         }
+        if command.provider=="muse" {return await executeMuse(command)}
         if command.provider=="codex" {
             if command.action=="sendPrompt" {
                 let home=FileManager.default.homeDirectoryForCurrentUser
@@ -590,7 +622,7 @@ struct RemotePairingView:View {
             ForEach(bridge.artifacts.filter{$0.provider==provider},id:\.id) { item in HStack {Image(systemName:item.kind=="web" ? "globe":"doc");Text(item.title);Spacer();Button("Remove"){bridge.removeArtifact(item.id)}}.padding(8).background(.quaternary,in:RoundedRectangle(cornerRadius:8)) }
             Divider()
             Text(bridge.lastResult).font(.callout).textSelection(.enabled)
-            Text("Claude desktop controls require Claude to be open, an unlocked Mac, and Accessibility. Codex supports saved-chat selection, phone Send, and available Mac menu controls. Stop and native live voice are not connected for Codex; native live voice is also unavailable for Claude. Muse currently provides the artifact shelf.").font(.caption).foregroundStyle(.secondary)
+            Text("Claude desktop controls require Claude to be open, an unlocked Mac, and Accessibility. Codex supports saved-chat selection, phone Send, and available Mac menu controls. Stop and native live voice are not connected for Codex; native live voice is also unavailable for Claude. Muse needs to be open: its chats, Send, New side chat and Call are connected, and side chats that share a title are left out.").font(.caption).foregroundStyle(.secondary)
         }.padding(28)}.frame(minWidth:740,minHeight:640)
     }
 }

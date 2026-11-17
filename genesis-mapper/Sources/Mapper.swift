@@ -302,6 +302,15 @@ final class ClaudeAccess {
             guard fields.count==1,contextOK() else {return "No unique prompt field is available."}
             return AXUIElementSetAttributeValue(fields[0],kAXFocusedAttribute as CFString,kCFBooleanTrue) == .success ? "Prompt focused" : "Could not focus the prompt."
         }
+        if action.id=="permissions" {
+            // Prefer the chooser's place beside "Model:" to its name, which changes with the mode.
+            let models=all.filter {value($0,kAXRoleAttribute) as? String==kAXPopUpButtonRole && text($0).hasPrefix("Model:")}
+            if models.count==1,let parent=value(models[0],kAXParentAttribute),CFGetTypeID(parent)==AXUIElementGetTypeID(),
+               let row=value(parent as! AXUIElement,kAXChildrenAttribute) as? [AXUIElement],
+               let index=ControllerAction.permissionChooser(among:row.map {(role:value($0,kAXRoleAttribute) as? String ?? "",text:text($0))}) {
+                candidates=[row[index]]
+            }
+        }
         if action.id=="rename" {candidates=all.filter{text($0)==title+", rename session" && value($0,kAXRoleAttribute) as? String==kAXButtonRole}}
         if action.id=="options" {
             // Scope to the session toolbar, not an identically labelled sidebar row.
