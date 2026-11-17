@@ -57,6 +57,9 @@ final class HTTPFixture: @unchecked Sendable {
         lock.lock(); actionResults[action] = result; lock.unlock()
     }
     func dropAction(_ action: String, value: Bool) { lock.lock(); if value { droppedActions.insert(action) } else { droppedActions.remove(action) }; lock.unlock() }
+    private var leftOutTitles: [String] = []
+    /// Titles the Mac reports as shared by more than one chat.
+    func setLeftOut(_ titles: [String]) { lock.lock(); leftOutTitles = titles; lock.unlock() }
     private var pairingCode: String?
     private(set) var pairedDeviceNames: [String] = []
     /// Makes one single-use pairing code valid, as showing a QR code would.
@@ -163,7 +166,10 @@ final class HTTPFixture: @unchecked Sendable {
         }
         if path == "/v1/chats" {
             let id = queryProvider == "codex" ? codexChatID : "chat-\(name)"
-            respond(connection, code: 200, json: ["chats":[["id":id,"title":queryProvider == "codex" ? "Existing Codex thread":"Fixture chat","state":"Idle"]]], holdPath: path); return
+            lock.lock(); let shared = leftOutTitles; lock.unlock()
+            var listing: [String: Any] = ["chats":[["id":id,"title":queryProvider == "codex" ? "Existing Codex thread":"Fixture chat","state":"Idle"]]]
+            if !shared.isEmpty { listing["leftOut"] = shared }
+            respond(connection, code: 200, json: listing, holdPath: path); return
         }
         if path == "/v1/artifacts" { respond(connection, code: 200, json: ["artifacts":[]], holdPath: path); return }
         if path == "/v1/navigation" {
@@ -832,6 +838,52 @@ final class FixtureCredentials: ControllerCredentialVault {
         }
         expect(!codexStore.canMapChats && codexStore.chatAvailabilityMessage == unavailableCodex.reason && codexStore.availableShortcuts == [.artifacts],
                "Unsupported Codex reports the actual limitation instead of claiming there are no chats")
+
+        // The Mac says which chats it left out for sharing a title.
+        codexFixture.setProviders([claudeInfo,codexInfo])
+        codexFixture.setLeftOut(["Hello","Muse Lens initialization"])
+        for _ in 0..<100 {
+            await codexStore.refresh()
+            if !codexStore.leftOutChatTitles.isEmpty { break }
+            try? await Task.sleep(nanoseconds:10_000_000)
+        }
+        expect(codexStore.leftOutChatTitles == ["Hello","Muse Lens initialization"] && codexStore.leftOutChatsNotice?.contains("2 titles") == true,
+               "The phone reports which chat titles the Mac left out")
+        codexFixture.setLeftOut([])
+        for _ in 0..<100 {
+            await codexStore.refresh()
+            if codexStore.leftOutChatTitles.isEmpty { break }
+            try? await Task.sleep(nanoseconds:10_000_000)
+        }
+        expect(codexStore.leftOutChatsNotice == nil, "The notice goes once the titles are unique again")
+        codexFixture.setProviders([claudeInfo,unavailableCodex]); await codexStore.refresh()
+
+        // The Mac can offer to restart an app's background service while it cannot be reached.
+        expect(!codexStore.canRestartProviderService, "No restart is offered unless the Mac offers one")
+        var lostService = unavailableCodex; lostService.capabilities = ["restartService","artifacts"]
+        lostService.reason = "Codex’s background service lost its connection file."
+        codexFixture.setProviders([claudeInfo,lostService])
+        for _ in 0..<100 {
+            await codexStore.refresh()
+            if codexStore.canRestartProviderService { break }
+            try? await Task.sleep(nanoseconds:10_000_000)
+        }
+        expect(codexStore.canRestartProviderService && !codexStore.canOpenProviderApp, "A lost service offers a restart, not an app launch")
+        func restartCommands() -> Int {
+            codexFixture.received.filter { $0.0.hasPrefix("POST /v1/commands") && String(data:$0.2,encoding:.utf8)?.contains("\"restartService\"") == true }.count
+        }
+        let restartsBefore = restartCommands()
+        codexFixture.setProviders([claudeInfo,codexInfo])
+        await codexStore.restartProviderService()
+        expect(restartCommands() == restartsBefore + 1, "Restart sends exactly one command to the Mac")
+        for _ in 0..<100 {
+            if codexStore.providerInfo?.readiness == "ready" { break }
+            try? await Task.sleep(nanoseconds:10_000_000)
+        }
+        expect(codexStore.providerInfo?.readiness == "ready" && !codexStore.canRestartProviderService,
+               "After a restart the phone asks again and stops offering it")
+        await codexStore.restartProviderService()
+        expect(restartCommands() == restartsBefore + 1, "A service that answers is never sent a restart")
 
         let queueFixture = HTTPFixture(name:"fixture-codex-queue"); try await queueFixture.start(); defer { queueFixture.stop() }
         var queueProvider = codexInfo; queueProvider.capabilities.append("sendPrompt")

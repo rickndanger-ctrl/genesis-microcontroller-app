@@ -256,6 +256,18 @@ import Foundation
         expect(!launchOnly.supports("newChat"), "Unadvertised Codex launch routes remain disabled")
         launchOnly.capabilities = ["newChat"]; launchOnly.installed = false
         expect(!launchOnly.supports("newChat"), "Missing Codex installation cannot enable a launch route")
+        // Restarting an app's background service is offered only while that service cannot be reached.
+        var service = ProviderInfo(id: "codex", name: "Codex", installed: true, readiness: "unavailable", capabilities: ["restartService"], reason: nil)
+        expect(service.supports("restartService"), "An unreachable service can be restarted when the Mac offers it")
+        expect(!service.supports("openChat") && !service.supports("sendPrompt"), "Offering a restart enables nothing else")
+        service.readiness = "ready"
+        expect(!service.supports("restartService"), "A service that answers is never restarted from the phone")
+        service.readiness = "locked"
+        expect(!service.supports("restartService"), "A locked Mac does not restart a service")
+        service.readiness = "unavailable"; service.installed = false
+        expect(!service.supports("restartService"), "A missing app has no service to restart")
+        service.installed = true; service.capabilities = []
+        expect(!service.supports("restartService"), "The phone never offers a restart the Mac did not offer")
         let localMic = DictationControlPresentation.make(provider:.codex,info:codex,paired:true,hasChat:true,busy:false,recording:false,finalizing:false)
         expect(localMic.label == "HOLD TO TALK" && localMic.icon == "mic", "Eligible Codex offers an actual local Hold-to-talk control")
         expect(localMic.summary?.contains("iPhone draft") == true && localMic.explanation?.contains("Nothing is sent") == true,

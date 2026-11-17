@@ -9,6 +9,9 @@ final class ControllerStore: ObservableObject {
     @Published private(set) var selectedProvider: ProviderID
     @Published private(set) var status: HostStatus?
     @Published private(set) var chats: [ChatRecord] = []
+    /// Titles the Mac left out of `chats` because more than one chat carries them.
+    @Published private(set) var leftOutChatTitles: [String] = []
+    var leftOutChatsNotice: String? { CompanionSupport.leftOutNotice(titles: leftOutChatTitles, app: selectedProvider.name) }
     @Published private(set) var profile: RemoteProfile
     @Published private(set) var selectedChat: ChatRecord?
     @Published var draft = "" { didSet { persistDraft(); publishGlassesDraft() } }
@@ -159,6 +162,16 @@ final class ControllerStore: ObservableObject {
         try? await Task.sleep(nanoseconds: 2_000_000_000)
         await refresh()
     }
+    /// The selected app's background service cannot be reached, and the Mac can restart it for us.
+    var canRestartProviderService: Bool { !isBusy && providerInfo?.supports("restartService") == true }
+    /// Restarts the selected app's background service on the Mac. It opens no chat and sends nothing.
+    func restartProviderService() async {
+        guard canRestartProviderService else { return }
+        let receipt = await execute(action: "restartService", chatID: nil)
+        // Whatever came back, ask the Mac what it has now: a slow restart may have worked.
+        if receipt?.isConfirmed != true { try? await Task.sleep(nanoseconds: 3_000_000_000) }
+        await refresh()
+    }
     /// Asks the selected Mac what it can find in the apps it controls.
     func selfCheck() async throws -> SelfCheckReport {
         if isDemo { return Self.demoSelfCheck }
@@ -239,7 +252,7 @@ final class ControllerStore: ObservableObject {
         glasses.stop("Selection changed. Turn on Follow for this Mac and provider.")
         glassesConfirmedChatID = nil
         dictationIntent &+= 1; speech.cancel(); captureRoute = nil
-        gate.advance(); status = nil; chats = []; artifacts = []; lastReceipt = nil; lastError = nil; requestedPanel = nil
+        gate.advance(); status = nil; chats = []; leftOutChatTitles = []; artifacts = []; lastReceipt = nil; lastError = nil; requestedPanel = nil
         isBusy = false; isRefreshingChats = false; sendReady = false
         navigation = .inactive; navigationGeneration = nil
     }
@@ -394,6 +407,7 @@ final class ControllerStore: ObservableObject {
             query: [URLQueryItem(name: "provider", value: provider.rawValue)])
         guard gate.accepts(generation) else { return }
         chats = list.chats
+        leftOutChatTitles = Array((list.leftOut ?? []).prefix(20))
         if let match = list.chats.first(where: { $0.id == selectedChat?.id }) { selectedChat = match }
     }
 

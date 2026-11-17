@@ -36,6 +36,8 @@ import CoreImage.CIFilterBuiltins
     private var screenLocked=false
     private var recentChats:[String:RemoteChat]=[:]
     private var ambiguousClaudeIDs=Set<String>()
+    /// Titles carried by more than one chat at the last listing, per app.
+    private var claudeLeftOut=Set<String>(),museLeftOut=Set<String>()
     private var codexChats:[RemoteChat]=[]
     private var codexInventoryAvailable=false
     private var codexInventoryCheckedAt:Date?
@@ -110,8 +112,10 @@ import CoreImage.CIFilterBuiltins
                 let nativeReady = !isLocked && running && AXIsProcessTrusted()
                 let queueAvailable=NSWorkspace.shared.urlForApplication(withBundleIdentifier:bundle).flatMap(CodexQueuePolicy.executable) != nil && CodexQueuePolicy.usesDefaultHome(environment:ProcessInfo.processInfo.environment,home:FileManager.default.homeDirectoryForCurrentUser)
                 let sendReason=queueAvailable ? "Phone Send queues to the exact selected chat; delivery is not yet confirmed.":"Phone Send needs the bundled Codex queue command and default account storage."
-                let reason=isLocked ? "Unlock this Mac to open Codex.":!installed ? "Install Codex on this Mac.":codexInventoryAvailable ? (nativeReady ? "Saved chat selection and native Mac menu controls are available. Menus act on the current Codex view on the Mac. "+sendReason+" Stop and live voice are not connected.":"New chat, Settings, and Skills can open Codex on this Mac. Other menu controls need Codex running with Accessibility enabled for Agent Micro Controller. "+sendReason+" Stop and live voice are not connected."):codexInventoryCheckedAt==nil ? "Checking this Mac's saved Codex chats…":"The current-account Codex chat inventory is unavailable. Open Codex on this Mac and refresh."
-                let capabilities=RemoteCodexAvailability.capabilities(installed:installed,running:running,unlocked:!isLocked,accessibility:AXIsProcessTrusted(),inventoryAvailable:codexInventoryAvailable,launchIDs:CodexNativeActionPolicy.pageLinks.keys.sorted(),nativeIDs:CodexNativeActions.descriptors.map(\.id),queueAvailable:queueAvailable)
+                let reason=isLocked ? "Unlock this Mac to open Codex.":!installed ? "Install Codex on this Mac.":codexInventoryAvailable ? (nativeReady ? "Saved chat selection and native Mac menu controls are available. Menus act on the current Codex view on the Mac. "+sendReason+" Stop and live voice are not connected.":"New chat, Settings, and Skills can open Codex on this Mac. Other menu controls need Codex running with Accessibility enabled for Agent Micro Controller. "+sendReason+" Stop and live voice are not connected."):codexInventoryCheckedAt==nil ? "Checking this Mac's saved Codex chats…":CodexService.reason(codexService) ?? "The current-account Codex chat inventory is unavailable. Open Codex on this Mac and refresh."
+                // Offered only once a check has failed, and only when the tool that restarts it is the one inside the installed app.
+                let restart = !isLocked && installed && codexInventoryCheckedAt != nil && queueAvailable && CodexService.canRestart(codexService) ? ["restartService"]:[]
+                let capabilities=restart+RemoteCodexAvailability.capabilities(installed:installed,running:running,unlocked:!isLocked,accessibility:AXIsProcessTrusted(),inventoryAvailable:codexInventoryAvailable,launchIDs:CodexNativeActionPolicy.pageLinks.keys.sorted(),nativeIDs:CodexNativeActions.descriptors.map(\.id),queueAvailable:queueAvailable)
                 return RemoteProvider(id:provider,name:"Codex",installed:installed,readiness:readiness,capabilities:capabilities,reason:reason,actions:CodexNativeActions.descriptors)
             }
             if provider=="muse" {
@@ -189,11 +193,56 @@ import CoreImage.CIFilterBuiltins
         return report
     }
     func loadMuseChats() async -> [RemoteChat] {
-        guard enabled,!isLocked,AXIsProcessTrusted(),let listing=await muse.listing() else{return []}
+        guard enabled,!isLocked,AXIsProcessTrusted(),let listing=await muse.listing() else{museLeftOut=[];return []}
+        museLeftOut=listing.ambiguous
         return listing.chats.map{RemoteChat(id:RemotePolicy.chatID("muse",$0.title),title:$0.title,state:$0.current ? "Current":$0.unread ? "Unread":"Open")}
     }
     /// Opens a provider's app so someone away from the Mac is not stuck at
     /// "open it on the Mac". It only opens the app; it sends and changes nothing.
+    /// Where Codex's background service stands, from the last chat-list check and what is on disk.
+    private var codexService:CodexService.State {
+        CodexService.probe(home:FileManager.default.homeDirectoryForCurrentUser,answering:codexInventoryAvailable)
+    }
+    private var restartingCodexService=false
+    /// Restarts Codex's background service with Codex's own command, and only
+    /// when the service cannot be reached. It opens no chat and sends nothing.
+    private func restartCodexService(_ command:RemoteCommand) async -> RemoteReceipt {
+        func result(_ state:String,_ message:String)->RemoteReceipt {RemoteReceipt(id:command.id,status:state,message:message)}
+        guard command.provider=="codex" else{return result("failed","Only Codex has a background service to restart.")}
+        guard enabled,!isLocked else{return result("failed","Unlock this Mac to restart Codex’s background service.")}
+        let home=FileManager.default.homeDirectoryForCurrentUser
+        guard CodexQueuePolicy.usesDefaultHome(environment:ProcessInfo.processInfo.environment,home:home),
+              let application=NSWorkspace.shared.urlForApplication(withBundleIdentifier:"com.openai.codex"),
+              let executable=CodexQueuePolicy.executable(in:application) else{return result("failed","The installed Codex app and its default account storage are needed to restart its background service.")}
+        guard !restartingCodexService else{return result("failed","A restart is already under way. Refresh in a moment.")}
+        restartingCodexService=true;defer{restartingCodexService=false}
+        // Ask again first: a service that answers is never restarted.
+        let before=await loadCodexChats(force:true)
+        let state=codexService
+        guard CodexService.canRestart(state) else {
+            return state == .answering ? result("confirmed","Codex’s background service is already answering (\(before.count) saved chats). Nothing was restarted."):result("failed","Codex’s background service has not been set up on this Mac. Open Codex on the Mac first.")
+        }
+        let environment=CodexQueuePolicy.environment(home:home)
+        let run=await Task.detached(priority:.userInitiated) { ()->CodexService.Run in
+            guard CodexQueuePolicy.isTrustedExecutable(executable) else{return .notLaunched}
+            switch CodexQueueProcess.run(executable:executable,arguments:CodexService.restartArguments,environment:environment,timeout:30).completion {
+            case .notLaunched:return .notLaunched
+            case .exited(let code):return .exited(code)
+            case .interrupted,.timedOut:return .timedOut
+            }
+        }.value
+        // The service takes a moment to listen again after the command returns.
+        var chats=[RemoteChat]()
+        if run != .notLaunched {
+            for attempt in 0..<8 {
+                chats=await loadCodexChats(force:true)
+                if codexInventoryAvailable {break}
+                if attempt<7 {try? await Task.sleep(nanoseconds:750_000_000)}
+            }
+        }
+        let receipt=CodexService.receipt(run,answeringAfter:codexInventoryAvailable,chats:chats.count)
+        return result(receipt.status,receipt.message)
+    }
     private func launchApp(_ command:RemoteCommand) async -> RemoteReceipt {
         func result(_ state:String,_ message:String)->RemoteReceipt {RemoteReceipt(id:command.id,status:state,message:message)}
         let names=["claude":"Claude","muse":"Muse","codex":"Codex"],bundles=["claude":access.bundle,"muse":MuseAccess.bundle,"codex":"com.openai.codex"]
@@ -238,14 +287,14 @@ import CoreImage.CIFilterBuiltins
     }
     func refreshChats() {Task {chats=loadChats("claude")}}
     func loadChats(_ provider:String,deadline:Double?=nil)->[RemoteChat] {
-        ambiguousClaudeIDs.removeAll(keepingCapacity:true)
+        ambiguousClaudeIDs.removeAll(keepingCapacity:true);claudeLeftOut.removeAll(keepingCapacity:true)
         guard provider=="claude",!isLocked,AXIsProcessTrusted() else{return []}
         func read()->[RemoteChat] {
             let all=access.nodes(),sessions=access.sessions(all)
             // Reuse attribute reads only within this synchronous snapshot.
             return Dictionary(grouping:sessions,by:{$0.title}).compactMap { title,values -> RemoteChat? in
                 guard !RemoteClaudeLookup.isAmbiguous(sidebarDestinationCount:access.sidebarTargets(title,in:all).count) else {
-                    ambiguousClaudeIDs.insert(RemotePolicy.chatID(provider,title));return nil
+                    ambiguousClaudeIDs.insert(RemotePolicy.chatID(provider,title));claudeLeftOut.insert(title);return nil
                 }
                 return RemoteChat(id:RemotePolicy.chatID(provider,title),title:title,state:values.last?.state ?? "Open")
             }.sorted{$0.title.localizedCaseInsensitiveCompare($1.title) == .orderedAscending}
@@ -433,9 +482,10 @@ import CoreImage.CIFilterBuiltins
             if request.method=="GET",path=="/v1/diagnostics/claude" {return claudeLookupDiagnostics()}
             if request.method=="GET",path=="/v1/chats" {
                 guard RemotePolicy.providers.contains(parameter("provider")) else{return .error(422,"Unknown provider.")}
-                if parameter("provider")=="codex" {return .json(["chats":await loadCodexChats()])}
-                if parameter("provider")=="muse" {return .json(["chats":await loadMuseChats()])}
-                return .json(["chats":loadChats(parameter("provider"))])
+                if parameter("provider")=="codex" {return .json(RemoteChatList(chats:await loadCodexChats()))}
+                if parameter("provider")=="muse" {let chats=await loadMuseChats();return .json(RemoteChatList(chats:chats,leftOut:RemoteLeftOut.titles(museLeftOut)))}
+                let chats=loadChats(parameter("provider"))
+                return .json(RemoteChatList(chats:chats,leftOut:RemoteLeftOut.titles(claudeLeftOut)))
             }
             if request.method=="GET",path=="/v1/profile" {return .json(try seededProfile(parameter("provider")))}
             if request.method=="PUT",path=="/v1/profile" {
@@ -602,6 +652,7 @@ import CoreImage.CIFilterBuiltins
             return NSWorkspace.shared.open(url) ? result("confirmed","Opened artifact on this Mac."):result("failed","The Mac could not open this artifact.")
         }
         if command.action=="launchApp" {return await launchApp(command)}
+        if command.action=="restartService" {return await restartCodexService(command)}
         if command.provider=="muse" {return await executeMuse(command)}
         if command.provider=="codex" {
             if command.action=="sendPrompt" {

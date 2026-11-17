@@ -5,6 +5,18 @@ import Security
 struct RemoteProvider: Codable { var id: String; var name: String; var installed: Bool; var readiness: String; var capabilities: [String]; var reason: String?; var actions: [RemoteAction]? = nil }
 struct RemoteHostStatus: Codable { var protocolVersion = 1; var hostID: String; var hostName: String; var providers: [RemoteProvider]; var displaySession: Bool = true; var companionVersion: String? = nil }
 struct RemoteChat: Codable { var id: String; var title: String; var state: String }
+/// A provider's chats, plus the titles that could not be offered because more
+/// than one chat carries them. The phone says so instead of leaving them out silently.
+struct RemoteChatList: Codable { var chats: [RemoteChat]; var leftOut: [String]? = nil }
+enum RemoteLeftOut {
+    static let maximumTitles = 20, maximumLength = 80
+    /// Sorted, trimmed and capped; nil when nothing was left out.
+    static func titles(_ shared: Set<String>) -> [String]? {
+        let tidy = shared.map { String($0.trimmingCharacters(in: .whitespacesAndNewlines).prefix(maximumLength)) }.filter { !$0.isEmpty }
+        guard !tidy.isEmpty else { return nil }
+        return Array(Set(tidy).sorted { $0.localizedCaseInsensitiveCompare($1) == .orderedAscending }.prefix(maximumTitles))
+    }
+}
 struct RemoteSlot: Codable { var index: Int; var kind: String; var title: String; var targetID: String }
 struct RemoteProfile: Codable { var provider: String; var revision: Int; var slots: [RemoteSlot]; var quickActions: [String]? = nil }
 struct RemoteCommand: Codable { var id: String; var hostID: String; var provider: String; var chatID: String?; var action: String; var text: String?; var artifactID: String?; var generation: Int; var navigationSession: String? = nil }
@@ -80,7 +92,7 @@ enum RemoteActionCatalog {
 
 enum RemotePolicy {
     static let providers = ["codex", "claude", "muse"]
-    static let commands = ["openChat", "sendPrompt", "stop", "openArtifact", "nativeVoice", "launchApp"] + RemoteActionCatalog.commandIDs
+    static let commands = ["openChat", "sendPrompt", "stop", "openArtifact", "nativeVoice", "launchApp", "restartService"] + RemoteActionCatalog.commandIDs
     static let maximumBody = 131_072
     static func digest(_ bytes: Data) -> String { SHA256.hash(data: bytes).map { String(format:"%02x", $0) }.joined() }
     static func chatID(_ provider: String, _ title: String) -> String { "\(provider)-" + String(digest(Data(title.utf8)).prefix(32)) }

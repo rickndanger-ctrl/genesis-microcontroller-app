@@ -190,7 +190,7 @@ import Foundation
         expect(item(unreadable, "Menu controls")?.ok == false && item(unreadable, "Menu controls")?.detail == "Codex\u{2019}s menus could not be read.", "A running Codex with unreadable menus says so")
 
         let down = SelfCheck.codex(codex(inventory: false), mac: good)
-        expect(item(down, "Saved chats")?.ok == false && item(down, "Saved chats")?.detail == "Codex\u{2019}s background service is not answering. Restart it by running: codex app-server daemon restart", "An unreachable service gives the restart command")
+        expect(item(down, "Saved chats")?.ok == false && item(down, "Saved chats")?.detail == "Codex\u{2019}s background service is not answering. Use Restart Codex service on the phone\u{2019}s Codex tab, or run on this Mac: codex app-server daemon restart", "An unreachable service gives the restart command")
         let noQueue = SelfCheck.codex(codex(queue: false), mac: good)
         expect(item(noQueue, "Send")?.ok == false && item(noQueue, "Send")?.detail == "The command used to send prompts was not found in the installed Codex app.", "A missing send command is reported")
     }

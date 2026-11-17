@@ -227,6 +227,10 @@ struct MappingScreen: View {
                             Label(chat.title, systemImage: "bubble.left.and.bubble.right")
                         }.disabled(!store.canMapChats)
                     }
+                    if store.canMapChats, query.isEmpty, let notice = store.leftOutChatsNotice {
+                        Label(notice, systemImage: "square.on.square.dashed").font(.caption).foregroundStyle(.secondary)
+                            .accessibilityIdentifier("slot.leftOutChats")
+                    }
                     if store.chats.isEmpty || !store.canMapChats {
                         Text(store.chatAvailabilityMessage).font(.caption).foregroundStyle(.secondary)
                     } else if !query.isEmpty && !store.chats.contains(where: { $0.title.localizedCaseInsensitiveContains(query) }) {

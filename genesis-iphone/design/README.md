@@ -29,7 +29,7 @@ quality (default 160), `GENESIS_ONLY=cap,knob,puck,shell` to render part of the 
 for the GPU. Raw LED passes are written to `renders/passes/` and are not tracked.
 
 The pointer, slot lights, legends and activity matrix are drawn by the app on top of the renders, foreshortened to
-match the tilt. The older scene below remains the source of the app icon; its renders are kept in `renders/` for
+match the tilt. The older scene below is no longer used by the app or its icon; its renders are kept in `renders/` for
 reference and are not bundled.
 
 ## Click sounds
@@ -57,10 +57,12 @@ blender -b --factory-startup --python design/build_controller.py
 Set `GENESIS_RENDER_DEVICE=METAL` to opt into Metal rendering. The default
 avoids the long first-use Metal shader compilation on macOS.
 
-Run `blender -b --factory-startup --python design/build_icon.py` after the main
-builder to composite the hero onto a light opaque canvas for the iOS AppIcon.
-The resulting `Assets.xcassets/AppIcon.appiconset/icon1024.png` is RGB (no alpha),
-1024 × 1024, and has light corners before iOS applies its icon mask.
+Run `python3 design/build_app_icon.py` (needs Pillow) to build the iOS AppIcon from
+the deck pieces `build_deck.py` renders into `ios/Resources/`: the chat knob and
+three lit keys on the pearl surface, so the icon matches the controller. The
+resulting `Assets.xcassets/AppIcon.appiconset/icon1024.png` is RGB (no alpha),
+1024 × 1024, edge to edge; iOS applies its own icon mask. The older
+`build_icon.py`, which composited the first scene's hero render, is kept for reference.
 
 Exports:
 

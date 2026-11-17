@@ -429,6 +429,20 @@ struct ControllerScreen: View {
             .disabled(!store.canOpenProviderApp)
             .accessibilityIdentifier("controller.openApp")
         }
+        if store.providerInfo?.supports("restartService") == true {
+            // The app's background service lost its connection. Someone away from the Mac can restart it from here.
+            Button {
+                ControllerSound.shared.keyClick()
+                Task { await store.restartProviderService() }
+            } label: {
+                Label("Restart \(store.selectedProvider.name) service on \(selectedComputerName)", systemImage: "arrow.clockwise.circle")
+                    .font(.system(size: isPad ? 14 : 12, weight: .semibold))
+                    .frame(maxWidth: .infinity, minHeight: isPad ? 46 : 40)
+                    .genesisPanel(radius: 13, raised: true)
+            }
+            .disabled(!store.canRestartProviderService)
+            .accessibilityIdentifier("controller.restartService")
+        }
     }
 
     @ViewBuilder

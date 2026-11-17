@@ -54,6 +54,20 @@ struct CompanionVersion: Comparable, Equatable, CustomStringConvertible {
 }
 
 enum CompanionSupport {
+    /// Says which chats the Mac left out for sharing a title, and what to do about it.
+    /// The Mac finds a chat by its title, so two chats with one title cannot be told apart.
+    static func leftOutNotice(titles: [String], app: String) -> String? {
+        let named = titles.map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }.filter { !$0.isEmpty }
+        guard let first = named.first else { return nil }
+        func quoted(_ title: String) -> String { "\u{201C}\(title.count > 40 ? String(title.prefix(39)) + "\u{2026}" : title)\u{201D}" }
+        let advice = "Rename one in \(app) on the Mac to use it here."
+        if named.count == 1 { return "More than one \(app) chat is titled \(quoted(first)), so it is left out. \(advice)" }
+        let shown = named.prefix(3).map(quoted)
+        let extra = named.count - shown.count
+        let list = extra > 0 ? shown.joined(separator: ", ") + " and \(extra) more"
+                             : shown.dropLast().joined(separator: ", ") + " and " + shown.last!
+        return "\(named.count) titles are each used by more than one \(app) chat, so those chats are left out: \(list). \(advice)"
+    }
     /// The oldest companion this app is written for.
     static let minimum = CompanionVersion("0.6.0")!
 

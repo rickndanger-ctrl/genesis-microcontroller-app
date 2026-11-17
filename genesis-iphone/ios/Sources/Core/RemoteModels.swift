@@ -30,6 +30,8 @@ struct ProviderInfo: Codable, Equatable, Identifiable {
         guard capabilities.contains(action) else { return false }
         if action == "artifacts" { return true } // Registered exports do not require an interactive desktop.
         if action == "launchApp" { return installed && readiness == "closed" } // Only offered while the app is shut.
+        // The Mac offers this only while the app's background service cannot be reached.
+        if action == "restartService" { return installed && readiness == "unavailable" }
         if id == "codex", ["newChat", "openSettings", "openSkills"].contains(action) {
             return installed && readiness != "locked" // Explicit launch routes do not need saved-chat inventory.
         }
@@ -263,7 +265,8 @@ struct ArtifactRecord: Codable, Identifiable, Equatable {
     var provider: String
     var chatID: String
 }
-struct ChatsResponse: Codable { var chats: [ChatRecord] }
+/// `leftOut` lists titles carried by more than one chat on the Mac, which it cannot tell apart.
+struct ChatsResponse: Codable { var chats: [ChatRecord]; var leftOut: [String]? = nil }
 struct ArtifactsResponse: Codable { var artifacts: [ArtifactRecord] }
 
 /// What a pairing QR code carries. In version 1 `token` is the Mac's one

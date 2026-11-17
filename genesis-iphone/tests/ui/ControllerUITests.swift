@@ -407,9 +407,20 @@ final class ControllerUITests: XCTestCase {
             settings.tap()
             let toggle = app.switches["settings.glasses"]
             XCTAssertTrue(app.navigationBars["Your controller"].waitForExistence(timeout: 5))
-            // The switch sits below pairing, so it may start off-screen.
-            for _ in 0..<6 where !toggle.isHittable { app.swipeUp() }
-            XCTAssertTrue(toggle.isHittable, "The glasses switch can be reached in Settings")
+            // The switch sits below pairing, so it may start off-screen. On an iPad the
+            // sheet is short: a switch that is only just showing at the sheet's bottom edge
+            // counts as hittable, but a tap on it lands outside the sheet and closes it.
+            let list = app.collectionViews.firstMatch
+            func inReach() -> Bool {
+                guard toggle.exists, toggle.isHittable else { return false }
+                return !list.exists || toggle.frame.maxY <= list.frame.maxY - 28
+            }
+            for _ in 0..<10 where !inReach() {
+                guard list.exists else { app.swipeUp(); continue }
+                list.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.72))
+                    .press(forDuration: 0.05, thenDragTo: list.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.38)))
+            }
+            XCTAssertTrue(inReach(), "The glasses switch can be reached in Settings")
             if (toggle.value as? String == "1") != on {
                 toggle.coordinate(withNormalizedOffset: CGVector(dx: 0.94, dy: 0.50)).tap()
                 let changed = NSPredicate { _, _ in (toggle.value as? String == "1") == on }

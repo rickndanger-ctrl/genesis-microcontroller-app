@@ -157,7 +157,7 @@ enum SelfCheck {
         return [
             item("codex", "Saved chats", codex.inventoryReachable,
                  ok: "\(count(codex.savedChats, "saved chat")) found.",
-                 problem: "Codex\u{2019}s background service is not answering. Restart it by running: codex app-server daemon restart"),
+                 problem: "Codex\u{2019}s background service is not answering. Use Restart Codex service on the phone\u{2019}s Codex tab, or run on this Mac: codex app-server daemon restart"),
             item("codex", "Send", codex.queueAvailable,
                  ok: "The command used to send prompts was found.",
                  problem: "The command used to send prompts was not found in the installed Codex app."),

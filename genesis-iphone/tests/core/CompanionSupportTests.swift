@@ -172,5 +172,24 @@ import Foundation
         expect(reworded.id == makeEntry(1).id, "An entry id must not depend on its message or status text.")
         let distinct = [makeEntry(1), makeEntry(2), makeEntry(1, provider: "muse"), makeEntry(1, action: "play"), makeEntry(1, ms: 11), makeEntry(1.5)]
         expect(Set(distinct.map(\.id)).count == distinct.count, "Entries that differ in time, provider, action or duration must have distinct ids.")
+
+        // Chats left out for sharing a title.
+        expect(CompanionSupport.leftOutNotice(titles: [], app: "Claude") == nil, "Nothing left out gives no notice.")
+        expect(CompanionSupport.leftOutNotice(titles: ["  ", ""], app: "Claude") == nil, "Blank titles give no notice.")
+        expect(CompanionSupport.leftOutNotice(titles: ["Hello"], app: "Claude")
+               == "More than one Claude chat is titled \u{201C}Hello\u{201D}, so it is left out. Rename one in Claude on the Mac to use it here.",
+               "One shared title is named, with what to do.")
+        expect(CompanionSupport.leftOutNotice(titles: ["A", "B"], app: "Muse")
+               == "2 titles are each used by more than one Muse chat, so those chats are left out: \u{201C}A\u{201D} and \u{201C}B\u{201D}. Rename one in Muse on the Mac to use it here.",
+               "Two shared titles are both named.")
+        expect(CompanionSupport.leftOutNotice(titles: ["A", "B", "C"], app: "Muse")?.contains("\u{201C}A\u{201D}, \u{201C}B\u{201D} and \u{201C}C\u{201D}.") == true,
+               "Three shared titles are all named.")
+        expect(CompanionSupport.leftOutNotice(titles: ["A", "B", "C", "D", "E"], app: "Muse")?.contains("5 titles") == true
+               && CompanionSupport.leftOutNotice(titles: ["A", "B", "C", "D", "E"], app: "Muse")?.contains("\u{201C}A\u{201D}, \u{201C}B\u{201D}, \u{201C}C\u{201D} and 2 more.") == true,
+               "More than three shared titles name three and count the rest.")
+        let long = String(repeating: "x", count: 60)
+        let shortened = CompanionSupport.leftOutNotice(titles: [long], app: "Claude") ?? ""
+        expect(shortened.contains(String(repeating: "x", count: 39) + "\u{2026}\u{201D}") && !shortened.contains(String(repeating: "x", count: 40)),
+               "A long title is shortened.")
     }
 }
