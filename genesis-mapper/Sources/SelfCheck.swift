@@ -31,6 +31,7 @@ enum SelfCheck {
         var chats: Int                // chats that can be offered
         var sharedTitles: Int         // titles shared by several chats, which are left out
         var callControls: Int
+        var windowTooNarrow = false   // Muse's narrow layout: no chat list beside the chat, or only its Status panel
     }
 
     struct Codex {
@@ -92,6 +93,12 @@ enum SelfCheck {
     static func muse(_ muse: Muse, mac: Mac) -> [SelfCheckItem] {
         if let cause = rootCause("muse", "Muse", installed: muse.installed, running: muse.running, mac: mac) {
             return [cause]
+        }
+
+        // One cause, one line: every other Muse check would fail for the same reason.
+        if muse.windowTooNarrow {
+            return [SelfCheckItem(provider: "muse", name: "Window", ok: false,
+                                  detail: "Muse\u{2019}s window is too narrow: it hides the chat list, and with its Status panel open it hides the chat too. Use Open Muse on the phone\u{2019}s Muse tab to widen it, or widen it on this Mac.")]
         }
 
         // Left-out titles are worth a sentence of their own: the person can fix them.

@@ -46,6 +46,12 @@ final class MuseAccess {
         var boxLabels: [String] = []
         /// Labels of message boxes whose Send has become Stop: Muse is answering.
         var answering: [String] = []
+        /// Tabs of the Status panel that are showing.
+        var statusTabs: [String] = []
+        /// The narrow layout's chat list: a pop-up control, or the dialog it opens.
+        var narrowListControl = false
+        /// Muse's window is too narrow to control; see MuseChatList.needsWiderWindow.
+        var needsWiderWindow: Bool { MuseChatList.needsWiderWindow(chatScreenFound: isRecognisable, tabs: statusTabs, narrowListControl: narrowListControl) }
         var historyEntries: Int { history.map { children($0).count } ?? 0 }
         var children: (AXUIElement) -> [AXUIElement] = { _ in [] }
         /// Something of Muse's chat screen was found, so this is a real read.
@@ -106,7 +112,9 @@ final class MuseAccess {
                 }
                 if name == "Back to main chat" { result.backToMain.append(element) }
                 if name == "Call your assistant" { result.call.append(element) }
-            }
+            } else if role == kAXCheckBoxRole, MuseChatList.statusTabs.contains(name) { result.statusTabs.append(name) }
+            else if role == kAXPopUpButtonRole, name.hasSuffix(MuseChatList.panelToggleSuffix) { result.narrowListControl = true }
+            if subrole == "AXApplicationDialog", name == MuseChatList.chatListName { result.narrowListControl = true }
             for child in children(element) { queue.append((child, panel, role == "AXHeading")) }
         }
         return result
@@ -132,6 +140,38 @@ final class MuseAccess {
             seen = snapshot()
         }
         return seen
+    }
+
+    /// True when Muse's window is too narrow to control. One read; changes nothing.
+    func needsWiderWindow() -> Bool { snapshot()?.needsWiderWindow ?? false }
+
+    /// Widens Muse's window so it draws its full layout, and leaves it wide.
+    /// In a narrow window Muse hides its chat list behind a dialog that covers
+    /// the message box, and with the Status panel open it shows no chat at all.
+    /// Nothing is closed and nothing is clicked. Returns nil when there was
+    /// nothing to do.
+    @MainActor func widenWindow() async -> Outcome? {
+        guard let seen = snapshot(), seen.needsWiderWindow, let app else { return nil }
+        let root = AXUIElementCreateApplication(app.processIdentifier)
+        let windows = (value(root, kAXWindowsAttribute) as? [AXUIElement]) ?? []
+        guard let window = windows.first(where: { (value($0, kAXMinimizedAttribute) as? Bool) != true }) ?? windows.first, let current = frame(window) else {
+            return .failed("Muse has no window to show a chat in. Open Muse on the Mac.")
+        }
+        // Accessibility and NSScreen agree on x, which is all that is needed here.
+        let screen = NSScreen.screens.first { $0.frame.minX <= current.midX && current.midX < $0.frame.maxX } ?? NSScreen.main
+        guard let screen, let wide = MuseChatList.frameForFullLayout(window: current, screenMinX: screen.frame.minX, screenMaxX: screen.frame.maxX) else {
+            return .failed("Muse\u{2019}s window on this Mac is too narrow for the controller to reach its chats, and it could not be widened from here. Widen Muse\u{2019}s window on the Mac.")
+        }
+        var origin = wide.origin, size = wide.size
+        if let position = AXValueCreate(.cgPoint, &origin) { AXUIElementSetAttributeValue(window, kAXPositionAttribute as CFString, position) }
+        if let extent = AXValueCreate(.cgSize, &size) { AXUIElementSetAttributeValue(window, kAXSizeAttribute as CFString, extent) }
+        for _ in 0..<24 {
+            try? await Task.sleep(nanoseconds: 150_000_000)
+            if let fresh = snapshot(), fresh.isRecognisable, !fresh.needsWiderWindow {
+                return .confirmed("Widened Muse\u{2019}s window on this Mac so its chats can be reached.")
+            }
+        }
+        return .uncertain("Muse\u{2019}s window was widened, but its chats have not appeared yet. Refresh in a moment.")
     }
 
     /// A snapshot with the chat panel showing, opening it if it is closed.
@@ -215,6 +255,9 @@ final class MuseAccess {
     @MainActor func selfCheck(installed: Bool) async -> SelfCheck.Muse {
         guard let seen = await settled() else {
             return .init(installed: installed, running: app != nil, navigable: false, messageBoxes: 0, answering: false, chats: 0, sharedTitles: 0, callControls: 0)
+        }
+        if seen.needsWiderWindow {
+            return .init(installed: installed, running: true, navigable: false, messageBoxes: 0, answering: false, chats: 0, sharedTitles: 0, callControls: 0, windowTooNarrow: true)
         }
         let listed = await listing()
         return .init(installed: installed, running: true, navigable: seen.toggle != nil || seen.panelOpen || !seen.backToMain.isEmpty,

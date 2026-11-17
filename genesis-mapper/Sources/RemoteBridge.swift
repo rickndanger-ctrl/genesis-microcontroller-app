@@ -38,6 +38,8 @@ import CoreImage.CIFilterBuiltins
     private var ambiguousClaudeIDs=Set<String>()
     /// Titles carried by more than one chat at the last listing, per app.
     private var claudeLeftOut=Set<String>(),museLeftOut=Set<String>()
+    /// Muse is running in a window too narrow to control; see MuseAccess.widenWindow.
+    private var museChatHidden=false,museChatHiddenCheckedAt=Date.distantPast
     private var codexChats:[RemoteChat]=[]
     private var codexInventoryAvailable=false
     private var codexInventoryCheckedAt:Date?
@@ -121,8 +123,15 @@ import CoreImage.CIFilterBuiltins
             if provider=="muse" {
                 // Chats open through Accessibility. A draft is pasted into Muse's
                 // message box and read back before Return; see MuseAccess.
-                let readiness=isLocked ? "locked":!AXIsProcessTrusted() ? "needsAccessibility":!running ? "closed":"ready"
-                let reason=readiness=="ready" ? "Chats, Send, New side chat and Call are connected. Send briefly brings Muse to the front and uses the clipboard, which is restored afterwards. Chats that share a title are left out.":readiness=="locked" ? "Unlock this Mac to use Muse.":readiness=="closed" ? "Open Muse on this Mac.":"Enable Accessibility for Agent Micro Controller."
+                // "closed" also covers Muse running in a window too narrow to control: either way the phone offers to open it.
+                let covered=running && museChatHidden && !isLocked && AXIsProcessTrusted()
+                if covered,Date().timeIntervalSince(museChatHiddenCheckedAt)>4 {
+                    // Nobody asks for chats while they are hidden, so look again here to notice when they are back.
+                    museChatHiddenCheckedAt=Date()
+                    Task {self.museChatHidden=self.muse.needsWiderWindow()}
+                }
+                let readiness=isLocked ? "locked":!AXIsProcessTrusted() ? "needsAccessibility":!running || covered ? "closed":"ready"
+                let reason=readiness=="ready" ? "Chats, Send, New side chat and Call are connected. Send briefly brings Muse to the front and uses the clipboard, which is restored afterwards. Chats that share a title are left out.":readiness=="locked" ? "Unlock this Mac to use Muse.":covered ? "Muse\u{2019}s window on this Mac is too narrow for the controller to reach its chats. Open Muse from here to widen it.":readiness=="closed" ? "Open Muse on this Mac.":"Enable Accessibility for Agent Micro Controller."
                 return RemoteProvider(id:provider,name:"Muse",installed:installed,readiness:readiness,capabilities:readiness=="ready" ? RemoteMuse.capabilities:readiness=="closed" && installed ? ["artifacts","launchApp"]:["artifacts"],reason:reason,actions:RemoteMuse.actions)
             }
             let readiness=isLocked ? "locked":!AXIsProcessTrusted() ? "needsAccessibility":!running ? "closed":"ready"
@@ -193,8 +202,12 @@ import CoreImage.CIFilterBuiltins
         return report
     }
     func loadMuseChats() async -> [RemoteChat] {
-        guard enabled,!isLocked,AXIsProcessTrusted(),let listing=await muse.listing() else{museLeftOut=[];return []}
-        museLeftOut=listing.ambiguous
+        guard enabled,!isLocked,AXIsProcessTrusted() else{museLeftOut=[];return []}
+        guard let listing=await muse.listing() else {
+            // No chat list. Find out whether Muse's window is too narrow, so the phone can say so and offer to widen it.
+            museLeftOut=[];museChatHidden=muse.needsWiderWindow();museChatHiddenCheckedAt=Date();return []
+        }
+        museLeftOut=listing.ambiguous;museChatHidden=false;museChatHiddenCheckedAt=Date()
         return listing.chats.map{RemoteChat(id:RemotePolicy.chatID("muse",$0.title),title:$0.title,state:$0.current ? "Current":$0.unread ? "Unread":"Open")}
     }
     /// Opens a provider's app so someone away from the Mac is not stuck at
@@ -249,7 +262,14 @@ import CoreImage.CIFilterBuiltins
         guard let name=names[command.provider],let bundle=bundles[command.provider] else{return result("failed","Unknown app.")}
         guard !isLocked else{return result("failed","Unlock this Mac to open \(name).")}
         func running()->Bool {NSRunningApplication.runningApplications(withBundleIdentifier:bundle).contains{!$0.isTerminated}}
-        if running() {return result("confirmed","\(name) is already open on this Mac.")}
+        if running() {
+            // Muse can be open in a window too narrow to control; see MuseAccess.widenWindow.
+            if command.provider=="muse",AXIsProcessTrusted(),let outcome=await muse.widenWindow() {
+                museChatHidden=muse.needsWiderWindow();museChatHiddenCheckedAt=Date()
+                return result(outcome.status,outcome.message)
+            }
+            return result("confirmed","\(name) is already open on this Mac.")
+        }
         guard let url=NSWorkspace.shared.urlForApplication(withBundleIdentifier:bundle) else{return result("failed","\(name) is not installed on this Mac.")}
         let configuration=NSWorkspace.OpenConfiguration();configuration.activates=true
         do {_ = try await NSWorkspace.shared.openApplication(at:url,configuration:configuration)} catch{return result("failed","macOS could not open \(name).")}
@@ -264,6 +284,11 @@ import CoreImage.CIFilterBuiltins
         guard !isLocked,AXIsProcessTrusted() else{return result(.failed("Unlock the Mac and enable Accessibility for Agent Micro Controller first."))}
         guard let pid=muse.app?.processIdentifier else{return result(.failed("Open Muse on this Mac first."))}
         func contextOK()->Bool {self.enabled && !self.isLocked && AXIsProcessTrusted() && self.muse.app?.processIdentifier==pid}
+        // A command needs Muse's full layout. If its window is too narrow, widen it first.
+        if let revealed=await muse.widenWindow() {
+            museChatHidden=muse.needsWiderWindow();museChatHiddenCheckedAt=Date()
+            if revealed.status != "confirmed" {return result(revealed)}
+        }
         if command.action=="nativeVoice" {return result(await muse.startCall(contextIsCurrent:contextOK))}
         let unnamed=RemoteChat(id:RemotePolicy.chatID("muse",MuseChatList.unnamedSideChat),title:MuseChatList.unnamedSideChat,state:"Current")
         if command.action=="newChat" {

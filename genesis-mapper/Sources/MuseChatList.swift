@@ -1,4 +1,5 @@
 import Foundation
+import CoreGraphics
 
 /// The rules for reading Muse's chat panel and for judging a draft, kept free
 /// of accessibility calls so they can be tested without the app.
@@ -17,6 +18,35 @@ enum MuseChatList {
         let unread: Bool
     }
 
+    /// The tabs of Muse's Status panel. Beside a chat the panel is harmless,
+    /// but in a narrow window Muse draws the panel alone: no chat, no message
+    /// box, and no button to close it.
+    static let statusTabs: Set<String> = ["Activity", "Approvals", "Identity", "Mail"]
+    /// The chat list's name, both as the side panel and as the narrow layout's dialog.
+    static let chatListName = "Side chats"
+    /// A window this wide gets Muse's full layout: the chat list as a panel
+    /// beside the chat, and the Status panel beside both. Measured on Muse
+    /// 12.1: the narrow layout starts below about 780 points, and the Status
+    /// panel covers the chat somewhere below 860.
+    static let fullLayoutWidth: CGFloat = 1000
+    /// True when the Status panel is all Muse is showing.
+    static func statusPanelCoversChat(chatScreenFound: Bool, tabs: [String]) -> Bool {
+        !chatScreenFound && statusTabs.intersection(tabs).count >= 3
+    }
+    /// True when Muse's window is too narrow to control. In its narrow layout
+    /// the chat list is a pop-up that opens a dialog over the whole window,
+    /// hiding the message box, and nothing but a click or a key press closes it.
+    static func needsWiderWindow(chatScreenFound: Bool, tabs: [String], narrowListControl: Bool) -> Bool {
+        narrowListControl || statusPanelCoversChat(chatScreenFound: chatScreenFound, tabs: tabs)
+    }
+    /// The frame that gives Muse its full layout, kept on its own screen.
+    /// Nil when the window is already that wide or the screen cannot fit it.
+    static func frameForFullLayout(window: CGRect, screenMinX: CGFloat, screenMaxX: CGFloat) -> CGRect? {
+        let wanted = fullLayoutWidth
+        guard window.width < wanted, screenMaxX - screenMinX >= wanted else { return nil }
+        let x = max(screenMinX, min(window.minX, screenMaxX - wanted))
+        return CGRect(x: x, y: window.minY, width: wanted, height: window.height)
+    }
     static let mainChat = "Main chat"
     static let unreadSuffix = " Unread updates"
     /// Controls in the panel that are buttons but not chats.

@@ -37,6 +37,10 @@ import Foundation
         museDetails()
         codexChecks()
         summaries()
+        // A Muse window too narrow to control is one cause, reported once.
+        let covered = SelfCheck.muse(.init(installed: true, running: true, navigable: false, messageBoxes: 0, answering: false, chats: 0, sharedTitles: 0, callControls: 0, windowTooNarrow: true), mac: .init(unlocked: true, accessibility: true))
+        expect(covered.count == 1 && covered[0].ok == false && covered[0].name == "Window", "A narrow window is one Muse problem, not four")
+        expect(covered[0].detail.contains("too narrow") && covered[0].detail.contains("Open Muse"), "It says what is wrong and what to press")
         print("Self-check: \(passed) checks passed")
     }
 
