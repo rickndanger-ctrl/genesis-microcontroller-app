@@ -28,6 +28,10 @@ Permissions: Microphone and Speech Recognition are used only for dictating a dra
 
 Pair with the Agent Micro Controller companion on your Mac, assign chats to the six keys, and try opening a chat, dictating a draft and sending it. Tell us about any key that needs a second press, a dial that skips, or a Send that reports the wrong result.
 
+## Beta review status (Nov 18)
+
+Build 37 (0.7.2) was submitted for TestFlight beta review and is waiting for review. Filled in: tester description, feedback email, reviewer contact, reviewer notes (above), What to Test, and no sign-in required. An "External testers" group holds build 37 with the public link off and no testers. Approval lets external testers install; enabling the public link and inviting people are separate decisions. Testers will also need a notarized Mac companion download, which doesn't exist yet.
+
 ## Archive preparation
 
 - The app icon comes from the Blender deck pieces (`genesis-iphone/design/build_app_icon.py`).
