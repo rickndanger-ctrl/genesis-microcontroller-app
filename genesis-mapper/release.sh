@@ -30,5 +30,5 @@ xcrun stapler validate "$APP"
 spctl --assess --type execute --verbose=2 "$APP"
 
 ditto -c -k --keepParent "$APP" "$ZIP"
-shasum -a 256 "$ZIP" | tee "$ZIP.sha256"
+(cd "$DIST" && shasum -a 256 "$(basename "$ZIP")" | tee "$(basename "$ZIP").sha256")
 echo "Ready: $ZIP"
