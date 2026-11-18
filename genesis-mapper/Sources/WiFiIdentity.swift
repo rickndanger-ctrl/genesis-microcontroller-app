@@ -9,7 +9,8 @@ import SystemConfiguration
 /// fingerprint from the pairing QR code, which it scanned off this Mac's
 /// screen, and from then on trusts this certificate and no other for this Mac.
 /// That is what keeps a stranger on the same Wi-Fi from posing as the Mac.
-struct WiFiIdentity {
+/// Sendable so it can be made off the main thread; SecIdentity is immutable.
+struct WiFiIdentity: @unchecked Sendable {
     static let port: UInt16 = 18766
     let identity: SecIdentity
     /// Base64url SHA-256 of the certificate, as carried in the QR code.

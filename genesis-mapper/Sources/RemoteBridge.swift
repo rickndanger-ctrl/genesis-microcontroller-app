@@ -96,14 +96,33 @@ import CoreImage.CIFilterBuiltins
     /// The second listener: TLS on every interface, for phones on the same network.
     /// It serves exactly the same routes and checks the same per-device secrets.
     private func startWiFiIfEnabled() {
-        guard enabled,wifiEnabled,wifiServer==nil,let store else{return}
-        do {
-            let identity=try wifiIdentity ?? WiFiIdentity.loadOrCreate(in:store.directory)
-            wifiIdentity=identity
-            let server=RemoteHTTPServer(port:WiFiIdentity.port,tls:identity.identity,admits:WiFiIdentity.isPrivate) {[weak self] request in guard let self else{return .error(503,"Companion closed.")};return await self.route(request)}
-            server.stateChanged={[weak self] state in Task{@MainActor in self?.wifiStatus=state}}
-            try server.start();wifiServer=server
-        } catch {wifiStatus=(error as? LocalizedError)?.errorDescription ?? "Wi-Fi pairing could not start."}
+        guard enabled,wifiEnabled,wifiServer==nil,!wifiPreparing,let store else{return}
+        if let identity=wifiIdentity {startWiFiListener(identity);return}
+        // Making the certificate runs openssl and waits for it. Waiting on the
+        // main thread spins its run loop, and when that happens while SwiftUI is
+        // building the app (this runs from the bridge's first use) SwiftUI
+        // aborts. So the certificate is loaded or made off the main thread.
+        wifiPreparing=true;wifiStatus="Preparing Wi-Fi pairing…"
+        let directory=store.directory
+        Task.detached(priority:.userInitiated) {
+            let result=Result{try WiFiIdentity.loadOrCreate(in:directory)}
+            await MainActor.run {
+                self.wifiPreparing=false
+                switch result {
+                case .success(let identity):
+                    self.wifiIdentity=identity
+                    if self.enabled,self.wifiEnabled,self.wifiServer==nil {self.startWiFiListener(identity)}
+                case .failure(let error):
+                    self.wifiStatus=(error as? LocalizedError)?.errorDescription ?? "Wi-Fi pairing could not start."
+                }
+            }
+        }
+    }
+    private var wifiPreparing=false
+    private func startWiFiListener(_ identity:WiFiIdentity) {
+        let server=RemoteHTTPServer(port:WiFiIdentity.port,tls:identity.identity,admits:WiFiIdentity.isPrivate) {[weak self] request in guard let self else{return .error(503,"Companion closed.")};return await self.route(request)}
+        server.stateChanged={[weak self] state in Task{@MainActor in self?.wifiStatus=state}}
+        do {try server.start();wifiServer=server} catch {wifiStatus=(error as? LocalizedError)?.errorDescription ?? "Wi-Fi pairing could not start."}
     }
     /// This Mac's Tailscale address, when one is set and usable.
     private var tailnetAddress:String? {
