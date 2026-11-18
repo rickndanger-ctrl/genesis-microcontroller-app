@@ -162,7 +162,7 @@ final class ControllerStore: ObservableObject {
         let needsMac = id != "dictate" && id != "artifacts"
         if needsMac {
             guard status != nil, let info = providerInfo else {
-                return .init(title: "Can’t reach \(mac)", message: "\(name) needs the Mac. Check that it is awake and on your private network, then try again.", step: .refresh, stepLabel: "Refresh")
+                return .init(title: "Can’t reach \(mac)", message: "\(name) needs the Mac. Check that it is awake and on the same Wi-Fi, or that Tailscale is connected, then try again.", step: .refresh, stepLabel: "Refresh")
             }
             switch info.readiness {
             case "locked":
@@ -585,7 +585,7 @@ final class ControllerStore: ObservableObject {
     private func installPairing(_ scanned: PairingPayload, activate: Bool) async throws {
         let generation = gate.generation
         var payload = scanned
-        let candidate = RemoteHost(id: payload.hostID, name: payload.name, baseURL: payload.baseURL, hostID: payload.hostID)
+        let candidate = RemoteHost(id: payload.hostID, name: payload.name, baseURL: payload.baseURL, hostID: payload.hostID, lanURL: payload.lanURL, pin: payload.pin)
         if payload.v == 2 {
             // The code is good once. Trade it for a secret that belongs to this
             // device alone, which the Mac can later revoke without touching others.
@@ -660,7 +660,7 @@ final class ControllerStore: ObservableObject {
                 }
             }
             pendingProvisioning = retry
-            if !failed.isEmpty { lastError = "Could not finish pairing \(failed.joined(separator: ", ")). Connect Tailscale and scan that Mac’s pairing code." }
+            if !failed.isEmpty { lastError = "Could not finish pairing \(failed.joined(separator: ", ")). Join the same Wi-Fi as that Mac (or connect Tailscale) and scan its pairing code." }
         } catch {
             try? FileManager.default.removeItem(at: url)
             lastError = "The private setup file could not be imported. Scan the pairing code from the Mac instead."

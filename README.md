@@ -84,11 +84,15 @@ The Mac build uses an ad hoc signature by default. Set `CLAUDE_CONTROLLER_SIGN_I
 
 ## Pair and use
 
-1. Connect the Mac and your iPhone or iPad to the same Tailscale network. On the Mac, give the companion Accessibility access if you use Claude Code or native desktop menu controls.
-2. From the menu-bar dial, open **Pair iPhone / Artifacts** and enable private remote access. The companion listens on loopback port 18765. On the Mac, `tailscale serve --bg --https=8451 http://127.0.0.1:18765` makes the service available on a private HTTPS port to the tailnet. If you already use that port, choose a free port and enter its HTTPS URL in the pairing panel.
+1. Install the [Mac companion](https://github.com/rickndanger-ctrl/genesis-microcontroller-app/releases) and give it Accessibility access if you use Claude Code or native desktop menu controls.
+2. Put your iPhone or iPad on the same Wi-Fi as the Mac. From the menu-bar dial, open **Pair iPhone / Artifacts**, enable private remote access, and leave **Pair and connect over this Wi-Fi** on.
 3. In the app, open **Settings → Scan pairing code** and scan the QR code from the companion. Pair each Mac separately. The code pairs one device, once, and stops working after ten minutes; the device trades it for a secret of its own, kept in its keychain.
 
-**What pairing grants.** A paired device can open chats and send prompts to the agents on that Mac. If an agent is running with permissions bypassed, that amounts to running commands on the Mac. Pair only devices you own, and keep the companion on a private network such as Tailscale; never expose port 18765 or the Serve address to the public internet.
+**How Wi-Fi pairing stays private.** Over Wi-Fi the companion listens on port 18766 with TLS, using a certificate it made for this Mac alone (kept in the companion's folder, never in a keychain). The QR code carries that certificate's fingerprint, and the phone accepts no other certificate for that Mac, so a stranger on the same network can neither read the traffic nor pose as the Mac. The listener admits only private and local addresses, and requests arriving on it never count as made on the Mac itself. Wi-Fi pairing needs macOS 15 or later on the Mac. It is on by default for a Mac with no Tailscale address; on a Mac set up before, turn it on in the pairing window.
+
+**Away from home (optional).** Connect the Mac and the device to the same Tailscale network and run `tailscale serve --bg --https=8451 http://127.0.0.1:18765` on the Mac, then enter that HTTPS address in the pairing window before scanning. A device paired with both tries Wi-Fi first and falls back to Tailscale, staying on Tailscale for a minute after Wi-Fi fails. A Send is retried on the other route only when it certainly never reached the Mac.
+
+**What pairing grants.** A paired device can open chats and send prompts to the agents on that Mac. If an agent is running with permissions bypassed, that amounts to running commands on the Mac. Pair only devices you own, and keep the companion on a private network such as your home Wi-Fi or Tailscale; never expose ports 18765 or 18766, or the Serve address, to the public internet.
 
 **Paired devices.** The pairing window lists every device paired this way, when it paired and when it was last seen. **Revoke** cuts off one device at once without touching the others. Devices paired before companion 0.7 share one older secret and cannot be told apart; once each has scanned a new code (this needs app build 30 or later), choose **Stop accepting…** to retire that secret.
 4. Choose a provider and chat. Hold **Talk**, release to review the draft, then tap **Send**. Grant microphone and speech recognition access when prompted.

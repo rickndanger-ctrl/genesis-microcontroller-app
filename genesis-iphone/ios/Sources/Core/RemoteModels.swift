@@ -12,6 +12,21 @@ struct RemoteHost: Codable, Identifiable, Equatable {
     var name: String
     var baseURL: String
     var hostID: String?
+    /// The Mac on the local network, and the fingerprint of the certificate it
+    /// must present there. Set when it was paired over Wi-Fi.
+    var lanURL: String? = nil
+    var pin: String? = nil
+
+    enum Route: Equatable { case wifi, tailnet }
+    /// Where this Mac can be reached, Wi-Fi first. A Mac paired only over Wi-Fi
+    /// has one route; one with Tailscale too has both.
+    var routes: [(route: Route, url: String)] {
+        var all: [(route: Route, url: String)] = []
+        if let lanURL, pin != nil { all.append((.wifi, lanURL)) }
+        let base = baseURL.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+        if base != lanURL?.trimmingCharacters(in: CharacterSet(charactersIn: "/")) { all.append((.tailnet, baseURL)) }
+        return all
+    }
     static let demoHosts: [RemoteHost] = [
         .init(id: "mini-1", name: "Mini 1", baseURL: "https://preview.invalid:8451", hostID: nil),
         .init(id: "mini-2", name: "Mini 2", baseURL: "https://preview.invalid:8451", hostID: nil),
@@ -360,6 +375,13 @@ struct PairingPayload: Codable, Equatable {
     var hostID: String
     var baseURL: String
     var token: String
+    /// Present when the Mac offers Wi-Fi pairing: its local address and its certificate's fingerprint.
+    var lanURL: String? = nil
+    var pin: String? = nil
+
+    static func validPin(_ pin: String) -> Bool {
+        pin.count == 43 && pin.unicodeScalars.allSatisfy { CharacterSet(charactersIn: "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_").contains($0) }
+    }
 
     static func decode(_ url: URL, allowLocalhost: Bool = false) throws -> PairingPayload {
         guard url.scheme?.lowercased() == "genesiscontroller", url.host?.lowercased() == "pair", url.path.isEmpty || url.path == "/",
@@ -374,6 +396,13 @@ struct PairingPayload: Codable, Equatable {
               payload.token.count >= 32, payload.token.count <= 1024,
               payload.token.unicodeScalars.allSatisfy({ $0.value >= 33 && $0.value <= 126 }),
               validEndpoint(payload.baseURL, allowLocalhost: allowLocalhost) else { throw RemoteError.invalidPairing }
+        // Wi-Fi details come as a pair: an address without a fingerprint could
+        // not be trusted, and a fingerprint without an address means nothing.
+        switch (payload.lanURL, payload.pin) {
+        case (nil, nil): break
+        case let (lan?, pin?): guard validEndpoint(lan), validPin(pin) else { throw RemoteError.invalidPairing }
+        default: throw RemoteError.invalidPairing
+        }
         return payload
     }
 

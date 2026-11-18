@@ -57,7 +57,7 @@ struct SettingsScreen: View {
                         .font(.caption).foregroundStyle(.secondary)
                 }
                 Section("Pair a Mac") {
-                    Text("On the Mac, click the Agent Micro Controller dial in the menu bar, then Pair iPhone / Artifacts. Scan its private pairing code while both devices are connected to Tailscale.")
+                    Text("On the Mac, click the Agent Micro Controller dial in the menu bar, then Pair iPhone / Artifacts. Scan its pairing code with this device on the same Wi-Fi as the Mac. To use the Mac away from home, also set up Tailscale on both.")
                         .font(.subheadline).foregroundStyle(.secondary)
                     Button { ControllerSound.shared.keyClick(); scanning = true } label: { Label("Scan pairing code", systemImage: "qrcode.viewfinder") }
                     TextField("Or paste a private pairing link", text: $pairingLink).textInputAutocapitalization(.never).autocorrectionDisabled()

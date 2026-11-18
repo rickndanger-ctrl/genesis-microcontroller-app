@@ -145,7 +145,39 @@ import Foundation
         expect(GlassesFeature.storageKey(demo: true) != GlassesFeature.storageKey(demo: false), "The demo and the real app keep separate settings")
     }
 
+    static func wifiPairingChecks() throws {
+        let pin = String(repeating: "A", count: 42) + "_"
+        let wifi = PairingPayload(v: 2, name: "Test Mac", hostID: "CFC99A4B-34EB-4E90-8413-97BE5866FE84",
+            baseURL: "https://test-mac.local:18766", token: String(repeating: "t", count: 64),
+            lanURL: "https://test-mac.local:18766", pin: pin)
+        expect((try? PairingPayload.decode(pairingURL(wifi))) == wifi, "Wi-Fi pairing round trip")
+        var bad = wifi; bad.pin = nil
+        expect(rejects(try pairingURL(bad)), "Wi-Fi address without a fingerprint rejected")
+        bad = wifi; bad.lanURL = nil
+        expect(rejects(try pairingURL(bad)), "Fingerprint without a Wi-Fi address rejected")
+        for broken in ["short", String(repeating: "A", count: 43).replacingOccurrences(of: "A", with: "+", options: [], range: nil), String(repeating: "A", count: 44)] {
+            bad = wifi; bad.pin = broken
+            expect(rejects(try pairingURL(bad)), "Malformed fingerprint rejected")
+        }
+        bad = wifi; bad.lanURL = "http://test-mac.local:18766"
+        expect(rejects(try pairingURL(bad)), "Unencrypted Wi-Fi address rejected")
+
+        // Wi-Fi only, Tailscale only, and both.
+        let lanOnly = RemoteHost(id: "m", name: "Mac", baseURL: "https://test-mac.local:18766", hostID: nil, lanURL: "https://test-mac.local:18766", pin: pin)
+        expect(lanOnly.routes.map(\.route) == [.wifi], "A Wi-Fi-only Mac has one route")
+        let both = RemoteHost(id: "m", name: "Mac", baseURL: "https://mac.tailnet.ts.net:8451", hostID: nil, lanURL: "https://test-mac.local:18766", pin: pin)
+        expect(both.routes.map(\.route) == [.wifi, .tailnet], "Wi-Fi is tried before Tailscale")
+        let tailnet = RemoteHost(id: "m", name: "Mac", baseURL: "https://mac.tailnet.ts.net:8451", hostID: nil)
+        expect(tailnet.routes.map(\.route) == [.tailnet], "A Mac paired before Wi-Fi pairing keeps Tailscale")
+        let unpinned = RemoteHost(id: "m", name: "Mac", baseURL: "https://mac.tailnet.ts.net:8451", hostID: nil, lanURL: "https://test-mac.local:18766")
+        expect(unpinned.routes.map(\.route) == [.tailnet], "A Wi-Fi address without a fingerprint is never used")
+        // Older saved settings, without the new fields, still load.
+        let old = try JSONDecoder().decode(RemoteHost.self, from: Data(#"{"id":"m","name":"Mac","baseURL":"https://mac.tailnet.ts.net:8451"}"#.utf8))
+        expect(old.lanURL == nil && old.pin == nil, "Saved hosts from earlier versions decode")
+    }
+
     static func main() throws {
+        try wifiPairingChecks()
         dialTrackingChecks()
         deferredTapChecks()
         glassesFeatureChecks()

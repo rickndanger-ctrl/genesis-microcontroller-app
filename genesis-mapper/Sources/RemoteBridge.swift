@@ -8,6 +8,13 @@ import CoreImage.CIFilterBuiltins
     @Published var serviceStatus="Starting remote service…"
     @Published var baseURL:String=UserDefaults.standard.string(forKey:"remote.baseURL") ?? ""
     @Published var enabled:Bool=UserDefaults.standard.object(forKey:"remote.enabled") as? Bool ?? true
+    /// Pair and connect over the local network, without Tailscale. On by default
+    /// only for a Mac that has no Tailscale address saved, so existing setups
+    /// open no new port until their owner turns it on.
+    @Published var wifiEnabled:Bool=UserDefaults.standard.object(forKey:"remote.wifi") as? Bool ?? (UserDefaults.standard.string(forKey:"remote.baseURL") ?? "").isEmpty
+    @Published var wifiStatus="Wi-Fi pairing is off"
+    private var wifiServer:RemoteHTTPServer?
+    private var wifiIdentity:WiFiIdentity?
     @Published var chats:[RemoteChat]=[]
     @Published var artifacts:[RemoteArtifact]=[]
     @Published var lastResult="No remote commands yet."
@@ -69,6 +76,9 @@ import CoreImage.CIFilterBuiltins
         return screenLocked || session?["CGSSessionScreenIsLocked"] as? Bool == true || session?["kCGSessionOnConsoleKey"] as? Bool == false
     }
     init() {
+        // Settle the Wi-Fi default once. Worked out at every launch, it would turn
+        // itself off after Tailscale later filled in an address.
+        if UserDefaults.standard.object(forKey:"remote.wifi")==nil {UserDefaults.standard.set(wifiEnabled,forKey:"remote.wifi")}
         do {
             let directory=FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Application Support/Genesis Agent Micro Controller/Remote",isDirectory:true)
             store=try RemoteStore(directory:directory);artifacts=store?.archive.artifacts ?? []
@@ -80,7 +90,37 @@ import CoreImage.CIFilterBuiltins
         if baseURL.isEmpty {Task {await discoverAddress()}}
         Task {_ = await loadCodexChats()}
     }
-    func setEnabled(_ value:Bool) {if !value {menuNavigation.invalidate();clearDisplaySession()};enabled=value;UserDefaults.standard.set(value,forKey:"remote.enabled");if value {startIfEnabled()} else {server?.stop();server=nil;serviceStatus="Remote access is off"}}
+    func setEnabled(_ value:Bool) {if !value {menuNavigation.invalidate();clearDisplaySession()};enabled=value;UserDefaults.standard.set(value,forKey:"remote.enabled");if value {startIfEnabled()} else {server?.stop();server=nil;serviceStatus="Remote access is off";stopWiFi()}}
+    func setWiFi(_ value:Bool) {wifiEnabled=value;UserDefaults.standard.set(value,forKey:"remote.wifi");if value {startWiFiIfEnabled()} else {stopWiFi()}}
+    private func stopWiFi() {wifiServer?.stop();wifiServer=nil;wifiStatus="Wi-Fi pairing is off"}
+    /// The second listener: TLS on every interface, for phones on the same network.
+    /// It serves exactly the same routes and checks the same per-device secrets.
+    private func startWiFiIfEnabled() {
+        guard enabled,wifiEnabled,wifiServer==nil,let store else{return}
+        do {
+            let identity=try wifiIdentity ?? WiFiIdentity.loadOrCreate(in:store.directory)
+            wifiIdentity=identity
+            let server=RemoteHTTPServer(port:WiFiIdentity.port,tls:identity.identity,admits:WiFiIdentity.isPrivate) {[weak self] request in guard let self else{return .error(503,"Companion closed.")};return await self.route(request)}
+            server.stateChanged={[weak self] state in Task{@MainActor in self?.wifiStatus=state}}
+            try server.start();wifiServer=server
+        } catch {wifiStatus=(error as? LocalizedError)?.errorDescription ?? "Wi-Fi pairing could not start."}
+    }
+    /// This Mac's Tailscale address, when one is set and usable.
+    private var tailnetAddress:String? {
+        let address=baseURL.trimmingCharacters(in:.whitespacesAndNewlines).trimmingCharacters(in:CharacterSet(charactersIn:"/"))
+        guard let parsed=URLComponents(string:address),parsed.scheme=="https",let host=parsed.host,!host.isEmpty,parsed.user==nil,parsed.password==nil,parsed.query==nil,parsed.fragment==nil,parsed.path.isEmpty || parsed.path=="/" else{return nil}
+        return address
+    }
+    /// What a pairing code tells the phone: where to reach this Mac and, over
+    /// Wi-Fi, which certificate to trust. Nil when there is no way to reach it.
+    func pairingPayload(code:String)->RemotePairing? {
+        guard enabled,let store else{return nil}
+        let wifi=wifiServer != nil ? wifiIdentity.flatMap{identity in WiFiIdentity.url.map{(url:$0,pin:identity.fingerprint)}} : nil
+        // Phones from before Wi-Fi pairing know only baseURL, so it holds the
+        // Tailscale address when there is one.
+        guard let base=tailnetAddress ?? wifi?.url else{return nil}
+        return RemotePairing(name:hostName,hostID:store.hostID,baseURL:base,token:code,lanURL:wifi?.url,pin:wifi?.pin)
+    }
     func saveAddress() {UserDefaults.standard.set(baseURL,forKey:"remote.baseURL")}
     func startIfEnabled() {
         guard enabled,server==nil,store != nil else{return}
@@ -88,6 +128,7 @@ import CoreImage.CIFilterBuiltins
         let server=RemoteHTTPServer {[weak self] request in guard let self else{return .error(503,"Companion closed.")};return await self.route(request)}
         server.stateChanged={[weak self] state in Task{@MainActor in self?.serviceStatus=state}}
         do {try server.start();self.server=server} catch {serviceStatus="Remote service could not start."}
+        startWiFiIfEnabled()
     }
     func discoverAddress() async {
         let address=await Task.detached(priority:.utility) { () -> String? in
@@ -104,10 +145,8 @@ import CoreImage.CIFilterBuiltins
         if let address,baseURL.isEmpty {baseURL=address;saveAddress()}
     }
     var pairingLink:URL? {
-        guard enabled,let store,let parsed=URLComponents(string:baseURL),parsed.scheme=="https",let host=parsed.host,!host.isEmpty,parsed.user==nil,parsed.password==nil,parsed.query==nil,parsed.fragment==nil,parsed.path.isEmpty || parsed.path=="/" else{return nil}
         // The code is good once and for ten minutes; it is not the Mac's secret.
-        guard let code=pairingCode else{return nil}
-        let payload=RemotePairing(name:hostName,hostID:store.hostID,baseURL:baseURL.trimmingCharacters(in:CharacterSet(charactersIn:"/")),token:code)
+        guard let code=pairingCode,let payload=pairingPayload(code:code) else{return nil}
         guard let data=try? JSONEncoder().encode(payload) else{return nil}
         let encoded=data.base64EncodedString().replacingOccurrences(of:"+",with:"-").replacingOccurrences(of:"/",with:"_").replacingOccurrences(of:"=",with:"")
         return URL(string:"genesiscontroller://pair?data="+encoded)
@@ -526,10 +565,9 @@ import CoreImage.CIFilterBuiltins
         // Someone signed in on this Mac can issue a pairing code without the window, for setting
         // devices up from the command line. Refused for anything relayed from the network.
         if request.method=="POST",path=="/v1/pair/code" {
-            guard LocalCaller.isDirect(headers:request.headers) else{return .error(403,"Pairing codes can only be issued on the Mac itself.")}
-            let address=baseURL.trimmingCharacters(in:CharacterSet(charactersIn:"/"))
-            guard enabled,let parsed=URLComponents(string:address),parsed.scheme=="https",parsed.host?.isEmpty==false else{return .error(409,"Set this Mac\u{2019}s private address in the pairing window first.")}
-            return .json(RemotePairing(name:hostName,hostID:store.hostID,baseURL:address,token:pairingCodes.issue(now:Date())))
+            guard !request.viaNetwork,LocalCaller.isDirect(headers:request.headers) else{return .error(403,"Pairing codes can only be issued on the Mac itself.")}
+            guard pairingPayload(code:"")?.baseURL != nil else{return .error(409,"Turn on Wi-Fi pairing or set this Mac\u{2019}s Tailscale address in the pairing window first.")}
+            return .json(pairingPayload(code:pairingCodes.issue(now:Date())))
         }
         func parameter(_ key:String)->String {query.first{$0.name==key}?.value ?? ""}
         do {
@@ -1001,16 +1039,20 @@ struct RemotePairingView:View {
     var body:some View {
         ScrollView {VStack(alignment:.leading,spacing:18) {
             Text("Agent Micro Controller on iPhone").font(.largeTitle.bold())
-            Text("Pair your phone to this Mac over your private Tailscale network.").foregroundStyle(.secondary)
+            Text("Pair your phone or iPad with this Mac. On the same Wi-Fi it just works; add Tailscale to control this Mac when you are away.").foregroundStyle(.secondary)
             Toggle("Enable private remote access",isOn:Binding(get:{bridge.enabled},set:bridge.setEnabled))
             Label(bridge.serviceStatus,systemImage:"network")
-            TextField("https://your-mac.tailnet.ts.net:8451",text:$bridge.baseURL).textFieldStyle(.roundedBorder).onSubmit{bridge.saveAddress()}
+            Toggle("Pair and connect over this Wi-Fi",isOn:Binding(get:{bridge.wifiEnabled},set:bridge.setWiFi)).disabled(!bridge.enabled)
+            Label(bridge.wifiStatus,systemImage:"wifi").font(.callout)
+            Text("Connections over Wi-Fi are encrypted with this Mac\u{2019}s own certificate, which the QR code introduces to your phone. Only devices you pair can use it.").font(.caption).foregroundStyle(.secondary)
+            Text("Away from home (optional)").font(.headline).padding(.top,4)
+            TextField("Tailscale address, such as https://your-mac.tailnet.ts.net:8451",text:$bridge.baseURL).textFieldStyle(.roundedBorder).onSubmit{bridge.saveAddress()}
             HStack(alignment:.top,spacing:20) {
                 if let image=bridge.qrImage {Image(nsImage:image).interpolation(.none).resizable().frame(width:220,height:220).padding(12).background(.white).clipShape(RoundedRectangle(cornerRadius:14))}
                 VStack(alignment:.leading,spacing:12) {
                     Text("Scan from Agent Micro Controller on your iPhone").font(.headline)
                     Text("This code pairs one device, once, and stops working after ten minutes. Scanning it gives that device control of the apps on this Mac, so show it only to your own phone or tablet.").font(.callout)
-                    Text("The HTTPS endpoint must be connected to this Mac’s local service on port 18765. Tailscale reachability is checked during pairing.").font(.caption).foregroundStyle(.secondary)
+                    Text("For Tailscale, the address must be connected to this Mac\u{2019}s local service on port 18765 (tailscale serve --bg --https=8451 http://127.0.0.1:18765). The phone uses Wi-Fi when it can and Tailscale otherwise.").font(.caption).foregroundStyle(.secondary)
                     Button("Copy pairing link") {if let link=bridge.pairingLink {NSPasteboard.general.clearContents();NSPasteboard.general.setString(link.absoluteString,forType:.string)}}.disabled(bridge.pairingLink==nil)
                     Button("Save address"){bridge.saveAddress()}
                 }

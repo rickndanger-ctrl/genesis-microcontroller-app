@@ -130,6 +130,11 @@ struct ArtifactWebView: UIViewRepresentable {
             let scheme = url.scheme?.lowercased()
             decisionHandler(scheme == "https" || scheme == "about" ? .allow : .cancel)
         }
+        /// A Mac reached over Wi-Fi must present the certificate from its QR code.
+        func webView(_ webView: WKWebView, didReceive challenge: URLAuthenticationChallenge,
+                     completionHandler: @escaping (URLSession.AuthChallengeDisposition, URLCredential?) -> Void) {
+            let answer = PinnedCertificates.evaluate(challenge); completionHandler(answer.0, answer.1)
+        }
     }
 }
 
@@ -138,6 +143,10 @@ final class ArtifactDownloadGuard: NSObject, URLSessionTaskDelegate {
                     newRequest request: URLRequest, completionHandler: @escaping (URLRequest?) -> Void) {
         // Export endpoints do not redirect; never forward a pairing credential to a web destination.
         completionHandler(nil)
+    }
+    func urlSession(_ session: URLSession, task: URLSessionTask, didReceive challenge: URLAuthenticationChallenge,
+                    completionHandler: @escaping (URLSession.AuthChallengeDisposition, URLCredential?) -> Void) {
+        let answer = PinnedCertificates.evaluate(challenge); completionHandler(answer.0, answer.1)
     }
 }
 

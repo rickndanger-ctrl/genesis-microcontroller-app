@@ -29,7 +29,11 @@ struct RemoteArtifact: Codable { var id: String; var title: String; var kind: St
 /// What the pairing QR code carries. Version 1 put the Mac's one shared secret
 /// in `token`. Version 2 puts a single-use code there, which the phone trades
 /// for a secret of its own at /v1/pair.
-struct RemotePairing: Codable { var v = 2; var name: String; var hostID: String; var baseURL: String; var token: String }
+struct RemotePairing: Codable {
+    var v = 2; var name: String; var hostID: String; var baseURL: String; var token: String
+    /// This Mac on the local network, and its certificate's fingerprint. Absent when Wi-Fi pairing is off.
+    var lanURL: String? = nil; var pin: String? = nil
+}
 struct RemotePairRequest: Codable { var code: String; var deviceName: String? = nil }
 struct RemotePairResponse: Codable { var token: String; var deviceID: String; var deviceName: String }
 struct RemoteFault: Error { let status: Int; let message: String }
@@ -281,6 +285,8 @@ final class RemoteStore {
 
 struct RemoteHTTPRequest {
     var method: String; var target: String; var headers: [String:String]; var body: Data
+    /// Arrived on the Wi-Fi listener. Such a request never counts as made on this Mac.
+    var viaNetwork = false
     static func parse(_ data: Data) throws -> RemoteHTTPRequest? {
         guard data.count <= RemotePolicy.maximumBody + 16_384 else {throw RemoteFault(status:413,message:"Request too large.")}
         guard let split = data.range(of:Data("\r\n\r\n".utf8)) else {
