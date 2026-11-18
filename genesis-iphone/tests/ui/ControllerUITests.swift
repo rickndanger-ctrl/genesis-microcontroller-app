@@ -327,6 +327,15 @@ final class ControllerUITests: XCTestCase {
         app.launchArguments = ["--fresh-install"]
         XCUIDevice.shared.orientation = .portrait
         app.launch()
+        // It starts with how to connect: the Mac app link, the scanner and the demo.
+        let close = app.buttons["guide.close"]
+        XCTAssertTrue(close.waitForExistence(timeout: 8), "An unpaired install opens the connect guide")
+        XCTAssertTrue(app.descendants(matching: .any)["guide.shareMacLink"].exists, "The guide offers the Mac app link")
+        XCTAssertTrue(app.buttons["guide.scan"].exists, "and the scanner")
+        XCTAssertTrue(app.buttons["guide.tryDemo"].exists, "and the demo, for someone without a Mac")
+        saveFullscreenScreenshot("Fresh install, connect guide")
+        close.tap()
+        XCTAssertTrue(close.waitForNonExistence(timeout: 5), "Not now closes the guide")
         let tryDemo = app.buttons["controller.tryDemo"]
         XCTAssertTrue(tryDemo.waitForExistence(timeout: 8), "An unpaired install offers the demo")
         XCTAssertTrue(app.buttons["Pair a Mac"].firstMatch.exists, "Pairing stays the first choice")
@@ -352,6 +361,7 @@ final class ControllerUITests: XCTestCase {
         exitDemo.tap()
         XCTAssertTrue(tryDemo.waitForExistence(timeout: 5), "Leaving the demo returns to the unpaired controller")
         XCTAssertFalse(exitDemo.exists)
+        XCTAssertFalse(close.exists, "The guide opens by itself only once per launch")
         // The Settings route out works as well.
         tryDemo.tap()
         XCTAssertTrue(exitDemo.waitForExistence(timeout: 5))

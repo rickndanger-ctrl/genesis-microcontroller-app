@@ -546,7 +546,7 @@ final class ControllerStore: ObservableObject {
             async let receipts: Void = recoverPendingSend()
             _ = try await (mappings, list, shelf, receipts)
             await recoverOtherPendingSends()
-        } catch { if gate.accepts(generation) { failConnection(error); if isPaired { lastError = error.localizedDescription } } }
+        } catch { if gate.accepts(generation) { failConnection(error); if isPaired { lastError = ConnectionHelp.describe(error, mac: selectedHost?.name) } } }
     }
 
     private func refreshProfile(host: RemoteHost, token: String, provider: ProviderID, generation: Int) async throws {
@@ -691,7 +691,7 @@ final class ControllerStore: ObservableObject {
             guard gate.accepts(generation), saved.provider == selectedProvider.rawValue else { return false }
             profile = saved; settings.profiles[scope] = saved; syncSelectedSlot(); persist()
             return true
-        } catch { if gate.accepts(generation) { lastError = error.localizedDescription }; return false }
+        } catch { if gate.accepts(generation) { lastError = ConnectionHelp.describe(error, mac: selectedHost?.name) }; return false }
     }
 
     func openSlot(_ index: Int) async {
@@ -932,7 +932,7 @@ final class ControllerStore: ObservableObject {
             if dictationIntent == intent {
                 captureRoute = nil
                 sendReady = !draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-                lastError = error.localizedDescription
+                lastError = ConnectionHelp.describe(error, mac: selectedHost?.name)
             }
         }
     }
@@ -979,7 +979,7 @@ final class ControllerStore: ObservableObject {
             try settings.ledger.begin(pending)
             guard persist() else { settings.ledger.pendingSends.removeValue(forKey: route.storageKey); return }
         }
-        catch { lastError = error.localizedDescription; return }
+        catch { lastError = ConnectionHelp.describe(error, mac: selectedHost?.name); return }
         let receipt = await execute(action: "sendPrompt", chatID: chat.id, text: text, id: id, replaceDraft: replacingMacDraft)
         guard let receipt else { return }
         finishSend(receipt, pending: pending)
@@ -1127,7 +1127,7 @@ final class ControllerStore: ObservableObject {
         do {
             let (host, token) = try connection()
             await refreshArtifacts(host: host, token: token, provider: provider, generation: generation, chat: chat, enabled: true)
-        } catch { if gate.accepts(generation) { lastError = error.localizedDescription } }
+        } catch { if gate.accepts(generation) { lastError = ConnectionHelp.describe(error, mac: selectedHost?.name) } }
     }
     private func refreshArtifacts(host: RemoteHost, token: String, provider: ProviderID, generation: Int,
                                   chat: ChatRecord?, enabled: Bool) async {
@@ -1140,7 +1140,7 @@ final class ControllerStore: ObservableObject {
             let result = try await client.fetch(ArtifactsResponse.self, host: host, token: token, path: "/v1/artifacts", query: query)
             guard gate.accepts(generation) else { return }
             artifacts = result.artifacts.filter { $0.hostID == host.hostID && $0.provider == provider.rawValue && (chat == nil || $0.chatID.isEmpty || $0.chatID == chat?.id) }
-        } catch { if gate.accepts(generation) { lastError = error.localizedDescription } }
+        } catch { if gate.accepts(generation) { lastError = ConnectionHelp.describe(error, mac: selectedHost?.name) } }
     }
     func openArtifact(_ artifact: ArtifactRecord) async {
         guard artifact.provider == selectedProvider.rawValue, artifact.hostID == selectedHost?.hostID else { return }

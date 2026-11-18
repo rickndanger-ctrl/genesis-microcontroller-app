@@ -14,6 +14,7 @@ struct SettingsScreen: View {
     @State private var scanning = false
     @State private var pairing = false
     @State private var message: String?
+    @State private var offerSettings = false
 
     private var selectedPack: ControllerSound.Pack {
         ControllerSound.packs.first { $0.id == soundPack } ?? ControllerSound.defaultPack
@@ -57,13 +58,14 @@ struct SettingsScreen: View {
                         .font(.caption).foregroundStyle(.secondary)
                 }
                 Section("Pair a Mac") {
-                    Text("On the Mac, click the Agent Micro Controller dial in the menu bar, then Pair iPhone / Artifacts. Scan its pairing code with this device on the same Wi-Fi as the Mac. To use the Mac away from home, also set up Tailscale on both.")
+                    Text("On your Mac, open Agent Micro Controller and choose Set Up and Pair a Phone from its dial in the menu bar. Scan the code with this device on the same Wi-Fi as the Mac. To use the Mac away from home, also set up Tailscale on both.")
                         .font(.subheadline).foregroundStyle(.secondary)
                     Button { ControllerSound.shared.keyClick(); scanning = true } label: { Label("Scan pairing code", systemImage: "qrcode.viewfinder") }
                     TextField("Or paste a private pairing link", text: $pairingLink).textInputAutocapitalization(.never).autocorrectionDisabled()
                         .privacySensitive()
                     Button(pairing ? "Connecting…" : "Pair this Mac") { ControllerSound.shared.keyClick(); pair(pairingLink) }.disabled(pairing || pairingLink.isEmpty)
                     if let message { Text(message).font(.caption).foregroundStyle(.secondary) }
+                    if offerSettings { Button("Open Settings") { UIApplication.shared.open(URL(string: UIApplication.openSettingsURLString)!) } }
                 }
                 Section("Your Macs") {
                     ForEach(store.hosts) { host in
@@ -183,8 +185,12 @@ struct SettingsScreen: View {
         pairing = true
         Task {
             defer { pairing = false }
+            offerSettings = false
             do { try await store.pair(url); pairingLink = ""; message = "Paired. Your Mac is ready in the switcher." }
-            catch { message = error.localizedDescription }
+            catch {
+                message = ConnectionHelp.describe(error, mac: nil)
+                offerSettings = ConnectionHelp.problem(error).map(ConnectionHelp.fixedInSettings) ?? false
+            }
         }
     }
 }

@@ -35,7 +35,7 @@ struct GenesisControllerApp: App {
             }
                 .tint(Color(red: 0.20, green: 0.47, blue: 0.96))
                 .preferredColorScheme(.light)
-                .onOpenURL { url in demo = nil; Task { do { try await store.pair(url) } catch { store.lastError = error.localizedDescription } } }
+                .onOpenURL { url in demo = nil; Task { do { try await store.pair(url) } catch { store.lastError = ConnectionHelp.describe(error, mac: nil) } } }
                 .task { store.setForeground(true) }
                 .onReceive(store.glasses.$enabled) { enabled in
                     UIApplication.shared.isIdleTimerDisabled = enabled && scenePhase == .active

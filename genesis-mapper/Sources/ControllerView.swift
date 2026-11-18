@@ -34,7 +34,7 @@ struct MainView: View {
      Text(model.mode=="Claude" ? "CLAUDE MODE":model.mode=="Codex" ? "CODEX MODE":"OFFLINE").font(.system(size:10,weight:.semibold)).padding(.horizontal,12).padding(.vertical,7).background(accent.opacity(0.12)).clipShape(Capsule())
     }
     if !model.trusted {
-     HStack {Image(systemName:"hand.raised.fill");Text("Allow Agent Micro Controller to use Claude’s controls.");Spacer();Button("Enable access"){NSWorkspace.shared.open(URL(string:"x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility")!)}}.font(.callout).padding(12).background(Color.orange.opacity(0.12)).cornerRadius(10)
+     HStack {Image(systemName:"hand.raised.fill");Text("Allow Agent Micro Controller to use Claude’s controls.");Spacer();Button("Enable access"){_=AXIsProcessTrustedWithOptions([kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String:true] as CFDictionary)}}.font(.callout).padding(12).background(Color.orange.opacity(0.12)).cornerRadius(10)
     }
     if section==0 {agentPage}
     else if section==1 {actionsPage}
@@ -179,15 +179,28 @@ struct MainView: View {
                                       running:NSRunningApplication.runningApplications(withBundleIdentifier:id).filter{!$0.isTerminated}.map(\.processIdentifier)) {
    exit(0)
   }
+  // A menu bar app with no window open gets App Nap, which slows its timers and
+  // makes phones wait seconds for answers. It serves the phone at any moment,
+  // so it opts out, while still letting the Mac sleep when idle.
+  MapperApp.activity=ProcessInfo.processInfo.beginActivity(options:.userInitiatedAllowingIdleSystemSleep,reason:"Answering paired phones and tablets")
  }
+ static var activity:NSObjectProtocol?
  var body: some Scene {
-  WindowGroup("Agent Micro Controller",id:"controller"){MainView(model:model)}.defaultSize(width:1040,height:740)
-  WindowGroup("iPhone Pairing",id:"phone-pairing"){RemotePairingView(bridge:remote)}.defaultSize(width:800,height:760)
-  MenuBarExtra("Agent Micro Controller",systemImage:"dial.medium.fill") {ControllerMenu(model:model)}
+  // The menu bar dial comes first so that SwiftUI opens no window by itself;
+  // the dial opens setup when something is left to do.
+  MenuBarExtra {ControllerMenu(model:model)} label:{MenuBarDial(bridge:remote)}
+  Window("Set Up Agent Micro Controller",id:"setup"){SetupView(bridge:remote,model:model)}.windowResizability(.contentSize)
+  WindowGroup("Genesis Mini Controls",id:"controller"){MainView(model:model)}.defaultSize(width:1040,height:740)
+  WindowGroup("Phones and Devices",id:"phone-pairing"){RemotePairingView(bridge:remote)}.defaultSize(width:800,height:760)
  }
 }
 struct ControllerMenu: View {
  @ObservedObject var model:Model
  @Environment(\.openWindow) var openWindow
- var body: some View {Text(model.mode);Button("Open Agent Micro Controller"){openWindow(id:"controller");NSApp.activate()};Button("Pair iPhone / Artifacts"){openWindow(id:"phone-pairing");NSApp.activate()};Button("Refresh sessions"){model.discoverSessions()};Divider();Button("Quit Agent Micro Controller"){NSApp.terminate(nil)}}
+ var body: some View {
+  Button("Set Up and Pair a Phone…"){openWindow(id:"setup");SetupWindow.bringForward()}
+  Button("Phones, Devices and Artifacts…"){openWindow(id:"phone-pairing");NSApp.activate()}
+  if model.hardwareSeen {Divider();Text("Genesis Mini: \(model.mode)");Button("Genesis Mini Controls…"){openWindow(id:"controller");NSApp.activate()};Button("Refresh sessions"){model.discoverSessions()}}
+  Divider();Button("Quit Agent Micro Controller"){NSApp.terminate(nil)}
+ }
 }

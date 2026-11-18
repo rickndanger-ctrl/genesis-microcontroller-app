@@ -4,6 +4,7 @@ import UIKit
 struct ControllerScreen: View {
     @ObservedObject var store: ControllerStore
     @State private var showSettings = false
+    @State private var showGuide = false
     @State private var showArtifacts = false
     @State private var showActions = false
     @State private var showNavigation = false
@@ -91,6 +92,11 @@ struct ControllerScreen: View {
         .statusBarHidden(fullScreenController)
         .persistentSystemOverlays(fullScreenController ? .hidden : .automatic)
         .sheet(isPresented: $showSettings) { SettingsScreen(store: store, endDemo: endDemo) }
+        .sheet(isPresented: $showGuide) { ConnectGuide(store: store, startDemo: startDemo) }
+        .onAppear {
+            // An unpaired controller starts with how to connect, once per launch.
+            if !store.isDemo, store.hosts.isEmpty, !GuideLaunch.offered { GuideLaunch.offered = true; showGuide = true }
+        }
         .safeAreaInset(edge: .bottom, spacing: 0) {
             if let endDemo {
                 // Always in reach, in either layout, so the demo is never a dead end.
@@ -561,7 +567,7 @@ struct ControllerScreen: View {
         VStack(spacing: 8) {
             HStack(spacing: 4) {
                 if store.hosts.isEmpty {
-                    Button { ControllerSound.shared.keyClick(); showSettings = true } label: {
+                    Button { ControllerSound.shared.keyClick(); if store.isDemo { showSettings = true } else { showGuide = true } } label: {
                         Label("Pair a Mac", systemImage: "plus.circle")
                             .font(.system(size: isPad ? 14 : 12, weight: .semibold))
                             .frame(maxWidth: .infinity, minHeight: isPad ? 48 : 42)
@@ -643,7 +649,7 @@ struct ControllerScreen: View {
             // Full screen keeps the draft in its review sheet; the main layout has the box on screen.
             if fullScreenController { showDraftReview = true } else { draftFocused = true }
         case .reviewSend: showDraftReview = true
-        case .pairMac: showSettings = true
+        case .pairMac: if store.isDemo { showSettings = true } else { showGuide = true }
         case .openApp: Task { await store.openProviderApp() }
         case .restartService: Task { await store.restartProviderService() }
         case .refresh: Task { await store.refresh() }
@@ -1192,3 +1198,6 @@ struct DialControl: View {
         }
     }
 }
+
+/// Whether the connect guide has opened by itself since the app launched.
+@MainActor enum GuideLaunch { static var offered = false }

@@ -193,7 +193,7 @@ struct DictationControlPresentation: Equatable {
         }
         let canDraft = hasChat && !busy
         guard let info else {
-            return canDraft ? later("Your Mac isn’t answering.") : blocked("NOT CONNECTED", "Connect to your Mac to use dictation.", "Check that Tailscale and the Mac companion are running, then refresh the connection.")
+            return canDraft ? later("Your Mac isn’t answering.") : blocked("NOT CONNECTED", "Connect to your Mac to use dictation.", "Check that your Mac is awake, Agent Micro Controller is running on it, and your phone is on the same Wi-Fi, then refresh the connection.")
         }
         if info.readiness == "locked" { return canDraft ? later("Your Mac is locked.") : blocked("MAC LOCKED", "Unlock your Mac to use dictation.", "Unlock the selected Mac, then refresh the controller connection.") }
         if info.readiness == "needsAccessibility" { return blocked("SETUP NEEDED", "Allow Accessibility for the companion on your Mac.", "Enable Accessibility for Agent Micro Controller on the selected Mac, then refresh.") }

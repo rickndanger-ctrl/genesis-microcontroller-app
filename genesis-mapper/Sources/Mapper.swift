@@ -524,6 +524,9 @@ final class HIDLink {
     @Published var mode="Waiting for Genesis"
     @Published var status="Open Claude’s Code sidebar, then Refresh sessions."
     @Published var trusted=false
+    /// Whether Genesis Mini hardware has ever been connected to this Mac. Its
+    /// controls stay out of the menu for everyone else.
+    @Published var hardwareSeen=UserDefaults.standard.bool(forKey:"genesis.hardwareSeen")
     @Published var selected = -1
     @Published var selecting=false
     @Published var loginEnabled=LoginLaunch.enabled
@@ -844,6 +847,8 @@ final class HIDLink {
     func tick() {
         let uptime=ProcessInfo.processInfo.systemUptime
         refreshQuietStudioProcess()
+        // Notice an Accessibility change made in System Settings straight away.
+        let nowTrusted=AXIsProcessTrusted();if nowTrusted != trusted {trusted=nowTrusted}
         guard !isSystemSleeping else { return }
         if let cancel=promptGate.leaseExpired(now:uptime) { sendPromptURL(cancel) }
         if hid.device==nil {
@@ -955,6 +960,7 @@ final class HIDLink {
         }
         if let result=msg["result"] as? [String:Any],result["version"] != nil {
             let firstReply=firmware=="Not connected"
+            if !hardwareSeen {hardwareSeen=true;UserDefaults.standard.set(true,forKey:"genesis.hardwareSeen")}
             firmware=result["version"] as? String ?? "Not connected"
             supportsCatalog=(result["action_catalog"] as? Int)==1
             supportsNavigation=(result["navigation_protocol"] as? Int)==1

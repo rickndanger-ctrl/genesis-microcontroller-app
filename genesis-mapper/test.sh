@@ -30,6 +30,8 @@ xcrun swiftc -parse-as-library "$ROOT/Sources/MacInput.swift" "$ROOT/tests/MacIn
 xcrun swiftc -parse-as-library "$ROOT/Sources/ClaudeSidebar.swift" "$ROOT/tests/ClaudeSidebarTests.swift" -o "$ROOT/test-build/claude-sidebar"
 "$ROOT/test-build/claude-sidebar"
 xcrun swiftc -parse-as-library "$ROOT/Sources/Login.swift" "$ROOT/tests/LoginLaunchTests.swift" -o "$ROOT/test-build/login-launch"
+xcrun swiftc -parse-as-library "$ROOT/Sources/SetupPlan.swift" "$ROOT/tests/SetupPlanTests.swift" -o "$ROOT/test-build/setup-plan"
+"$ROOT/test-build/setup-plan"
 "$ROOT/test-build/login-launch"
 xcrun swiftc -parse-as-library "$ROOT/Sources/CodexService.swift" "$ROOT/tests/CodexServiceTests.swift" -o "$ROOT/test-build/codex-service"
 "$ROOT/test-build/codex-service"

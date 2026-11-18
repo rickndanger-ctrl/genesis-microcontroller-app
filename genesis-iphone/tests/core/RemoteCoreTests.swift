@@ -395,6 +395,27 @@ import Foundation
         expect(object["action"] as? String == "sendPrompt", "Wire command uses documented action")
         expect(object["hostID"] as? String == valid.hostID && object["chatID"] as? String == "chat1", "Send carries explicit host and chat")
         expect(object["generation"] as? Int == 9, "Command retains selection generation")
+        // Connection trouble is explained as what to do, not as a system error.
+        let denied = NSError(domain: NSURLErrorDomain, code: NSURLErrorNotConnectedToInternet, userInfo: [
+            NSLocalizedDescriptionKey: "The Internet connection appears to be offline.",
+            "_NSURLErrorNWPathKey": "unsatisfied (Local network prohibited), interface: en0"])
+        expect(ConnectionHelp.problem(denied) == .localNetworkBlocked, "A denied Local Network permission is recognised from the path")
+        expect(ConnectionHelp.fixedInSettings(.localNetworkBlocked), "Its fix is in Settings")
+        let underlying = NSError(domain: NSURLErrorDomain, code: NSURLErrorCannotConnectToHost, userInfo: [
+            NSUnderlyingErrorKey: NSError(domain: "kNWErrorDomainPOSIX", code: 50, userInfo: [NSLocalizedDescriptionKey: "Local network prohibited"])])
+        expect(ConnectionHelp.problem(underlying) == .localNetworkBlocked, "It is recognised in an underlying error too")
+        expect(ConnectionHelp.problem(URLError(.notConnectedToInternet)) == .phoneOffline, "No network at all")
+        expect(ConnectionHelp.problem(URLError(.timedOut)) == .macUnreachable && ConnectionHelp.problem(URLError(.cannotFindHost)) == .macUnreachable,
+               "A Mac that does not answer")
+        expect(!ConnectionHelp.fixedInSettings(.macUnreachable), "An unreachable Mac is not fixed in the phone's Settings")
+        expect(ConnectionHelp.problem(URLError(.serverCertificateUntrusted)) == .untrustedConnection, "A certificate this app does not trust")
+        expect(ConnectionHelp.problem(URLError(.cancelled)) == nil, "A cancelled request is not a connection problem")
+        expect(ConnectionHelp.problem(RemoteError.invalidPairing) == nil, "The app's own errors keep their wording")
+        expect(ConnectionHelp.describe(RemoteError.invalidPairing, mac: nil) == RemoteError.invalidPairing.localizedDescription, "and are shown as they are")
+        let unreachable = ConnectionHelp.describe(URLError(.timedOut), mac: "Mac mini")
+        expect(unreachable.hasPrefix("“Mac mini” didn’t answer") && unreachable.contains("same Wi-Fi"), "The message names the Mac and the likely fix")
+        expect(ConnectionHelp.describe(URLError(.timedOut), mac: nil).hasPrefix("Your Mac didn’t answer"), "Without a name it says your Mac")
+        expect(!ConnectionHelp.describe(URLError(.timedOut), mac: nil).contains("timed out"), "The system wording is not shown")
         print("Remote core: \(checks) checks passed")
     }
 }
