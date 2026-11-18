@@ -32,6 +32,14 @@ Pair with the Agent Micro Controller companion on your Mac, assign chats to the 
 
 Build 37 (0.7.2) was submitted for TestFlight beta review and is waiting for review. Filled in: tester description, feedback email, reviewer contact, reviewer notes (above), What to Test, and no sign-in required. An "External testers" group holds build 37 with the public link off and no testers. Approval lets external testers install; enabling the public link and inviting people are separate decisions. Testers will also need a notarized Mac companion download, which doesn't exist yet.
 
+**Update:** the companion is now notarized and published as the GitHub release `companion-v0.7.8` (built by `genesis-mapper/release.sh`).
+
+## App Store status (Nov 18)
+
+App Store version **0.7.2** (renamed from the default 1.0 to match build 37) is filled in: description, keywords, promotional text, subtitle, support and marketing URL, copyright "2026 PyBird", Developer Tools / Productivity, no age-restricted content, no third-party content, free in all territories (new territories included), build 37 attached, reviewer contact and notes (with the companion link), and one demo-mode screenshot each for 6.9" iPhone and 13" iPad. Release is set to go out automatically after approval.
+
+Apple blocks the submission until three forms are answered in the App Store Connect website (the API cannot fill them): **App Privacy** (data collection; the app sends nothing to the developer, so "Data Not Collected" fits), and two compliance forms Apple names only by code, one about security and one about AI-generated content. An empty review submission is already created; once the forms are done, add version 0.7.2 to it and submit.
+
 ## Archive preparation
 
 - The app icon comes from the Blender deck pieces (`genesis-iphone/design/build_app_icon.py`).
