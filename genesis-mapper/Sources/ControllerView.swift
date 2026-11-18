@@ -189,7 +189,9 @@ struct MainView: View {
   // The menu bar dial comes first so that SwiftUI opens no window by itself;
   // the dial opens setup when something is left to do.
   MenuBarExtra {ControllerMenu(model:model)} label:{MenuBarDial(bridge:remote)}
-  Window("Set Up Agent Micro Controller",id:"setup"){SetupView(bridge:remote,model:model)}.windowResizability(.contentSize)
+  // Tall enough to show all four steps and the whole pairing code; macOS
+  // shrinks it to fit a smaller screen, where the steps scroll.
+  Window("Set Up Agent Micro Controller",id:"setup"){SetupView(bridge:remote,model:model)}.defaultSize(width:900,height:900).windowResizability(.contentMinSize)
   WindowGroup("Genesis Mini Controls",id:"controller"){MainView(model:model)}.defaultSize(width:1040,height:740)
   WindowGroup("Phones and Devices",id:"phone-pairing"){RemotePairingView(bridge:remote)}.defaultSize(width:800,height:760)
  }
