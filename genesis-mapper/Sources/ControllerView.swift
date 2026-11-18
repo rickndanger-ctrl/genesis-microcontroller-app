@@ -172,6 +172,7 @@ struct MainView: View {
 @main struct MapperApp: App {
  @StateObject private var model=Model()
  @StateObject private var remote=GenesisRemoteBridge.shared
+ @NSApplicationDelegateAdaptor(SetupAppDelegate.self) private var appDelegate
  init() {
   // One companion per Mac: a second copy would fight the first for the port and the hardware.
   if let id=Bundle.main.bundleIdentifier,

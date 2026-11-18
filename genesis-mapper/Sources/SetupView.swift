@@ -1,6 +1,7 @@
 import SwiftUI
 import AppKit
 import ApplicationServices
+import Darwin
 
 /// The agent apps the companion drives, and where to get each one.
 struct SetupAgent: Identifiable {
@@ -55,6 +56,24 @@ struct SetupAgent: Identifiable {
         NSWorkspace.shared.open(URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility")!)
     }
 
+    static func clearQuarantine(_ url: URL) {
+        let strip = Process()
+        strip.executableURL = URL(fileURLWithPath: "/usr/bin/xattr")
+        strip.arguments = ["-dr", "com.apple.quarantine", url.path]
+        try? strip.run(); strip.waitUntilExit()
+    }
+    /// Where a copy macOS runs from its hidden folder really lives, such as
+    /// ~/Downloads. Uses the system call made for exactly this question.
+    static func originalLocation(of translocated: URL) -> URL? {
+        typealias Original = @convention(c) (CFURL, UnsafeMutablePointer<Unmanaged<CFError>?>?) -> Unmanaged<CFURL>?
+        guard let handle = dlopen("/System/Library/Frameworks/Security.framework/Security", RTLD_LAZY),
+              let symbol = dlsym(handle, "SecTranslocateCreateOriginalPathForURL") else { return nil }
+        let original = unsafeBitCast(symbol, to: Original.self)
+        guard let url = original(translocated as CFURL, nil)?.takeRetainedValue() as URL?,
+              !url.path.contains("/AppTranslocation/") else { return nil }
+        return url
+    }
+
     /// Copies this app into Applications, opens the new copy and quits. An
     /// older copy already there goes to the Trash, as does the original when it
     /// can be moved (a copy macOS is running from a hidden folder cannot).
@@ -68,7 +87,16 @@ struct SetupAgent: Identifiable {
             try fm.createDirectory(at: folder, withIntermediateDirectories: true)
             if fm.fileExists(atPath: destination.path) { try fm.trashItem(at: destination, resultingItemURL: nil) }
             try fm.copyItem(at: source, to: destination)
-            if place == .elsewhere { try? fm.trashItem(at: source, resultingItemURL: nil) }
+            // The copy keeps the "downloaded from the internet" mark, and macOS
+            // runs a marked app from a hidden folder again, so setup would ask
+            // to move it forever. Gatekeeper has already checked this app (it
+            // is open), so the installed copy drops the mark, as a Finder move would.
+            SetupState.clearQuarantine(destination)
+            // The original goes to the Trash, so only one copy is left to find.
+            if let original = place == .translocated ? SetupState.originalLocation(of: source) : source,
+               original.standardizedFileURL != destination.standardizedFileURL {
+                try? fm.trashItem(at: original, resultingItemURL: nil)
+            }
         } catch {
             moving = false
             moveError = "Could not move the app: \(error.localizedDescription) Drag Agent Micro Controller into Applications in the Finder instead."
@@ -116,7 +144,7 @@ struct SetupView: View {
                 }
                 step(1, "Put the app in Applications", done: installed) { moveStep }
                 step(2, "Allow it to use your agent apps", done: state.trusted, enabled: installed) { accessibilityStep }
-                step(3, "Your agent apps", done: anyAgent, enabled: installed) { agentsStep }
+                step(3, "Your agent apps", done: anyAgent) { agentsStep }
                 step(4, "Scan this code with your phone", done: paired, enabled: installed) { pairStep }
                 HStack {
                     Toggle("Start automatically when I sign in", isOn: Binding(get: { model.loginEnabled }, set: { model.setLogin($0) }))
@@ -259,7 +287,13 @@ struct MenuBarDial: View {
     @Environment(\.openWindow) private var openWindow
     private static var checked = false
     var body: some View {
-        Image(systemName: "dial.medium.fill").onAppear {
+        Image(systemName: "dial.medium.fill")
+            // Opening the app again (from Applications, Launchpad or Spotlight)
+            // shows setup, for anyone who can't find the dial in a crowded menu bar.
+            .onReceive(NotificationCenter.default.publisher(for: SetupWindow.reopen)) { _ in
+                openWindow(id: "setup"); SetupWindow.bringForward()
+            }
+            .onAppear {
             guard !Self.checked else { return }
             Self.checked = true
             let place = SetupState.currentPlace
@@ -278,6 +312,7 @@ struct MenuBarDial: View {
 /// A menu bar app is not the active app when its window opens, and macOS may
 /// leave that window behind whatever was in front. Setup must be seen.
 @MainActor enum SetupWindow {
+    static let reopen = Notification.Name("SetupWindow.reopen")
     static func bringForward() {
         NSApp.activate(ignoringOtherApps: true)
         DispatchQueue.main.async {
@@ -285,5 +320,14 @@ struct MenuBarDial: View {
                 window.makeKeyAndOrderFront(nil); window.orderFrontRegardless()
             }
         }
+    }
+}
+
+/// Hears macOS's "the app was opened again" event, which a menu bar app with
+/// no window open otherwise ignores.
+final class SetupAppDelegate: NSObject, NSApplicationDelegate {
+    func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows: Bool) -> Bool {
+        if !hasVisibleWindows { NotificationCenter.default.post(name: SetupWindow.reopen, object: nil) }
+        return true
     }
 }

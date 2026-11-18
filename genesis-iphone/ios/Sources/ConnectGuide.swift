@@ -36,7 +36,7 @@ struct ConnectGuide: View {
                         HStack(spacing: 10) {
                             ShareLink(item: ConnectionHelp.macAppPage, subject: Text("Agent Micro Controller for Mac"),
                                       message: Text("Download the Mac app for Agent Micro Controller")) {
-                                Label("Send to my Mac", systemImage: "square.and.arrow.up")
+                                Label("Send link", systemImage: "square.and.arrow.up")
                             }
                             .buttonStyle(.borderedProminent)
                             .accessibilityIdentifier("guide.shareMacLink")
