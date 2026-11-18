@@ -44,6 +44,8 @@ Apple blocks the submission until three forms are answered in the App Store Conn
 
 Build **0.7.3 (38)**, with Wi-Fi pairing, was uploaded on November 18, 2026 after the full iPhone/iPad screen tests passed. It is meant to replace build 37 in the App Store version, which then becomes 0.7.3. The matching notarized companion 0.7.9 is a draft GitHub release, not yet published.
 
+**Update (later Nov 18):** at the owner's request, China mainland was removed from availability (174 territories remain), which cleared both China forms. The App Store version is now **0.7.3 with build 38**. Companion 0.7.9 is published as the latest GitHub release, and the reviewer notes link it and describe Wi-Fi pairing. The support site now links the download (`releases/latest`) and describes Wi-Fi pairing; the privacy policy's network paragraph was updated to match. The only remaining block is **App Privacy** (`APP_DATA_USAGES_REQUIRED`), which has to be answered and published in the App Store Connect website. After that, add version 0.7.3 to review submission `28057be4…` and submit.
+
 ## Archive preparation
 
 - The app icon comes from the Blender deck pieces (`genesis-iphone/design/build_app_icon.py`).
