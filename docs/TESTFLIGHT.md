@@ -40,6 +40,10 @@ App Store version **0.7.2** (renamed from the default 1.0 to match build 37) is 
 
 Apple blocks the submission until three forms are answered in the App Store Connect website (the API cannot fill them): **App Privacy** (data collection; the app sends nothing to the developer, so "Data Not Collected" fits), and two compliance forms Apple names only by code, one about security and one about AI-generated content. An empty review submission is already created; once the forms are done, add version 0.7.2 to it and submit.
 
+**Update:** the two coded compliance forms (`SECURITYASF395E`, `AIGENERATEFD1DE`) are Apple's China mainland declarations, added November 16, 2026, on the new **App Compliance** page (sidebar → General). They ask whether the app offers AI-generated or synthetic content in China mainland, and whether it has features needing a security assessment there. A "Yes" requires Chinese government filing numbers and assessment reports. They apply because the app is available in every territory, China mainland included. The choice is the owner's: remove China mainland from availability, or answer them.
+
+Build **0.7.3 (38)**, with Wi-Fi pairing, was uploaded on November 18, 2026 after the full iPhone/iPad screen tests passed. It is meant to replace build 37 in the App Store version, which then becomes 0.7.3. The matching notarized companion 0.7.9 is a draft GitHub release, not yet published.
+
 ## Archive preparation
 
 - The app icon comes from the Blender deck pieces (`genesis-iphone/design/build_app_icon.py`).
