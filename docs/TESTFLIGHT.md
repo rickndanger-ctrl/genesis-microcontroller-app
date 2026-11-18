@@ -48,6 +48,8 @@ Build **0.7.3 (38)**, with Wi-Fi pairing, was uploaded on November 18, 2026 afte
 
 **Submitted (Nov 18, 12:40 Pacific):** the owner answered and published App Privacy as "Data Not Collected". Version 0.7.3 (build 38) was added to the review submission and submitted; Apple shows it as `WAITING_FOR_REVIEW`. Release is automatic after approval, in 174 territories (not China mainland).
 
+**Guided setup (Nov 18, afternoon):** build **0.7.4 (39)** was uploaded and processed `VALID`; it reaches the internal group automatically. It adds the Connect your Mac guide and plain-language connection errors. It is not attached to the App Store version: 0.7.3 (38) stays in review, and 0.7.4 is meant to follow as an update after approval. Companion **0.8.0** (guided setup window, menu-bar only, App Nap opt-out) is notarized and published as the latest GitHub release, installed on all three Macs, and the support site describes the new setup.
+
 ## Archive preparation
 
 - The app icon comes from the Blender deck pieces (`genesis-iphone/design/build_app_icon.py`).
