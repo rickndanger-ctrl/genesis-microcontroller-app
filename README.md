@@ -105,6 +105,8 @@ Under **Codex → Actions → Change model**, open the model and reasoning picke
 
 ## Even Realities G2 glasses
 
+> **Experimental.** Glasses support is a do-it-yourself, open-source add-on, not part of the App Store setup. It needs the [Genesis G2](https://github.com/rickndanger-ctrl/genesis-g2) bridge on each Mac and Tailscale on the phone running Even. Turn it on in **Settings → Glasses → Even G2 glasses (experimental)**, and see the [glasses guide](https://rickndanger-ctrl.github.io/agent-micro-controller-site/glasses/).
+
 Native version **0.2.5 / build 23** supports **Follow this controller** on both iPhone and iPad. The separate [Genesis G2 app](https://github.com/rickndanger-ctrl/genesis-g2) displays the selected Codex or supported Claude Code conversation above a dedicated draft box. The native app handles dictation and explicit Send; the glasses never submit a message themselves.
 
 Open Genesis G2 inside Even on the paired iPhone, then enable **Follow this controller** in this app and tap an assigned chat. **Conversation** and **Draft** choose which area the page arrows navigate. The right arrow shows older text; the left returns toward the latest. One native device controls the display at a time, and taking over from another device requires an explicit choice.

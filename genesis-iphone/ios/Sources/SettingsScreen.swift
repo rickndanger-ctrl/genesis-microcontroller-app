@@ -140,7 +140,7 @@ struct SettingsScreen: View {
                 }
                 .accessibilityIdentifier("settings.keyLights")
                 Section("Glasses") {
-                    Toggle("I use Even G2 glasses", isOn: Binding(get: { glassesFeature }, set: { enabled in
+                    Toggle("Even G2 glasses (experimental)", isOn: Binding(get: { glassesFeature }, set: { enabled in
                         guard enabled != glassesFeature else { return }
                         ControllerSound.shared.keyClick()
                         // Hiding the controls must not leave Follow running unseen.
@@ -148,8 +148,12 @@ struct SettingsScreen: View {
                         glassesFeature = enabled
                     }))
                     .accessibilityIdentifier("settings.glasses")
-                    Text("Shows Follow this controller, which mirrors your chat and draft on G2 glasses through the separate Genesis G2 app. Leave it off if you don’t have the glasses.")
+                    Text("Shows Follow this controller, which mirrors your chat and draft on Even Realities G2 glasses. It needs the separate, do-it-yourself Genesis G2 add-on on your Macs and Tailscale on the phone running Even. Leave it off if you don’t have the glasses.")
                         .font(.caption).foregroundStyle(.secondary)
+                    Link(destination: URL(string: "https://rickndanger-ctrl.github.io/agent-micro-controller-site/glasses/")!) {
+                        Label("Glasses setup guide", systemImage: "eyeglasses")
+                    }
+                    .accessibilityIdentifier("settings.glassesGuide")
                 }
                 Section("How it works") {
                     Label("Hold Talk, release to review, tap Send.", systemImage: "mic")
