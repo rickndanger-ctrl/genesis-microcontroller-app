@@ -47,7 +47,7 @@ struct GlassesFollowPanel: View {
                     .accessibilityIdentifier("glasses.keepReading")
                 Text(follow.supportsKeepReading
                      ? "The Mac keeps this conversation readable for up to one hour. Your microphone stops and your unsent draft stays private on this device."
-                     : "Update Genesis on the selected Mac to enable reading after lock.")
+                     : "Update the companion on the selected Mac to enable reading after lock.")
                     .font(.caption).foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
                 if !follow.readingMessage.isEmpty {
@@ -112,7 +112,7 @@ struct GlassesFollowPanel: View {
         }
         .padding(18)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(.white.opacity(0.78), in: RoundedRectangle(cornerRadius: 24))
+        .genesisPanel(radius: 24)
         .confirmationDialog("Switch which device controls the glasses?", isPresented: $confirmTakeover, titleVisibility: .visible) {
             Button("Follow this \(follow.sourceName)") { ControllerSound.shared.keyClick(); store.enableGlassesFollow(takeover: true) }
             Button("Cancel", role: .cancel) { ControllerSound.shared.keyClick() }

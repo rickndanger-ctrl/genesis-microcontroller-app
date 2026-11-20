@@ -8,12 +8,33 @@ import CoreImage.CIFilterBuiltins
     @Published var serviceStatus="Starting remote service…"
     @Published var baseURL:String=UserDefaults.standard.string(forKey:"remote.baseURL") ?? ""
     @Published var enabled:Bool=UserDefaults.standard.object(forKey:"remote.enabled") as? Bool ?? true
+    /// Pair and connect over the local network, without Tailscale. On by default
+    /// only for a Mac that has no Tailscale address saved, so existing setups
+    /// open no new port until their owner turns it on.
+    @Published var wifiEnabled:Bool=UserDefaults.standard.object(forKey:"remote.wifi") as? Bool ?? (UserDefaults.standard.string(forKey:"remote.baseURL") ?? "").isEmpty
+    @Published var wifiStatus="Wi-Fi pairing is off"
+    private var wifiServer:RemoteHTTPServer?
+    private var wifiIdentity:WiFiIdentity?
     @Published var chats:[RemoteChat]=[]
     @Published var artifacts:[RemoteArtifact]=[]
     @Published var lastResult="No remote commands yet."
+    /// The newest command results, newest first, for the companion's window.
+    @Published var recentActivity:[ActivityEntry]=[]
+    @Published var lastSelfCheck:RemoteSelfCheck?
+    @Published var checking=false
+    private var activity:ActivityLog?
+    /// Which phones may talk to this Mac. Loaded from and saved to devices.json.
+    private var registry=DeviceRegistry()
+    private var pairingCodes=PairingCodes()
+    @Published var devices:[PairedDevice]=[]
+    @Published var legacySecretAccepted=true
+    /// The single-use code in the QR code now on screen.
+    @Published var pairingCode:String?
+    static let companionVersion=Bundle.main.object(forInfoDictionaryKey:"CFBundleShortVersionString") as? String ?? "development"
     private(set) var store:RemoteStore?
     private var server:RemoteHTTPServer?
     private let access=ClaudeAccess()
+    private let muse=MuseAccess()
     private let menuNavigation=RemoteMenuNavigation()
     private var displaySession=RemoteDisplaySession()
     private var displayExpiryTask:Task<Void,Never>?
@@ -22,6 +43,29 @@ import CoreImage.CIFilterBuiltins
     private var screenLocked=false
     private var recentChats:[String:RemoteChat]=[:]
     private var ambiguousClaudeIDs=Set<String>()
+    /// Titles carried by more than one chat at the last listing, per app.
+    private var claudeLeftOut=Set<String>(),museLeftOut=Set<String>()
+    /// Chats that finished working and have not been looked at from a controller; see DoneLatch.
+    private var claudeLatch=DoneLatch(),museLatch=DoneLatch()
+    /// Muse's last full chat list, kept for while an unnamed side chat hides it.
+    private var museLastChats=[RemoteChat]()
+    private var museNewChat=NewSideChatTracker()
+    /// Turns what Muse lists into what the phone is told, and learns from it.
+    private func museChats(from listing:MuseAccess.Listing)->[RemoteChat] {
+        let placeholder=RemoteChat(id:RemotePolicy.chatID("muse",MuseChatList.unnamedSideChat),title:MuseChatList.unnamedSideChat,state:MuseChatList.unnamedState)
+        // While a side chat has no name Muse shows only that chat. The others
+        // are still there, so keep offering them: their keys must not go dark.
+        if MuseChatList.isUnnamedOnly(listing.chats) {
+            return museLastChats.map{RemoteChat(id:$0.id,title:$0.title,state:$0.state=="Current" || $0.state=="Working" ? "Open":$0.state)}+[placeholder]
+        }
+        museNewChat.observe(titles:listing.chats.map(\.title),current:listing.chats.first{$0.current}?.title)
+        let read=listing.chats.map{RemoteChat(id:RemotePolicy.chatID("muse",$0.title),title:$0.title,state:MuseChatList.state(current:$0.current,unread:$0.unread,answering:listing.answering))}
+        let reported=museLatch.observe(read.map{(id:$0.id,state:$0.state)})
+        museLastChats=read.map{RemoteChat(id:$0.id,title:$0.title,state:reported[$0.id] ?? $0.state)}
+        return museLastChats
+    }
+    /// Muse is running in a window too narrow to control; see MuseAccess.widenWindow.
+    private var museChatHidden=false,museChatHiddenCheckedAt=Date.distantPast
     private var codexChats:[RemoteChat]=[]
     private var codexInventoryAvailable=false
     private var codexInventoryCheckedAt:Date?
@@ -32,6 +76,9 @@ import CoreImage.CIFilterBuiltins
         return screenLocked || session?["CGSSessionScreenIsLocked"] as? Bool == true || session?["kCGSessionOnConsoleKey"] as? Bool == false
     }
     init() {
+        // Settle the Wi-Fi default once. Worked out at every launch, it would turn
+        // itself off after Tailscale later filled in an address.
+        if UserDefaults.standard.object(forKey:"remote.wifi")==nil {UserDefaults.standard.set(wifiEnabled,forKey:"remote.wifi")}
         do {
             let directory=FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Application Support/Genesis Agent Micro Controller/Remote",isDirectory:true)
             store=try RemoteStore(directory:directory);artifacts=store?.archive.artifacts ?? []
@@ -43,13 +90,64 @@ import CoreImage.CIFilterBuiltins
         if baseURL.isEmpty {Task {await discoverAddress()}}
         Task {_ = await loadCodexChats()}
     }
-    func setEnabled(_ value:Bool) {if !value {menuNavigation.invalidate();clearDisplaySession()};enabled=value;UserDefaults.standard.set(value,forKey:"remote.enabled");if value {startIfEnabled()} else {server?.stop();server=nil;serviceStatus="Remote access is off"}}
+    func setEnabled(_ value:Bool) {if !value {menuNavigation.invalidate();clearDisplaySession()};enabled=value;UserDefaults.standard.set(value,forKey:"remote.enabled");if value {startIfEnabled()} else {server?.stop();server=nil;serviceStatus="Remote access is off";stopWiFi()}}
+    func setWiFi(_ value:Bool) {wifiEnabled=value;UserDefaults.standard.set(value,forKey:"remote.wifi");if value {startWiFiIfEnabled()} else {stopWiFi()}}
+    private func stopWiFi() {wifiServer?.stop();wifiServer=nil;wifiStatus="Wi-Fi pairing is off"}
+    /// The second listener: TLS on every interface, for phones on the same network.
+    /// It serves exactly the same routes and checks the same per-device secrets.
+    private func startWiFiIfEnabled() {
+        guard enabled,wifiEnabled,wifiServer==nil,!wifiPreparing,let store else{return}
+        if let identity=wifiIdentity {startWiFiListener(identity);return}
+        // Making the certificate runs openssl and waits for it. Waiting on the
+        // main thread spins its run loop, and when that happens while SwiftUI is
+        // building the app (this runs from the bridge's first use) SwiftUI
+        // aborts. So the certificate is loaded or made off the main thread.
+        wifiPreparing=true;wifiStatus="Preparing Wi-Fi pairing…"
+        let directory=store.directory
+        Task.detached(priority:.userInitiated) {
+            let result=Result{try WiFiIdentity.loadOrCreate(in:directory)}
+            await MainActor.run {
+                self.wifiPreparing=false
+                switch result {
+                case .success(let identity):
+                    self.wifiIdentity=identity
+                    if self.enabled,self.wifiEnabled,self.wifiServer==nil {self.startWiFiListener(identity)}
+                case .failure(let error):
+                    self.wifiStatus=(error as? LocalizedError)?.errorDescription ?? "Wi-Fi pairing could not start."
+                }
+            }
+        }
+    }
+    private var wifiPreparing=false
+    private func startWiFiListener(_ identity:WiFiIdentity) {
+        let server=RemoteHTTPServer(port:WiFiIdentity.port,tls:identity.identity,admits:WiFiIdentity.isPrivate) {[weak self] request in guard let self else{return .error(503,"Companion closed.")};return await self.route(request)}
+        server.stateChanged={[weak self] state in Task{@MainActor in self?.wifiStatus=state}}
+        do {try server.start();wifiServer=server} catch {wifiStatus=(error as? LocalizedError)?.errorDescription ?? "Wi-Fi pairing could not start."}
+    }
+    /// This Mac's Tailscale address, when one is set and usable.
+    private var tailnetAddress:String? {
+        let address=baseURL.trimmingCharacters(in:.whitespacesAndNewlines).trimmingCharacters(in:CharacterSet(charactersIn:"/"))
+        guard let parsed=URLComponents(string:address),parsed.scheme=="https",let host=parsed.host,!host.isEmpty,parsed.user==nil,parsed.password==nil,parsed.query==nil,parsed.fragment==nil,parsed.path.isEmpty || parsed.path=="/" else{return nil}
+        return address
+    }
+    /// What a pairing code tells the phone: where to reach this Mac and, over
+    /// Wi-Fi, which certificate to trust. Nil when there is no way to reach it.
+    func pairingPayload(code:String)->RemotePairing? {
+        guard enabled,let store else{return nil}
+        let wifi=wifiServer != nil ? wifiIdentity.flatMap{identity in WiFiIdentity.url.map{(url:$0,pin:identity.fingerprint)}} : nil
+        // Phones from before Wi-Fi pairing know only baseURL, so it holds the
+        // Tailscale address when there is one.
+        guard let base=tailnetAddress ?? wifi?.url else{return nil}
+        return RemotePairing(name:hostName,hostID:store.hostID,baseURL:base,token:code,lanURL:wifi?.url,pin:wifi?.pin)
+    }
     func saveAddress() {UserDefaults.standard.set(baseURL,forKey:"remote.baseURL")}
     func startIfEnabled() {
-        guard enabled,server==nil,let store else{return}
-        let server=RemoteHTTPServer(token:store.token) {[weak self] request in guard let self else{return .error(503,"Companion closed.")};return await self.route(request)}
+        guard enabled,server==nil,store != nil else{return}
+        loadRegistry()
+        let server=RemoteHTTPServer {[weak self] request in guard let self else{return .error(503,"Companion closed.")};return await self.route(request)}
         server.stateChanged={[weak self] state in Task{@MainActor in self?.serviceStatus=state}}
         do {try server.start();self.server=server} catch {serviceStatus="Remote service could not start."}
+        startWiFiIfEnabled()
     }
     func discoverAddress() async {
         let address=await Task.detached(priority:.utility) { () -> String? in
@@ -66,8 +164,8 @@ import CoreImage.CIFilterBuiltins
         if let address,baseURL.isEmpty {baseURL=address;saveAddress()}
     }
     var pairingLink:URL? {
-        guard enabled,let store,let parsed=URLComponents(string:baseURL),parsed.scheme=="https",let host=parsed.host,!host.isEmpty,parsed.user==nil,parsed.password==nil,parsed.query==nil,parsed.fragment==nil,parsed.path.isEmpty || parsed.path=="/" else{return nil}
-        let payload=RemotePairing(name:hostName,hostID:store.hostID,baseURL:baseURL.trimmingCharacters(in:CharacterSet(charactersIn:"/")),token:store.token)
+        // The code is good once and for ten minutes; it is not the Mac's secret.
+        guard let code=pairingCode,let payload=pairingPayload(code:code) else{return nil}
         guard let data=try? JSONEncoder().encode(payload) else{return nil}
         let encoded=data.base64EncodedString().replacingOccurrences(of:"+",with:"-").replacingOccurrences(of:"/",with:"_").replacingOccurrences(of:"=",with:"")
         return URL(string:"genesiscontroller://pair?data="+encoded)
@@ -93,16 +191,31 @@ import CoreImage.CIFilterBuiltins
                 let nativeReady = !isLocked && running && AXIsProcessTrusted()
                 let queueAvailable=NSWorkspace.shared.urlForApplication(withBundleIdentifier:bundle).flatMap(CodexQueuePolicy.executable) != nil && CodexQueuePolicy.usesDefaultHome(environment:ProcessInfo.processInfo.environment,home:FileManager.default.homeDirectoryForCurrentUser)
                 let sendReason=queueAvailable ? "Phone Send queues to the exact selected chat; delivery is not yet confirmed.":"Phone Send needs the bundled Codex queue command and default account storage."
-                let reason=isLocked ? "Unlock this Mac to open Codex.":!installed ? "Install Codex on this Mac.":codexInventoryAvailable ? (nativeReady ? "Saved chat selection and native Mac menu controls are available. Menus act on the current Codex view on the Mac. "+sendReason+" Stop and live voice are not connected.":"New chat, Settings, and Skills can open Codex on this Mac. Other menu controls need Codex running with Genesis Accessibility enabled. "+sendReason+" Stop and live voice are not connected."):codexInventoryCheckedAt==nil ? "Checking this Mac's saved Codex chats…":"The current-account Codex chat inventory is unavailable. Open Codex on this Mac and refresh."
-                let capabilities=RemoteCodexAvailability.capabilities(installed:installed,running:running,unlocked:!isLocked,accessibility:AXIsProcessTrusted(),inventoryAvailable:codexInventoryAvailable,launchIDs:CodexNativeActionPolicy.pageLinks.keys.sorted(),nativeIDs:CodexNativeActions.descriptors.map(\.id),queueAvailable:queueAvailable)
+                let reason=isLocked ? "Unlock this Mac to open Codex.":!installed ? "Install Codex on this Mac.":codexInventoryAvailable ? (nativeReady ? "Saved chat selection and native Mac menu controls are available. Menus act on the current Codex view on the Mac. "+sendReason+" Stop and live voice are not connected.":"New chat, Settings, and Skills can open Codex on this Mac. Other menu controls need Codex running with Accessibility enabled for Agent Micro Controller. "+sendReason+" Stop and live voice are not connected."):codexInventoryCheckedAt==nil ? "Checking this Mac's saved Codex chats…":CodexService.reason(codexService) ?? "The current-account Codex chat inventory is unavailable. Open Codex on this Mac and refresh."
+                // Offered only once a check has failed, and only when the tool that restarts it is the one inside the installed app.
+                let restart = !isLocked && installed && codexInventoryCheckedAt != nil && queueAvailable && CodexService.canRestart(codexService) ? ["restartService"]:[]
+                let capabilities=restart+RemoteCodexAvailability.capabilities(installed:installed,running:running,unlocked:!isLocked,accessibility:AXIsProcessTrusted(),inventoryAvailable:codexInventoryAvailable,launchIDs:CodexNativeActionPolicy.pageLinks.keys.sorted(),nativeIDs:CodexNativeActions.descriptors.map(\.id),queueAvailable:queueAvailable)
                 return RemoteProvider(id:provider,name:"Codex",installed:installed,readiness:readiness,capabilities:capabilities,reason:reason,actions:CodexNativeActions.descriptors)
             }
-            if provider != "claude" {return RemoteProvider(id:provider,name:provider=="codex" ? "Codex":"Muse",installed:installed,readiness:"unavailable",capabilities:["artifacts"],reason:"Registered artifacts work. Existing-chat controls and native phone voice are not verified for this provider yet.")}
+            if provider=="muse" {
+                // Chats open through Accessibility. A draft is pasted into Muse's
+                // message box and read back before Return; see MuseAccess.
+                // "closed" also covers Muse running in a window too narrow to control: either way the phone offers to open it.
+                let covered=running && museChatHidden && !isLocked && AXIsProcessTrusted()
+                if covered,Date().timeIntervalSince(museChatHiddenCheckedAt)>4 {
+                    // Nobody asks for chats while they are hidden, so look again here to notice when they are back.
+                    museChatHiddenCheckedAt=Date()
+                    Task {self.museChatHidden=self.muse.needsWiderWindow()}
+                }
+                let readiness=isLocked ? "locked":!AXIsProcessTrusted() ? "needsAccessibility":!running || covered ? "closed":"ready"
+                let reason=readiness=="ready" ? "Chats, Send, New side chat and Call are connected. Send briefly brings Muse to the front and uses the clipboard, which is restored afterwards. Chats that share a title are left out.":readiness=="locked" ? "Unlock this Mac to use Muse.":covered ? "Muse\u{2019}s window on this Mac is too narrow for the controller to reach its chats. Open Muse from here to widen it.":readiness=="closed" ? "Open Muse on this Mac.":"Enable Accessibility for Agent Micro Controller."
+                return RemoteProvider(id:provider,name:"Muse",installed:installed,readiness:readiness,capabilities:readiness=="ready" ? RemoteMuse.capabilities:readiness=="closed" && installed ? ["artifacts","launchApp"]:["artifacts"],reason:reason,actions:RemoteMuse.actions)
+            }
             let readiness=isLocked ? "locked":!AXIsProcessTrusted() ? "needsAccessibility":!running ? "closed":"ready"
-            let reason=readiness=="ready" ? "Native live voice is not yet available on the phone.":readiness=="locked" ? "Unlock this Mac to use desktop controls.":readiness=="closed" ? "Open Claude on this Mac.":"Enable Accessibility for Genesis Agent Micro Controller."
-            return RemoteProvider(id:provider,name:"Claude",installed:installed,readiness:readiness,capabilities:readiness=="ready" ? ["openChat","sendPrompt","stop","artifacts","menuNavigation"] + RemoteActionCatalog.claude.map{$0.action.id}:["artifacts"],reason:reason,actions:RemoteActionCatalog.claude.map(\.action))
+            let reason=readiness=="ready" ? "Native live voice is not yet available on the phone.":readiness=="locked" ? "Unlock this Mac to use desktop controls.":readiness=="closed" ? "Open Claude on this Mac.":"Enable Accessibility for Agent Micro Controller."
+            return RemoteProvider(id:provider,name:"Claude",installed:installed,readiness:readiness,capabilities:readiness=="ready" ? ["openChat","sendPrompt","stop","artifacts","menuNavigation"] + RemoteActionCatalog.claude.map{$0.action.id}:readiness=="closed" && installed ? ["artifacts","launchApp"]:["artifacts"],reason:reason,actions:RemoteActionCatalog.claude.map(\.action))
         }
-        return RemoteHostStatus(hostID:store?.hostID ?? "",hostName:hostName,providers:providers)
+        return RemoteHostStatus(hostID:store?.hostID ?? "",hostName:hostName,providers:providers,companionVersion:Self.companionVersion)
     }
     func loadCodexChats(force:Bool=false) async -> [RemoteChat] {
         guard !isLocked,NSWorkspace.shared.urlForApplication(withBundleIdentifier:"com.openai.codex") != nil else{return []}
@@ -125,23 +238,220 @@ import CoreImage.CIFilterBuiltins
             return []
         }
     }
+    /// Records what a command was and how it ended. Never the prompt: a
+    /// command's text does not reach this function, only its action and result.
+    private func note(_ command:RemoteCommand,status:String,message:String,started:Date) {
+        if activity==nil,let store {activity=ActivityLog(url:store.directory.appendingPathComponent("activity.jsonl"))}
+        activity?.record(provider:command.provider,action:command.action,status:status,message:message,durationMs:Int(Date().timeIntervalSince(started)*1000))
+        recentActivity=Array((activity?.recent(40) ?? []).reversed())
+    }
+    func loadActivity() {
+        if activity==nil,let store {activity=ActivityLog(url:store.directory.appendingPathComponent("activity.jsonl"))}
+        recentActivity=Array((activity?.recent(40) ?? []).reversed())
+    }
+    /// Looks at each app the controller drives and reports what it can find.
+    /// Read-only, except that counting Muse's chats shows Muse's chat panel.
+    func selfCheck() async -> RemoteSelfCheck {
+        checking=true;defer{checking=false}
+        func installed(_ bundle:String)->Bool {NSWorkspace.shared.urlForApplication(withBundleIdentifier:bundle) != nil}
+        func running(_ bundle:String)->Bool {NSRunningApplication.runningApplications(withBundleIdentifier:bundle).contains{!$0.isTerminated}}
+        let mac=SelfCheck.Mac(unlocked:!isLocked,accessibility:AXIsProcessTrusted())
+        var items=SelfCheck.mac(mac)
+        let readable=mac.unlocked && mac.accessibility
+        items += SelfCheck.claude(readable ? access.readSnapshot {access.selfCheck(installed:installed(access.bundle),running:running(access.bundle))}
+                                           : access.selfCheck(installed:installed(access.bundle),running:false),mac:mac)
+        let museSeen:SelfCheck.Muse = readable && running(MuseAccess.bundle) ? await muse.selfCheck(installed:installed(MuseAccess.bundle))
+            : .init(installed:installed(MuseAccess.bundle),running:running(MuseAccess.bundle),navigable:false,messageBoxes:0,answering:false,chats:0,sharedTitles:0,callControls:0)
+        items += SelfCheck.muse(museSeen,mac:mac)
+        let codexBundle="com.openai.codex"
+        let saved=mac.unlocked ? await loadCodexChats(force:true):[]
+        var menus=false
+        if readable,let app=NSRunningApplication.runningApplications(withBundleIdentifier:codexBundle).first(where:{!$0.isTerminated}) {
+            let root=AXUIElementCreateApplication(app.processIdentifier);AXUIElementSetMessagingTimeout(root,0.4)
+            var bar:CFTypeRef?
+            menus=AXUIElementCopyAttributeValue(root,kAXMenuBarAttribute as CFString,&bar) == .success
+        }
+        let queue=NSWorkspace.shared.urlForApplication(withBundleIdentifier:codexBundle).flatMap(CodexQueuePolicy.executable) != nil
+            && CodexQueuePolicy.usesDefaultHome(environment:ProcessInfo.processInfo.environment,home:FileManager.default.homeDirectoryForCurrentUser)
+        items += SelfCheck.codex(.init(installed:installed(codexBundle),running:running(codexBundle),inventoryReachable:codexInventoryAvailable,savedChats:saved.count,menuBarReadable:menus,queueAvailable:queue),mac:mac)
+        let report=RemoteSelfCheck(checkedAt:Date(),companionVersion:Self.companionVersion,summary:SelfCheck.summary(items),items:items)
+        lastSelfCheck=report
+        return report
+    }
+    func loadMuseChats() async -> [RemoteChat] {
+        guard enabled,!isLocked,AXIsProcessTrusted() else{museLeftOut=[];return []}
+        guard let listing=await muse.listing() else {
+            // No chat list. Find out whether Muse's window is too narrow, so the phone can say so and offer to widen it.
+            museLeftOut=[];museChatHidden=muse.needsWiderWindow();museChatHiddenCheckedAt=Date();return []
+        }
+        if !MuseChatList.isUnnamedOnly(listing.chats) {museLeftOut=listing.ambiguous}
+        museChatHidden=false;museChatHiddenCheckedAt=Date()
+        return museChats(from:listing)
+    }
+    /// Opens a provider's app so someone away from the Mac is not stuck at
+    /// "open it on the Mac". It only opens the app; it sends and changes nothing.
+    /// Where Codex's background service stands, from the last chat-list check and what is on disk.
+    private var codexService:CodexService.State {
+        CodexService.probe(home:FileManager.default.homeDirectoryForCurrentUser,answering:codexInventoryAvailable)
+    }
+    private var restartingCodexService=false
+    /// Restarts Codex's background service with Codex's own command, and only
+    /// when the service cannot be reached. It opens no chat and sends nothing.
+    private func restartCodexService(_ command:RemoteCommand) async -> RemoteReceipt {
+        func result(_ state:String,_ message:String)->RemoteReceipt {RemoteReceipt(id:command.id,status:state,message:message)}
+        guard command.provider=="codex" else{return result("failed","Only Codex has a background service to restart.")}
+        guard enabled,!isLocked else{return result("failed","Unlock this Mac to restart Codex’s background service.")}
+        let home=FileManager.default.homeDirectoryForCurrentUser
+        guard CodexQueuePolicy.usesDefaultHome(environment:ProcessInfo.processInfo.environment,home:home),
+              let application=NSWorkspace.shared.urlForApplication(withBundleIdentifier:"com.openai.codex"),
+              let executable=CodexQueuePolicy.executable(in:application) else{return result("failed","The installed Codex app and its default account storage are needed to restart its background service.")}
+        guard !restartingCodexService else{return result("failed","A restart is already under way. Refresh in a moment.")}
+        restartingCodexService=true;defer{restartingCodexService=false}
+        // Ask again first: a service that answers is never restarted.
+        let before=await loadCodexChats(force:true)
+        let state=codexService
+        guard CodexService.canRestart(state) else {
+            return state == .answering ? result("confirmed","Codex’s background service is already answering (\(before.count) saved chats). Nothing was restarted."):result("failed","Codex’s background service has not been set up on this Mac. Open Codex on the Mac first.")
+        }
+        let environment=CodexQueuePolicy.environment(home:home)
+        let run=await Task.detached(priority:.userInitiated) { ()->CodexService.Run in
+            guard CodexQueuePolicy.isTrustedExecutable(executable) else{return .notLaunched}
+            switch CodexQueueProcess.run(executable:executable,arguments:CodexService.restartArguments,environment:environment,timeout:30).completion {
+            case .notLaunched:return .notLaunched
+            case .exited(let code):return .exited(code)
+            case .interrupted,.timedOut:return .timedOut
+            }
+        }.value
+        // The service takes a moment to listen again after the command returns.
+        var chats=[RemoteChat]()
+        if run != .notLaunched {
+            for attempt in 0..<8 {
+                chats=await loadCodexChats(force:true)
+                if codexInventoryAvailable {break}
+                if attempt<7 {try? await Task.sleep(nanoseconds:750_000_000)}
+            }
+        }
+        var outcome=run
+        if CodexService.shouldTryStart(after:run,answering:codexInventoryAvailable) {
+            // The restart stopped the service and could not start it again. Do not leave it down.
+            outcome=await Task.detached(priority:.userInitiated) { ()->CodexService.Run in
+                switch CodexQueueProcess.run(executable:executable,arguments:CodexService.startArguments,environment:environment,timeout:30).completion {
+                case .notLaunched:return .notLaunched
+                case .exited(let code):return .exited(code)
+                case .interrupted,.timedOut:return .timedOut
+                }
+            }.value
+            for attempt in 0..<8 {
+                chats=await loadCodexChats(force:true)
+                if codexInventoryAvailable {break}
+                if attempt<7 {try? await Task.sleep(nanoseconds:750_000_000)}
+            }
+        }
+        let receipt=CodexService.receipt(outcome,answeringAfter:codexInventoryAvailable,chats:chats.count)
+        return result(receipt.status,receipt.message)
+    }
+    private func launchApp(_ command:RemoteCommand) async -> RemoteReceipt {
+        func result(_ state:String,_ message:String)->RemoteReceipt {RemoteReceipt(id:command.id,status:state,message:message)}
+        let names=["claude":"Claude","muse":"Muse","codex":"Codex"],bundles=["claude":access.bundle,"muse":MuseAccess.bundle,"codex":"com.openai.codex"]
+        guard let name=names[command.provider],let bundle=bundles[command.provider] else{return result("failed","Unknown app.")}
+        guard !isLocked else{return result("failed","Unlock this Mac to open \(name).")}
+        func running()->Bool {NSRunningApplication.runningApplications(withBundleIdentifier:bundle).contains{!$0.isTerminated}}
+        if running() {
+            // Muse can be open in a window too narrow to control; see MuseAccess.widenWindow.
+            if command.provider=="muse",AXIsProcessTrusted(),let outcome=await muse.widenWindow() {
+                museChatHidden=muse.needsWiderWindow();museChatHiddenCheckedAt=Date()
+                return result(outcome.status,outcome.message)
+            }
+            return result("confirmed","\(name) is already open on this Mac.")
+        }
+        guard let url=NSWorkspace.shared.urlForApplication(withBundleIdentifier:bundle) else{return result("failed","\(name) is not installed on this Mac.")}
+        let configuration=NSWorkspace.OpenConfiguration();configuration.activates=true
+        do {_ = try await NSWorkspace.shared.openApplication(at:url,configuration:configuration)} catch{return result("failed","macOS could not open \(name).")}
+        for _ in 0..<40 {
+            if running() {return result("confirmed","Opened \(name) on this Mac. Give it a moment to load, then refresh.")}
+            try? await Task.sleep(nanoseconds:250_000_000)
+        }
+        return result("uncertain","\(name) was asked to open but has not appeared yet. Refresh in a moment.")
+    }
+    private func executeMuse(_ command:RemoteCommand) async -> RemoteReceipt {
+        func result(_ outcome:MuseAccess.Outcome)->RemoteReceipt {RemoteReceipt(id:command.id,status:outcome.status,message:outcome.message)}
+        guard !isLocked,AXIsProcessTrusted() else{return result(.failed("Unlock the Mac and enable Accessibility for Agent Micro Controller first."))}
+        guard let pid=muse.app?.processIdentifier else{return result(.failed("Open Muse on this Mac first."))}
+        func contextOK()->Bool {self.enabled && !self.isLocked && AXIsProcessTrusted() && self.muse.app?.processIdentifier==pid}
+        // A command needs Muse's full layout. If its window is too narrow, widen it first.
+        if let revealed=await muse.widenWindow() {
+            museChatHidden=muse.needsWiderWindow();museChatHiddenCheckedAt=Date()
+            if revealed.status != "confirmed" {return result(revealed)}
+        }
+        if command.action=="nativeVoice" {return result(await muse.startCall(contextIsCurrent:contextOK))}
+        let unnamed=RemoteChat(id:RemotePolicy.chatID("muse",MuseChatList.unnamedSideChat),title:MuseChatList.unnamedSideChat,state:"Current")
+        if command.action=="newChat" {
+            // Hand the phone the new chat so a draft can go into it at once.
+            let outcome=await muse.newSideChat(contextIsCurrent:contextOK)
+            var receipt=result(outcome);if outcome.status=="confirmed" {receipt.activeChat=unnamed;museNewChat.started()}
+            return receipt
+        }
+        guard ["openChat","sendPrompt"].contains(command.action) else{return result(.failed("This action is not connected for Muse."))}
+        // Reaching any other chat from an unnamed side chat means leaving it.
+        guard let id=command.chatID,let listing=await muse.listing(leavingUnnamedChat:command.chatID != unnamed.id) else{return result(.failed("Muse’s chat list could not be read. Open Muse on this Mac and refresh."))}
+        // The opaque ID only names a title. The fresh listing above decides
+        // whether that title still points at exactly one chat.
+        _ = museChats(from:listing)
+        // A side chat the phone still knows by its placeholder may have been named since.
+        var renamed:RemoteChat?
+        var target=listing.chats.first(where:{RemotePolicy.chatID("muse",$0.title)==id})
+        if target==nil,id==unnamed.id,let named=museNewChat.became,let match=listing.chats.first(where:{$0.title==named}) {
+            target=match;renamed=RemoteChat(id:RemotePolicy.chatID("muse",named),title:named,state:"Current")
+        }
+        guard let target else {
+            let shared=listing.ambiguous.contains{RemotePolicy.chatID("muse",$0)==id}
+            if id==unnamed.id {return result(.failed("That new side chat is no longer open in Muse. Tap a chat key, or press New chat again; nothing was sent."))}
+            return result(.failed(shared ? "More than one Muse chat has this title. Rename one in Muse before using its key.":"This Muse chat is no longer in the chat list. Refresh its mapping; nothing was opened."))
+        }
+        let targetID=RemotePolicy.chatID("muse",target.title)
+        if command.action=="openChat" {
+            let outcome=await muse.open(target.title,contextIsCurrent:contextOK)
+            if outcome.status=="confirmed" {museLatch.acknowledge(targetID)}
+            var receipt=result(outcome);if outcome.status=="confirmed" {receipt.activeChat=renamed}
+            return receipt
+        }
+        guard let prompt=command.text else{return result(.failed("The prompt is empty."))}
+        museLatch.acknowledge(targetID)
+        let outcome=await muse.send(prompt,to:target.title,contextIsCurrent:contextOK)
+        var receipt=result(outcome)
+        guard outcome.status=="confirmed" else{return receipt}
+        if target.title==MuseChatList.unnamedSideChat {
+            // Muse names a side chat from its first message. Tell the phone as soon as it does.
+            for _ in 0..<8 {
+                if let title=muse.currentChatTitle(),title != MuseChatList.unnamedSideChat {
+                    renamed=RemoteChat(id:RemotePolicy.chatID("muse",title),title:title,state:"Working");break
+                }
+                try? await Task.sleep(nanoseconds:200_000_000)
+            }
+        }
+        receipt.activeChat=renamed
+        return receipt
+    }
     func refreshChats() {Task {chats=loadChats("claude")}}
     func loadChats(_ provider:String,deadline:Double?=nil)->[RemoteChat] {
-        ambiguousClaudeIDs.removeAll(keepingCapacity:true)
+        ambiguousClaudeIDs.removeAll(keepingCapacity:true);claudeLeftOut.removeAll(keepingCapacity:true)
         guard provider=="claude",!isLocked,AXIsProcessTrusted() else{return []}
         func read()->[RemoteChat] {
             let all=access.nodes(),sessions=access.sessions(all)
             // Reuse attribute reads only within this synchronous snapshot.
             return Dictionary(grouping:sessions,by:{$0.title}).compactMap { title,values -> RemoteChat? in
                 guard !RemoteClaudeLookup.isAmbiguous(sidebarDestinationCount:access.sidebarTargets(title,in:all).count) else {
-                    ambiguousClaudeIDs.insert(RemotePolicy.chatID(provider,title));return nil
+                    ambiguousClaudeIDs.insert(RemotePolicy.chatID(provider,title));claudeLeftOut.insert(title);return nil
                 }
                 return RemoteChat(id:RemotePolicy.chatID(provider,title),title:title,state:values.last?.state ?? "Open")
             }.sorted{$0.title.localizedCaseInsensitiveCompare($1.title) == .orderedAscending}
         }
-        let records:[RemoteChat]
+        var records:[RemoteChat]
         if let deadline {records=access.readSnapshot(deadline:deadline,read) ?? []}
         else {records=access.readSnapshot(read)}
+        // A chat that stopped working stays "Unread" until a controller opens it.
+        let reported=claudeLatch.observe(records.map{(id:$0.id,state:$0.state)})
+        records=records.map{RemoteChat(id:$0.id,title:$0.title,state:reported[$0.id] ?? $0.state)}
         recentChats=Dictionary(uniqueKeysWithValues:records.map{($0.id,$0)})
         chats=records;return records
     }
@@ -217,10 +527,67 @@ import CoreImage.CIFilterBuiltins
         guard let data=try? JSONSerialization.data(withJSONObject:payload,options:[.sortedKeys]) else{return .error(500,"Diagnostics unavailable.")}
         return RemoteHTTPResponse(data:data)
     }
+    // MARK: Paired devices
+    private var registryURL:URL? {store?.directory.appendingPathComponent("devices.json")}
+    private func loadRegistry() {
+        guard let url=registryURL,let data=try? Data(contentsOf:url),let saved=try? JSONDecoder().decode(DeviceRegistry.self,from:data) else {publishRegistry();return}
+        registry=saved;publishRegistry()
+    }
+    private func saveRegistry() {
+        publishRegistry()
+        guard let url=registryURL,let data=try? JSONEncoder().encode(registry) else{return}
+        try? data.write(to:url,options:.atomic)
+        try? FileManager.default.setAttributes([.posixPermissions:0o600],ofItemAtPath:url.path)
+    }
+    private func publishRegistry() {devices=registry.devices;legacySecretAccepted=registry.legacySecretAccepted}
+    /// Shows a fresh single-use code. Called when the pairing window opens,
+    /// after a code is used, and before one would expire.
+    func refreshPairingCode() {pairingCode=pairingCodes.issue(now:Date())}
+    func revokeDevice(_ id:String) {if registry.revoke(id) {saveRegistry()}}
+    /// Cuts off every phone that paired before per-device secrets. They show
+    /// "Pair this Mac" and can be paired again with the QR code.
+    func stopAcceptingLegacySecret() {registry.legacySecretAccepted=false;saveRegistry()}
+    /// Whether a request carries a secret this Mac accepts. Both checks always
+    /// run, so the answer's timing does not say which kind of secret it was.
+    private func authorized(_ request:RemoteHTTPRequest)->Bool {
+        guard let store else{return false}
+        let header=request.headers["authorization"] ?? ""
+        let supplied=header.hasPrefix("Bearer ") ? String(header.dropFirst("Bearer ".count)):""
+        let legacy=RemotePolicy.equalToken(supplied,store.token) && registry.legacySecretAccepted
+        let device=registry.device(for:supplied)
+        if let device,registry.seen(device.id,now:Date()) {saveRegistry()}
+        return legacy || device != nil
+    }
+    /// Trades the single-use code from the QR code for a secret of the phone's own.
+    private func pair(_ request:RemoteHTTPRequest)->RemoteHTTPResponse {
+        guard enabled else{return .error(403,"Remote access is off on this Mac.")}
+        guard let body=try? JSONDecoder().decode(RemotePairRequest.self,from:request.body) else{return .error(400,"Invalid pairing request.")}
+        switch pairingCodes.redeem(body.code,now:Date()) {
+        case .lockedOut:return .error(429,"Too many wrong pairing codes. Wait a minute, then scan a fresh code from the Mac.")
+        case .rejected:return .error(403,"This pairing code is no longer valid. Scan a fresh code from the Mac.")
+        case .accepted:
+            let enrolled=registry.enroll(name:body.deviceName ?? "",now:Date())
+            saveRegistry()
+            // A used code is gone; put a new one on screen for the next device.
+            refreshPairingCode()
+            lastResult="Paired \(enrolled.device.name)."
+            return .json(RemotePairResponse(token:enrolled.token,deviceID:enrolled.device.id,deviceName:enrolled.device.name))
+        }
+    }
     func route(_ request:RemoteHTTPRequest) async -> RemoteHTTPResponse {
         guard let store else{return .error(503,"Remote storage unavailable.")}
         guard let url=URLComponents(string:"http://localhost"+request.target) else{return .error(400,"Invalid path.")}
         let path=url.path,query=url.queryItems ?? []
+        // Pairing is the one request that cannot carry a secret yet.
+        if request.method=="POST",path=="/v1/pair" {return pair(request)}
+        guard authorized(request) else{return .error(401,"Pair this iPhone with the Mac first.")}
+        // Someone signed in on this Mac can issue a pairing code without the window, for setting
+        // devices up from the command line. Refused for anything relayed from the network.
+        if request.method=="POST",path=="/v1/pair/code" {
+            guard !request.viaNetwork,LocalCaller.isDirect(headers:request.headers) else{return .error(403,"Pairing codes can only be issued on the Mac itself.")}
+            guard pairingPayload(code:"")?.baseURL != nil else{return .error(409,"Turn on Wi-Fi pairing or set this Mac\u{2019}s Tailscale address in the pairing window first.")}
+            return .json(pairingPayload(code:pairingCodes.issue(now:Date())))
+        }
         func parameter(_ key:String)->String {query.first{$0.name==key}?.value ?? ""}
         do {
             if request.method=="GET",path=="/v1/status" {return .json(status())}
@@ -272,8 +639,10 @@ import CoreImage.CIFilterBuiltins
             if request.method=="GET",path=="/v1/diagnostics/claude" {return claudeLookupDiagnostics()}
             if request.method=="GET",path=="/v1/chats" {
                 guard RemotePolicy.providers.contains(parameter("provider")) else{return .error(422,"Unknown provider.")}
-                if parameter("provider")=="codex" {return .json(["chats":await loadCodexChats()])}
-                return .json(["chats":loadChats(parameter("provider"))])
+                if parameter("provider")=="codex" {return .json(RemoteChatList(chats:await loadCodexChats()))}
+                if parameter("provider")=="muse" {let chats=await loadMuseChats();return .json(RemoteChatList(chats:chats,leftOut:RemoteLeftOut.titles(museLeftOut)))}
+                let chats=loadChats(parameter("provider"))
+                return .json(RemoteChatList(chats:chats,leftOut:RemoteLeftOut.titles(claudeLeftOut)))
             }
             if request.method=="GET",path=="/v1/profile" {return .json(try seededProfile(parameter("provider")))}
             if request.method=="PUT",path=="/v1/profile" {
@@ -284,13 +653,28 @@ import CoreImage.CIFilterBuiltins
                 let command=try JSONDecoder().decode(RemoteCommand.self,from:request.body)
                 try RemotePolicy.validate(command,hostID:store.hostID)
                 if let receipt=try store.previous(command) {return .json(receipt)}
-                guard !commandBusy else{return .error(503,"Another controller action is finishing. Nothing was sent.")}
+                // 409, not 503: the phone must be able to tell "refused, nothing ran" from "result unknown".
+                guard !commandBusy else {
+                    note(command,status:"refused",message:"Another controller action was still finishing.",started:Date())
+                    return .error(409,"Another controller action is finishing. Nothing was sent.")
+                }
                 try store.begin(command);commandBusy=true
                 defer{commandBusy=false}
+                let started=Date()
                 let receipt=await execute(command)
+                note(command,status:receipt.status,message:receipt.message,started:started)
                 do {try store.finish(receipt)} catch{return .json(RemoteReceipt(id:command.id,status:"uncertain",message:"Could not persist the command result. Inspect the chat before sending again."))}
                 lastResult=receipt.message;return .json(receipt)
             }
+            if request.method=="GET",path=="/v1/diagnostics/selfcheck" {return .json(await selfCheck())}
+            if request.method=="GET",path=="/v1/diagnostics/outline" {
+                // Control names only, for working out what screen an app is on.
+                let bundles=["claude":access.bundle,"muse":MuseAccess.bundle,"codex":"com.openai.codex"]
+                guard let bundle=bundles[parameter("provider")] else{return .error(422,"Unknown provider.")}
+                guard !isLocked,AXIsProcessTrusted() else{return .error(423,"Unlock the Mac and enable Accessibility first.")}
+                return .json(["lines":MuseAccess.outline(bundle:bundle)])
+            }
+            if request.method=="GET",path=="/v1/diagnostics/activity" {return .json(RemoteActivity(entries:activity?.recent(100) ?? []))}
             if request.method=="GET",path.hasPrefix("/v1/commands/") {
                 let id=String(path.dropFirst("/v1/commands/".count))
                 guard let receipt=store.archive.ledger[id]?.receipt else{return .error(404,"Command is not known. Do not assume it is safe to resend.")}
@@ -354,13 +738,109 @@ import CoreImage.CIFilterBuiltins
             recentChats[chat.id]=chat;return chat
         }
     }
+    /// The chat the phone is given for a session that has no name yet. Its ID
+    /// names no title; every use of it is checked against the screen instead.
+    private func newClaudeSession(folder:String?=nil)->RemoteChat {RemoteChat(id:RemotePolicy.chatID("claude",ClaudeSidebar.newSessionKey),title:ClaudeSidebar.newSessionTitle(folder:folder),state:"Current")}
+    /// Opens a new session and hands it to the phone as something to work in.
+    /// It starts in the project of the chat that was open, so it already has a
+    /// folder; from Pinned or anywhere without one project, it falls back to
+    /// File > New Session, which leaves the folder to be chosen on the Mac.
+    private func openNewClaudeSession(_ command:RemoteCommand,definition:ControllerAction,app:NSRunningApplication,contextIsCurrent:@escaping ()->Bool) async ->RemoteReceipt {
+        func result(_ status:String,_ message:String,_ chat:RemoteChat?=nil)->RemoteReceipt {RemoteReceipt(id:command.id,status:status,message:message,activeChat:chat)}
+        let before=verifiedActiveClaudeChat()
+        var opened=false
+        if let before,let button=access.readSnapshot({self.access.projectNewSessionButton(for:before.title,in:self.access.nodes())}) {
+            opened=await access.navigationClick(button,app:app,contextIsCurrent:contextIsCurrent)
+        }
+        if !opened {
+            let message=await access.extraAction(definition,title:"",app:app,contextIsCurrent:contextIsCurrent)
+            guard RemoteActionCatalog.acceptsClaudeResult(message,controllerTitle:definition.title) else{return result("failed",message)}
+        }
+        var state=access.readSnapshot{self.access.newSession()}
+        for _ in 0..<12 where !state.showing {
+            try? await Task.sleep(nanoseconds:150_000_000)
+            guard !isLocked else{return result("uncertain","A new session was requested, but the Mac locked before it could be checked.")}
+            state=access.readSnapshot{self.access.newSession()}
+        }
+        guard state.showing else {
+            // Something else came up. Never hand the previous conversation back as the new one.
+            let current=RemoteActionCatalog.changedChat(previousID:before?.id,candidate:verifiedActiveClaudeChat())
+            return result("confirmed","Requested \(definition.title)"+(current==nil ? ". Choose a named chat before sending from the phone.":"."),current)
+        }
+        if let folder=ClaudeSidebar.chosenFolder(state.folderLabel) {
+            return result("confirmed","Opened a new session in \(folder). Dictate or type its first prompt.",newClaudeSession(folder:folder))
+        }
+        return result("confirmed","Opened a new session. It has no folder yet: choose one in Claude on the Mac before sending.",newClaudeSession())
+    }
+    /// Open, Stop and Send for the session that has no name yet.
+    private func executeNewClaudeSession(_ command:RemoteCommand) async ->RemoteReceipt {
+        func result(_ status:String,_ message:String,_ chat:RemoteChat?=nil)->RemoteReceipt {RemoteReceipt(id:command.id,status:status,message:message,activeChat:chat)}
+        guard let app=NSRunningApplication.runningApplications(withBundleIdentifier:access.bundle).first else{return result("failed","Open Claude first.")}
+        let gone="The new session is no longer open on the Mac. Press New chat again."
+        if command.action=="openChat" {
+            let now=access.readSnapshot({self.access.newSession()})
+            return now.showing ? result("confirmed","The new session is open.",newClaudeSession(folder:ClaudeSidebar.chosenFolder(now.folderLabel))):result("failed",gone)
+        }
+        guard command.action=="sendPrompt",let prompt=command.text else{return result("failed","Nothing is running in a new session yet.")}
+        if NSWorkspace.shared.frontmostApplication?.processIdentifier != app.processIdentifier {
+            NSApp.yieldActivation(to:app)
+            if let url=app.bundleURL {let configuration=NSWorkspace.OpenConfiguration();configuration.activates=true;_ = try? await NSWorkspace.shared.openApplication(at:url,configuration:configuration)}
+            try? await Task.sleep(nanoseconds:150_000_000)
+        }
+        // Wait for hands to be off the keys so nothing typed on the Mac lands in the draft.
+        guard await MacInput.waitForQuiet() else{return result("failed","\(MacInput.busyMessage); nothing was inserted.")}
+        func composer()->AXUIElement? {
+            let fields=access.nodes().filter{access.value($0,kAXRoleAttribute) as? String==kAXTextAreaRole && access.value($0,kAXDescriptionAttribute) as? String=="Prompt"}
+            return fields.count==1 ? fields[0]:nil
+        }
+        func stillNew()->Bool {!self.isLocked && self.access.newSession().showing}
+        let state=access.readSnapshot{self.access.newSession()}
+        if let blocker=ClaudeSidebar.sendBlocker(showing:state.showing,namedHeaders:state.namedHeaders,composers:state.composers,folder:ClaudeSidebar.chosenFolder(state.folderLabel)) {
+            return result("failed",blocker)
+        }
+        guard let field=composer() else{return result("failed","Send could not find one message box in the new session. Nothing was inserted.")}
+        guard let existing=access.value(field,kAXValueAttribute) as? String else{return result("failed","Send could not read the Mac’s message box to check for an existing draft. Nothing was inserted.")}
+        // Text already in the Mac's message box is someone's work. It is replaced only when the
+        // person holding the controller was told about it and asked for that.
+        guard RemoteComposerPolicy.isBlank(existing) || command.replaceDraft==true else {
+            var blocked=result("failed","The Mac’s message box already has text in it. Nothing was replaced or sent.");blocked.blocker="macDraft";return blocked
+        }
+        var settable=DarwinBoolean(false)
+        guard AXUIElementIsAttributeSettable(field,kAXValueAttribute as CFString,&settable) == .success,settable.boolValue else{return result("failed","Claude does not expose a writable message box in this view. No text was inserted.")}
+        guard AXUIElementSetAttributeValue(field,kAXValueAttribute as CFString,prompt as CFString) == .success else{return result("failed","Claude did not accept the draft. Nothing was sent.")}
+        try? await Task.sleep(nanoseconds:150_000_000)
+        guard stillNew(),let fresh=composer(),RemoteComposerPolicy.matchesInserted(access.value(fresh,kAXValueAttribute) as? String,prompt:prompt) else{return result("uncertain","The draft could not be verified in the new session. Inspect the Mac before sending again.")}
+        let buttons=access.nodes().filter{access.text($0)=="Send" && access.value($0,kAXRoleAttribute) as? String==kAXButtonRole}
+        guard buttons.count==1 else{return result("failed","The draft is in the new session on the Mac, but no single Send control is available.")}
+        let sent=await access.navigationClick(buttons[0],app:app,contextIsCurrent:{
+            guard stillNew(),let field=composer() else{return false}
+            return RemoteComposerPolicy.matchesInserted(self.access.value(field,kAXValueAttribute) as? String,prompt:prompt)
+        })
+        guard sent else{return result("failed","The draft remains on the Mac; Send was not clicked because the new session changed or was unavailable.")}
+        // Sending the first prompt turns the new session into a named one.
+        for _ in 0..<40 {
+            try? await Task.sleep(nanoseconds:150_000_000)
+            guard !isLocked else{break}
+            let delivered=access.readSnapshot { ()->Bool in
+                let all=self.access.nodes(),now=self.access.newSession(all)
+                let working=all.contains{self.access.text($0)=="Stop" && self.access.value($0,kAXRoleAttribute) as? String==kAXButtonRole}
+                return now.namedHeaders==1 || (now.headings==0 && working)
+            }
+            guard delivered else{continue}
+            // Hand the phone the session's name as soon as Claude shows one.
+            var named=verifiedActiveClaudeChat()
+            for _ in 0..<10 where named==nil {try? await Task.sleep(nanoseconds:200_000_000);named=verifiedActiveClaudeChat()}
+            return result("confirmed","Prompt sent; Claude is responding.",named)
+        }
+        return result("uncertain","Send was clicked once in the new session, but its start could not be confirmed. Check the Mac before sending again.")
+    }
     private func executeClaudeShortcut(_ command:RemoteCommand,entry:RemoteActionCatalog.ClaudeEntry) async ->RemoteReceipt {
         func result(_ status:String,_ message:String,_ chat:RemoteChat?=nil)->RemoteReceipt {
             RemoteReceipt(id:command.id,status:status,message:message,activeChat:chat)
         }
         guard !isLocked,AXIsProcessTrusted(),let app=NSRunningApplication.runningApplications(withBundleIdentifier:access.bundle).first,
               let definition=ControllerAction.find(entry.controllerID),definition.sessionRequired==entry.action.requiresChat else {
-            return result("failed","Unlock this Mac, open Claude, and enable Genesis Accessibility first.")
+            return result("failed","Unlock this Mac, open Claude, and enable Accessibility for Agent Micro Controller first.")
         }
         // Global navigation is relative to the desktop's current view. Never
         // reselect the phone's old chat before Previous, Next, Back, or New.
@@ -378,6 +858,7 @@ import CoreImage.CIFilterBuiltins
             return snapshot.isCurrent && snapshot.destinationCount==1
         }
         guard contextOK() else{return result("failed","The active Claude chat does not match this control's target. Select the chat again; no input was sent.")}
+        if command.action=="newChat" {return await openNewClaudeSession(command,definition:definition,app:app,contextIsCurrent:contextOK)}
         let previousID=entry.action.changesChat ? verifiedActiveClaudeChat()?.id:nil
         let message=await access.extraAction(definition,title:target?.title ?? "",app:app,contextIsCurrent:contextOK)
         guard RemoteActionCatalog.acceptsClaudeResult(message,controllerTitle:definition.title) else{return result("failed",message)}
@@ -424,6 +905,9 @@ import CoreImage.CIFilterBuiltins
             }
             return NSWorkspace.shared.open(url) ? result("confirmed","Opened artifact on this Mac."):result("failed","The Mac could not open this artifact.")
         }
+        if command.action=="launchApp" {return await launchApp(command)}
+        if command.action=="restartService" {return await restartCodexService(command)}
+        if command.provider=="muse" {return await executeMuse(command)}
         if command.provider=="codex" {
             if command.action=="sendPrompt" {
                 let home=FileManager.default.homeDirectoryForCurrentUser
@@ -452,10 +936,11 @@ import CoreImage.CIFilterBuiltins
             } catch {return result("failed","macOS could not open the existing Codex chat.")}
         }
         guard command.provider=="claude" else{return result("failed","Existing-chat control is not verified for this provider. No action was sent.")}
-        guard !isLocked,AXIsProcessTrusted() else{return result("failed","Unlock the Mac and enable Genesis Accessibility first.")}
+        guard !isLocked,AXIsProcessTrusted() else{return result("failed","Unlock the Mac and enable Accessibility for Agent Micro Controller first.")}
         guard command.action != "nativeVoice" else{return result("failed","Two-way native phone voice is not available yet.")}
         if let entry=RemoteActionCatalog.claudeEntry(command.action) {return await executeClaudeShortcut(command,entry:entry)}
         guard let id=command.chatID else{return result("failed","Choose a chat first.")}
+        if id==newClaudeSession().id {return await executeNewClaudeSession(command)}
         // Saved/cached labels only resolve the opaque ID. Fresh targeted AX
         // checks below still authorize every navigation, Send, and Stop.
         let target=resolveClaudeTarget(id)
@@ -474,6 +959,8 @@ import CoreImage.CIFilterBuiltins
             if case .ambiguous=confirmation {return result("failed","This title resolves to multiple sidebar chats. No action was sent.")}
             return result("failed","Claude navigation could not be confirmed. Select the chat again; no Send or Stop action was sent.")
         }
+        // Opening a chat from a controller is what counts as having looked at it.
+        claudeLatch.acknowledge(id)
         if command.action=="openChat" {return result("confirmed","Opened \(target.title).")}
         // Sending/stopping requires a fresh unique sidebar destination as well
         // as the active header. A cached label only allowed us to navigate.
@@ -498,9 +985,15 @@ import CoreImage.CIFilterBuiltins
             let fields=access.nodes().filter{access.value($0,kAXRoleAttribute) as? String==kAXTextAreaRole && access.value($0,kAXDescriptionAttribute) as? String=="Prompt"}
             return fields.count==1 ? fields[0]:nil
         }
+        // Wait for hands to be off the keys so nothing typed on the Mac lands in the draft.
+        guard await MacInput.waitForQuiet() else{return result("failed","\(MacInput.busyMessage); nothing was inserted.")}
         guard let field=composer() else{return result("failed","Send could not find one Claude Prompt composer in this chat. Nothing was inserted or replaced.")}
         guard let existing=access.value(field,kAXValueAttribute) as? String else{return result("failed","Send could not read the Mac composer to check for an existing draft. Nothing was inserted or replaced.")}
-        guard RemoteComposerPolicy.isBlank(existing) else{return result("failed","The Mac composer already contains a draft. Clear it on the Mac first; nothing was replaced or sent.")}
+        // Text already in the Mac's message box is someone's work. It is replaced only when the
+        // person holding the controller was told about it and asked for that.
+        guard RemoteComposerPolicy.isBlank(existing) || command.replaceDraft==true else {
+            var blocked=result("failed","The Mac’s message box already has text in it. Nothing was replaced or sent.");blocked.blocker="macDraft";return blocked
+        }
         var settable=DarwinBoolean(false)
         guard AXUIElementIsAttributeSettable(field,kAXValueAttribute as CFString,&settable) == .success,settable.boolValue else{return result("failed","Claude does not expose a writable composer in this view. No text was inserted.")}
         guard AXUIElementSetAttributeValue(field,kAXValueAttribute as CFString,prompt as CFString) == .success else{return result("failed","Claude did not accept the draft. Nothing was sent.")}
@@ -560,19 +1053,25 @@ struct RemotePairingView:View {
     @State private var chatID=""
     @State private var linkTitle=""
     @State private var linkURL=""
+    @State private var revoking:PairedDevice?
+    @State private var retiringLegacy=false
     var body:some View {
         ScrollView {VStack(alignment:.leading,spacing:18) {
-            Text("Genesis on iPhone").font(.largeTitle.bold())
-            Text("Pair your phone to this Mac over your private Tailscale network.").foregroundStyle(.secondary)
+            Text("Agent Micro Controller on iPhone").font(.largeTitle.bold())
+            Text("Pair your phone or iPad with this Mac. On the same Wi-Fi it just works; add Tailscale to control this Mac when you are away.").foregroundStyle(.secondary)
             Toggle("Enable private remote access",isOn:Binding(get:{bridge.enabled},set:bridge.setEnabled))
             Label(bridge.serviceStatus,systemImage:"network")
-            TextField("https://your-mac.tailnet.ts.net:8451",text:$bridge.baseURL).textFieldStyle(.roundedBorder).onSubmit{bridge.saveAddress()}
+            Toggle("Pair and connect over this Wi-Fi",isOn:Binding(get:{bridge.wifiEnabled},set:bridge.setWiFi)).disabled(!bridge.enabled)
+            Label(bridge.wifiStatus,systemImage:"wifi").font(.callout)
+            Text("Connections over Wi-Fi are encrypted with this Mac\u{2019}s own certificate, which the QR code introduces to your phone. Only devices you pair can use it.").font(.caption).foregroundStyle(.secondary)
+            Text("Away from home (optional)").font(.headline).padding(.top,4)
+            TextField("Tailscale address, such as https://your-mac.tailnet.ts.net:8451",text:$bridge.baseURL).textFieldStyle(.roundedBorder).onSubmit{bridge.saveAddress()}
             HStack(alignment:.top,spacing:20) {
                 if let image=bridge.qrImage {Image(nsImage:image).interpolation(.none).resizable().frame(width:220,height:220).padding(12).background(.white).clipShape(RoundedRectangle(cornerRadius:14))}
                 VStack(alignment:.leading,spacing:12) {
-                    Text("Scan from Genesis on your iPhone").font(.headline)
-                    Text("This QR code contains a private pairing key. Share it only with your own phone.").font(.callout)
-                    Text("The HTTPS endpoint must be connected to this Mac’s local service on port 18765. Tailscale reachability is checked during pairing.").font(.caption).foregroundStyle(.secondary)
+                    Text("Scan from Agent Micro Controller on your iPhone").font(.headline)
+                    Text("This code pairs one device, once, and stops working after ten minutes. Scanning it gives that device control of the apps on this Mac, so show it only to your own phone or tablet.").font(.callout)
+                    Text("For Tailscale, the address must be connected to this Mac\u{2019}s local service on port 18765 (tailscale serve --bg --https=8451 http://127.0.0.1:18765). The phone uses Wi-Fi when it can and Tailscale otherwise.").font(.caption).foregroundStyle(.secondary)
                     Button("Copy pairing link") {if let link=bridge.pairingLink {NSPasteboard.general.clearContents();NSPasteboard.general.setString(link.absoluteString,forType:.string)}}.disabled(bridge.pairingLink==nil)
                     Button("Save address"){bridge.saveAddress()}
                 }
@@ -590,7 +1089,75 @@ struct RemotePairingView:View {
             ForEach(bridge.artifacts.filter{$0.provider==provider},id:\.id) { item in HStack {Image(systemName:item.kind=="web" ? "globe":"doc");Text(item.title);Spacer();Button("Remove"){bridge.removeArtifact(item.id)}}.padding(8).background(.quaternary,in:RoundedRectangle(cornerRadius:8)) }
             Divider()
             Text(bridge.lastResult).font(.callout).textSelection(.enabled)
-            Text("Claude desktop controls require Claude to be open, an unlocked Mac, and Accessibility. Codex supports saved-chat selection, phone Send, and available Mac menu controls. Stop and native live voice are not connected for Codex; native live voice is also unavailable for Claude. Muse currently provides the artifact shelf.").font(.caption).foregroundStyle(.secondary)
-        }.padding(28)}.frame(minWidth:740,minHeight:640)
+            Divider()
+            Text("Paired devices").font(.title3.bold())
+            Text("Each device has its own secret. Revoking one cuts off that device only; pair it again to restore it.").font(.caption).foregroundStyle(.secondary)
+            if bridge.devices.isEmpty {Text("No devices have paired with the new codes yet.").font(.callout).foregroundStyle(.secondary)}
+            ForEach(bridge.devices) { device in
+                HStack(spacing:10) {
+                    Image(systemName:"iphone")
+                    VStack(alignment:.leading,spacing:2) {
+                        Text(device.name).font(.callout.weight(.medium))
+                        Text("Paired \(device.pairedAt.formatted(date:.abbreviated,time:.shortened))"+(device.lastSeenAt.map{" · last seen \($0.formatted(date:.abbreviated,time:.shortened))"} ?? " · not seen yet")).font(.caption).foregroundStyle(.secondary)
+                    }
+                    Spacer()
+                    Button("Revoke",role:.destructive){revoking=device}
+                }.padding(8).background(.quaternary,in:RoundedRectangle(cornerRadius:8))
+            }
+            if bridge.legacySecretAccepted {
+                HStack(spacing:10) {
+                    Image(systemName:"key")
+                    VStack(alignment:.leading,spacing:2) {
+                        Text("Devices paired before version 0.7").font(.callout.weight(.medium))
+                        Text("They share one older secret and cannot be told apart. The Genesis G2 glasses bridge on this Mac uses it too, so keep accepting it if you use the glasses.").font(.caption).foregroundStyle(.secondary)
+                    }
+                    Spacer()
+                    Button("Stop accepting…",role:.destructive){retiringLegacy=true}
+                }.padding(8).background(.quaternary,in:RoundedRectangle(cornerRadius:8))
+            }
+            Divider()
+            HStack {
+                Text("Check this Mac").font(.title3.bold())
+                Spacer()
+                Text("Version \(GenesisRemoteBridge.companionVersion)").font(.caption).foregroundStyle(.secondary)
+                Button(bridge.checking ? "Checking…":"Run check"){Task{_ = await bridge.selfCheck()}}.disabled(bridge.checking)
+            }
+            Text("Looks for each control the phone relies on in Claude, Muse and Codex. Nothing is sent or changed, except that Muse’s chat list is shown so its chats can be counted.").font(.caption).foregroundStyle(.secondary)
+            if let report=bridge.lastSelfCheck {
+                Text(report.summary).font(.callout.weight(.semibold))
+                ForEach(Array(report.items.enumerated()),id:\.offset) { _,item in
+                    HStack(alignment:.firstTextBaseline,spacing:8) {
+                        Image(systemName:item.ok ? "checkmark.circle.fill":"exclamationmark.triangle.fill").foregroundStyle(item.ok ? .green:.orange)
+                        Text("\(item.provider.capitalized) · \(item.name)").font(.callout.weight(.medium)).frame(width:210,alignment:.leading)
+                        Text(item.detail).font(.callout).foregroundStyle(.secondary).textSelection(.enabled)
+                        Spacer(minLength:0)
+                    }
+                }
+            }
+            Divider()
+            Text("Recent activity").font(.title3.bold())
+            Text("What each phone command was and how it ended. Message text is never recorded.").font(.caption).foregroundStyle(.secondary)
+            if bridge.recentActivity.isEmpty {Text("No commands yet.").font(.callout).foregroundStyle(.secondary)}
+            ForEach(Array(bridge.recentActivity.enumerated()),id:\.offset) { _,entry in
+                HStack(alignment:.firstTextBaseline,spacing:8) {
+                    Text(entry.time,format:.dateTime.month(.abbreviated).day().hour().minute().second()).font(.caption.monospacedDigit()).foregroundStyle(.secondary).frame(width:128,alignment:.leading)
+                    Text("\(entry.provider.capitalized) · \(entry.action)").font(.callout.weight(.medium)).frame(width:190,alignment:.leading)
+                    Text(entry.status).font(.caption.weight(.semibold)).foregroundStyle(entry.status=="confirmed" || entry.status=="queued" ? .green:.orange).frame(width:74,alignment:.leading)
+                    Text(entry.message).font(.callout).foregroundStyle(.secondary).lineLimit(2).textSelection(.enabled)
+                    Spacer(minLength:0)
+                }
+            }
+            Text("Claude desktop controls require Claude to be open, an unlocked Mac, and Accessibility. Codex supports saved-chat selection, phone Send, and available Mac menu controls. Stop and native live voice are not connected for Codex; native live voice is also unavailable for Claude. Muse needs to be open: its chats, Send, New side chat and Call are connected, and side chats that share a title are left out.").font(.caption).foregroundStyle(.secondary)
+        }.padding(28)}.frame(minWidth:740,minHeight:640).task{bridge.loadActivity()}
+            // A code lasts ten minutes; replace it a little before that while the window is open.
+            .task{while !Task.isCancelled {bridge.refreshPairingCode();try? await Task.sleep(nanoseconds:540_000_000_000)}}
+            .confirmationDialog("Revoke \(revoking?.name ?? "this device")?",isPresented:Binding(get:{revoking != nil},set:{if !$0 {revoking=nil}}),titleVisibility:.visible) {
+                Button("Revoke",role:.destructive){if let device=revoking {bridge.revokeDevice(device.id)};revoking=nil}
+                Button("Cancel",role:.cancel){revoking=nil}
+            } message:{Text("It will stop working at once and show “Pair this Mac”. Scan a new code to pair it again.")}
+            .confirmationDialog("Stop accepting the older shared secret?",isPresented:$retiringLegacy,titleVisibility:.visible) {
+                Button("Stop accepting it",role:.destructive){bridge.stopAcceptingLegacySecret()}
+                Button("Cancel",role:.cancel){}
+            } message:{Text("Every phone and tablet that paired before version 0.7 will stop working until it scans a new code. So will anything on this Mac that reads the secret from its file, such as the Genesis G2 glasses bridge. This cannot be undone.")}
     }
 }

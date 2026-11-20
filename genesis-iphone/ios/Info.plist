@@ -5,7 +5,7 @@
 	<key>CFBundleDevelopmentRegion</key>
 	<string>$(DEVELOPMENT_LANGUAGE)</string>
 	<key>CFBundleDisplayName</key>
-	<string>Genesis Controller</string>
+	<string>Agent Micro</string>
 	<key>CFBundleExecutable</key>
 	<string>$(EXECUTABLE_NAME)</string>
 	<key>CFBundleIdentifier</key>
@@ -31,12 +31,14 @@
 	</array>
 	<key>CFBundleVersion</key>
 	<string>$(CURRENT_PROJECT_VERSION)</string>
+	<key>ITSAppUsesNonExemptEncryption</key>
+	<false/>
 	<key>NSCameraUsageDescription</key>
-	<string>Scan the pairing code shown by your Mac's Genesis controller.</string>
+	<string>Scan the pairing code shown by Agent Micro Controller on your Mac.</string>
 	<key>NSLocalNetworkUsageDescription</key>
-	<string>Connect to your paired Genesis companions on your private network.</string>
+	<string>Connect to the Macs you paired on your private network.</string>
 	<key>NSMicrophoneUsageDescription</key>
-	<string>Dictate a draft for your selected chat. Genesis sends only when you tap Send.</string>
+	<string>Dictate a draft for your selected chat. Send submits it; optional glasses Follow can display the draft before sending.</string>
 	<key>NSSpeechRecognitionUsageDescription</key>
 	<string>Turn your speech into an editable chat draft.</string>
 	<key>UIApplicationSceneManifest</key>

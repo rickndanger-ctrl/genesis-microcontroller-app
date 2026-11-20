@@ -57,6 +57,16 @@ final class HTTPFixture: @unchecked Sendable {
         lock.lock(); actionResults[action] = result; lock.unlock()
     }
     func dropAction(_ action: String, value: Bool) { lock.lock(); if value { droppedActions.insert(action) } else { droppedActions.remove(action) }; lock.unlock() }
+    private var chatState = "Idle"
+    /// What the Mac says the fixture's chat is doing.
+    func setChatState(_ state: String) { lock.lock(); chatState = state; lock.unlock() }
+    private var leftOutTitles: [String] = []
+    /// Titles the Mac reports as shared by more than one chat.
+    func setLeftOut(_ titles: [String]) { lock.lock(); leftOutTitles = titles; lock.unlock() }
+    private var pairingCode: String?
+    private(set) var pairedDeviceNames: [String] = []
+    /// Makes one single-use pairing code valid, as showing a QR code would.
+    func offerPairingCode(_ code: String) { lock.lock(); pairingCode = code; lock.unlock() }
     func setNavigation(_ active: Bool, rotate: Bool = false) { lock.lock(); navigationActive = active; if rotate { navigationSession = UUID().uuidString }; lock.unlock() }
     var navigationCount: Int { lock.lock(); defer { lock.unlock() }; return acceptedNavigation }
     func delayStatus(_ delay: TimeInterval) { lock.lock(); statusDelay = delay; lock.unlock() }
@@ -120,9 +130,17 @@ final class HTTPFixture: @unchecked Sendable {
     }
     private func reply(_ connection: NWConnection, firstLine: String, headers: [String: String], body: Data) {
         lock.lock(); requests.append((firstLine, headers, body)); let delay = statusDelay; let unavailable = statusUnavailable; let uncertain = simulateUncertain; let rejected = rejectSend; let dropped = dropSendResponse; let receiptState = self.receiptState; lock.unlock()
-        guard headers["authorization"] == "Bearer \(token)" else { respond(connection, code: 401, json: ["error": "Unauthorized"]); return }
         let target = firstLine.split(separator: " ").dropFirst().first.map(String.init) ?? ""
         let path = target.components(separatedBy: "?")[0]
+        // Pairing is the one request that carries a single-use code instead of the secret.
+        if path == "/v1/pair" {
+            let sent = (try? JSONSerialization.jsonObject(with: body)) as? [String: Any]
+            lock.lock(); let expected = pairingCode; pairingCode = nil; pairedDeviceNames.append(sent?["deviceName"] as? String ?? ""); lock.unlock()
+            if let expected, sent?["code"] as? String == expected { respond(connection, code: 200, json: ["token": token, "deviceID": UUID().uuidString, "deviceName": "Fixture phone"]) }
+            else { respond(connection, code: 403, json: ["error": "This pairing code is no longer valid. Scan a fresh code from the Mac."]) }
+            return
+        }
+        guard headers["authorization"] == "Bearer \(token)" else { respond(connection, code: 401, json: ["error": "Unauthorized"]); return }
         let queryProvider = URLComponents(string:"http://localhost" + target)?.queryItems?.first(where:{$0.name == "provider"})?.value ?? "claude"
         if path == "/v1/redirect" {
             respond(connection, code: 302, json: [:], extra: "Location: http://127.0.0.1:\(port)/v1/leaked\r\n"); return
@@ -151,7 +169,11 @@ final class HTTPFixture: @unchecked Sendable {
         }
         if path == "/v1/chats" {
             let id = queryProvider == "codex" ? codexChatID : "chat-\(name)"
-            respond(connection, code: 200, json: ["chats":[["id":id,"title":queryProvider == "codex" ? "Existing Codex thread":"Fixture chat","state":"Idle"]]], holdPath: path); return
+            lock.lock(); let shared = leftOutTitles; lock.unlock()
+            lock.lock(); let reported = chatState; lock.unlock()
+            var listing: [String: Any] = ["chats":[["id":id,"title":queryProvider == "codex" ? "Existing Codex thread":"Fixture chat","state":reported]]]
+            if !shared.isEmpty { listing["leftOut"] = shared }
+            respond(connection, code: 200, json: listing, holdPath: path); return
         }
         if path == "/v1/artifacts" { respond(connection, code: 200, json: ["artifacts":[]], holdPath: path); return }
         if path == "/v1/navigation" {
@@ -325,6 +347,33 @@ final class FixtureCredentials: ControllerCredentialVault {
         try await freshStore.pair(URL(string:"genesiscontroller://pair?data=\(firstPairingData)")!)
         expect(freshStore.hosts.count == 1 && freshStore.selectedHost?.hostID == first.hostID && freshStore.isPaired,
                "First QR pairing adds and selects the verified Mac")
+
+        // Version 2 pairing: the QR code carries a single-use code, which is
+        // traded for a secret that belongs to this device alone.
+        let singleUse = String(repeating:"single-use-code-", count:3)
+        let codePairing = PairingPayload(v:2,name:first.name,hostID:first.hostID,baseURL:first.baseURL,token:singleUse)
+        let codePairingData = try JSONEncoder().encode(codePairing).base64EncodedString()
+            .replacingOccurrences(of:"+",with:"-").replacingOccurrences(of:"/",with:"_").replacingOccurrences(of:"=",with:"")
+        let codePairingURL = URL(string:"genesiscontroller://pair?data=\(codePairingData)")!
+        let codeCredentials = FixtureCredentials()
+        let codeStore = ControllerStore(client: client, credentials: codeCredentials,
+            persistence: ControllerPersistence(directory: temporary.appendingPathComponent("code")))
+        ControllerStore.deviceName = { "Fixture phone" }
+        first.offerPairingCode(singleUse)
+        try await codeStore.pair(codePairingURL)
+        expect(codeStore.isPaired && codeStore.selectedHost?.hostID == first.hostID, "A single-use code pairs the Mac")
+        let kept = codeStore.selectedHost.flatMap { codeCredentials.token(for: $0.id) }
+        expect(kept == first.token && kept != singleUse, "The device keeps the secret it was issued, never the single-use code")
+        expect(first.pairedDeviceNames.last == "Fixture phone", "Pairing tells the Mac what this device is called")
+        let reuseCredentials = FixtureCredentials()
+        let reuseStore = ControllerStore(client: client, credentials: reuseCredentials,
+            persistence: ControllerPersistence(directory: temporary.appendingPathComponent("reuse")))
+        do {
+            try await reuseStore.pair(codePairingURL)
+            fatalError("A used pairing code was accepted")
+        } catch RemoteError.server(let code, _) { expect(code == 403, "A used pairing code is refused") }
+        expect(reuseStore.hosts.isEmpty && !reuseStore.isPaired && reuseCredentials.token(for: first.hostID) == nil,
+               "A refused code pairs nothing and saves no secret")
         let persistence = ControllerPersistence(directory: temporary)
         let credentials = FixtureCredentials()
         try credentials.save(first.token, for: first.name); try credentials.save(second.token, for: second.name)
@@ -338,6 +387,65 @@ final class FixtureCredentials: ControllerCredentialVault {
         await store.refresh()
         expect(store.isPaired && store.status?.hostID == first.hostID, "Store authenticates paired host")
         expect(store.profile.slots.count == 6 && store.chats.count == 1, "Mapping and chat snapshots populated through HTTP")
+        // Each key's light is what its chat is doing on the Mac.
+        expect(store.activity(slot: 0) == .idle && store.selectedActivity == .idle, "An idle chat's key is idle")
+        expect(store.activity(slot: 1) == nil && store.activity(slot: 5) == nil, "A key with no chat has no light")
+        for (reported, light) in [("Working", ChatActivity.thinking), ("Needs input", .needsInput), ("Something went wrong", .error), ("Unread", .complete)] {
+            first.setChatState(reported); await store.refresh()
+            expect(store.activity(slot: 0) == light && store.selectedActivity == light, "A chat the Mac reports as \(reported) lights its key \(light.rawValue)")
+        }
+        await store.selectChat(store.chats[0])
+        expect(store.activity(slot: 0) == .idle, "Opening a finished chat clears its light at once, without waiting for the Mac")
+        first.setChatState("Idle"); await store.refresh()
+        expect(store.activity(slot: 0) == .idle, "The Mac then agrees")
+        // Between full refreshes only the chat list is re-read.
+        func requests(_ prefix: String) -> Int { first.received.filter { $0.0.hasPrefix(prefix) }.count }
+        let before = (requests("GET /v1/chats"), requests("GET /v1/profile"), requests("GET /v1/artifacts"), requests("GET /v1/status"))
+        first.setChatState("Working"); await store.refreshLights()
+        expect(store.activity(slot: 0) == .thinking, "A lights refresh picks up a chat that started working")
+        expect(requests("GET /v1/chats") == before.0 + 1 && requests("GET /v1/profile") == before.1 && requests("GET /v1/artifacts") == before.2 && requests("GET /v1/status") == before.3,
+               "A lights refresh asks the Mac for the chat list and nothing else")
+        // A Mac that stops answering takes its lights with it: the last colors would be a guess.
+        first.setStatusUnavailable(true); await store.refresh()
+        expect(!store.lightsAreLive && store.activity(slot: 0) == nil && store.selectedActivity == nil, "An unreachable Mac shows no lights")
+        let offlineChats = requests("GET /v1/chats")
+        await store.refreshLights()
+        expect(requests("GET /v1/chats") == offlineChats, "No lights refresh is attempted while the Mac is unreachable")
+        first.setStatusUnavailable(false); first.setChatState("Idle"); await store.refresh()
+        expect(store.lightsAreLive && store.activity(slot: 0) == .idle, "The lights come back with the Mac")
+
+        // A press that cannot act says what it needs, and offers the step when there is one.
+        let keptDraft = store.draft
+        store.draft = ""
+        var need = store.hint(forAction: "sendPrompt")
+        expect(need.title == "Nothing to send yet" && need.step == .writeDraft && need.stepLabel == "Type a draft",
+               "Send with an empty draft says there is nothing to send and offers the draft box")
+        store.lastError = nil
+        let ran = await store.runAction("sendPrompt")
+        expect(!ran && store.hint?.title == "Nothing to send yet" && store.lastError == nil,
+               "A key mapped to Send shows that hint, not a general error")
+        store.hint = nil
+        store.returnHome()
+        expect(store.selectedChat == nil && store.selectedSlotIndex == nil, "Home leaves no chat selected")
+        need = store.hint(forAction: "sendPrompt")
+        expect(need.title == "Choose a chat first" && need.step == nil && need.message.contains("Send"),
+               "Send with no chat open says to choose one, by name")
+        need = store.hint(forAction: "dictate")
+        expect(need.title == "Choose a chat first" && need.message.contains("Hold to Talk"), "Hold to Talk with no chat says the same in its own words")
+        first.setStatusUnavailable(true); await store.refresh()
+        need = store.hint(forAction: "sendPrompt")
+        expect(need.title.hasPrefix("Can’t reach") && need.step == .refresh && need.stepLabel == "Refresh",
+               "With the Mac away, Send says so and offers to try again")
+        need = store.hint(forAction: "dictate")
+        expect(need.title == "Choose a chat first", "Recording a draft does not need the Mac, only a chat")
+        first.setStatusUnavailable(false); await store.refresh()
+        await store.openSlot(0)
+        expect(store.selectedChat != nil && store.selectedSlotIndex == 0, "Pressing the key opens the chat again")
+        store.draft = keptDraft
+        let emptyKeys = ControllerStore(client: client, credentials: FixtureCredentials(),
+            persistence: ControllerPersistence(directory: temporary.appendingPathComponent("hints-unpaired")))
+        need = emptyKeys.hint(forAction: "sendPrompt")
+        expect(need.title == "Pair a Mac first" && need.step == .pairMac && need.stepLabel == "Open Settings", "An unpaired device is sent to pair, with the button")
         let beforeVoice = first.received.count
         await store.startNativeVoice()
         expect(first.received.count == beforeVoice, "Unavailable native voice cannot issue a network command")
@@ -354,6 +462,7 @@ final class FixtureCredentials: ControllerCredentialVault {
         await store.sendDraft()
         expect(first.sendCount == 1, "Explicit Send dispatches once")
         expect(store.hasUnresolvedSend && !store.canSend, "Uncertain delivery disables duplicate Send")
+        expect(store.activity(slot: 0) == .error && store.selectedActivity == .error, "A Send whose result is unknown turns that chat's key to error")
         await store.sendDraft()
         expect(first.sendCount == 1, "Second tap cannot dispatch while result is unresolved")
         let posted = first.received.last { $0.0.hasPrefix("POST /v1/commands ") }!
@@ -366,6 +475,18 @@ final class FixtureCredentials: ControllerCredentialVault {
         await restored.refresh()
         expect(!restored.hasUnresolvedSend && restored.draft.isEmpty, "GET receipt confirms delivery and clears matching draft")
         expect(first.sendCount == 1, "Receipt recovery never posts again")
+        // An unconfirmed Send on a chat that is not open is checked as well, so its red key clears without opening it.
+        expect(store.unresolvedSendCount == 1, "The first controller still holds the unconfirmed Send")
+        store.selectProvider(.codex)
+        for _ in 0..<100 {
+            await store.refresh()
+            if store.unresolvedSendCount == 0 { break }
+            try? await Task.sleep(nanoseconds:20_000_000)
+        }
+        expect(store.unresolvedSendCount == 0 && first.sendCount == 1, "A refresh resolves an unconfirmed Send on another chat, and never posts again")
+        store.selectProvider(.claude)
+        expect(!store.hasUnresolvedSend && store.activity(slot: 0) != .error, "Its key is no longer red when you come back")
+        try? await Task.sleep(nanoseconds:200_000_000)
 
         store.acknowledgeUncertainSend(wasSent: true)
         store.draft = "Draft for first Mac"
@@ -658,7 +779,7 @@ final class FixtureCredentials: ControllerCredentialVault {
                "Denied microphone permission preserves the local Codex draft and offers typed input")
         _ = await codexStore.saveSlot(.init(index:1,kind:"action",title:"Legacy Send shortcut",targetID:"sendPrompt"))
         await codexStore.openSlot(1)
-        expect(codexStore.lastError?.contains("not available") == true && codexStore.draft == "Existing local Codex draft" &&
+        expect(codexStore.hint?.title == "Send isn’t connected for Codex here" && codexStore.hint?.step == nil && codexStore.draft == "Existing local Codex draft" &&
                codexFixture.received.filter { $0.0.hasPrefix("POST /v1/commands ") }.count == commandCount,
                "An older unsupported Send mapping explains its limitation without dispatching or discarding text")
         let capturePersistence = ControllerPersistence(directory:temporary.appendingPathComponent("codex-capture"))
@@ -686,7 +807,7 @@ final class FixtureCredentials: ControllerCredentialVault {
                "Changing Macs restores its own Codex draft and rejects old microphone output")
         captureStore.selectHost(codexFixture.name)
         for _ in 0..<100 {
-            if captureStore.canDictate { break }
+            if captureStore.canDictate && captureStore.providerInfo?.readiness == "ready" { break }
             try? await Task.sleep(nanoseconds:10_000_000); await captureStore.refresh()
         }
         await captureStore.startDictation(); captureSpeech.emit("Before selecting another chat.")
@@ -794,6 +915,52 @@ final class FixtureCredentials: ControllerCredentialVault {
         expect(!codexStore.canMapChats && codexStore.chatAvailabilityMessage == unavailableCodex.reason && codexStore.availableShortcuts == [.artifacts],
                "Unsupported Codex reports the actual limitation instead of claiming there are no chats")
 
+        // The Mac says which chats it left out for sharing a title.
+        codexFixture.setProviders([claudeInfo,codexInfo])
+        codexFixture.setLeftOut(["Hello","Muse Lens initialization"])
+        for _ in 0..<100 {
+            await codexStore.refresh()
+            if !codexStore.leftOutChatTitles.isEmpty { break }
+            try? await Task.sleep(nanoseconds:10_000_000)
+        }
+        expect(codexStore.leftOutChatTitles == ["Hello","Muse Lens initialization"] && codexStore.leftOutChatsNotice?.contains("2 titles") == true,
+               "The phone reports which chat titles the Mac left out")
+        codexFixture.setLeftOut([])
+        for _ in 0..<100 {
+            await codexStore.refresh()
+            if codexStore.leftOutChatTitles.isEmpty { break }
+            try? await Task.sleep(nanoseconds:10_000_000)
+        }
+        expect(codexStore.leftOutChatsNotice == nil, "The notice goes once the titles are unique again")
+        codexFixture.setProviders([claudeInfo,unavailableCodex]); await codexStore.refresh()
+
+        // The Mac can offer to restart an app's background service while it cannot be reached.
+        expect(!codexStore.canRestartProviderService, "No restart is offered unless the Mac offers one")
+        var lostService = unavailableCodex; lostService.capabilities = ["restartService","artifacts"]
+        lostService.reason = "Codex’s background service lost its connection file."
+        codexFixture.setProviders([claudeInfo,lostService])
+        for _ in 0..<100 {
+            await codexStore.refresh()
+            if codexStore.canRestartProviderService { break }
+            try? await Task.sleep(nanoseconds:10_000_000)
+        }
+        expect(codexStore.canRestartProviderService && !codexStore.canOpenProviderApp, "A lost service offers a restart, not an app launch")
+        func restartCommands() -> Int {
+            codexFixture.received.filter { $0.0.hasPrefix("POST /v1/commands") && String(data:$0.2,encoding:.utf8)?.contains("\"restartService\"") == true }.count
+        }
+        let restartsBefore = restartCommands()
+        codexFixture.setProviders([claudeInfo,codexInfo])
+        await codexStore.restartProviderService()
+        expect(restartCommands() == restartsBefore + 1, "Restart sends exactly one command to the Mac")
+        for _ in 0..<100 {
+            if codexStore.providerInfo?.readiness == "ready" { break }
+            try? await Task.sleep(nanoseconds:10_000_000)
+        }
+        expect(codexStore.providerInfo?.readiness == "ready" && !codexStore.canRestartProviderService,
+               "After a restart the phone asks again and stops offering it")
+        await codexStore.restartProviderService()
+        expect(restartCommands() == restartsBefore + 1, "A service that answers is never sent a restart")
+
         let queueFixture = HTTPFixture(name:"fixture-codex-queue"); try await queueFixture.start(); defer { queueFixture.stop() }
         var queueProvider = codexInfo; queueProvider.capabilities.append("sendPrompt")
         queueFixture.setProviders([claudeInfo,queueProvider]); queueFixture.setSendAcceptance("queued"); queueFixture.setReceiptState("queued")
@@ -872,9 +1039,10 @@ final class FixtureCredentials: ControllerCredentialVault {
         let priorAction = RemoteAction(id:"previousChat",title:"Previous native chat",group:"Navigate",detail:"Use the provider navigation.",requiresChat:false,changesChat:true)
         let focusAction = RemoteAction(id:"focusPrompt",title:"Focus prompt",group:"Compose",detail:"Focus the selected prompt.",requiresChat:true,changesChat:false)
         let attachAction = RemoteAction(id:"addAttachment",title:"Add attachment",group:"Compose",detail:"Choose a file.",requiresChat:true,changesChat:false,opensNavigation:true)
+        let searchAction = RemoteAction(id:"searchChats",title:"Search chats",group:"Navigate",detail:"Find a session.",requiresChat:false,changesChat:false,opensNavigation:true)
         var actionInfo = claudeInfo
-        actionInfo.capabilities += ["newChat","previousChat","focusPrompt","addAttachment","menuNavigation"]
-        actionInfo.actions = [newAction,priorAction,focusAction,attachAction]
+        actionInfo.capabilities += ["newChat","previousChat","focusPrompt","addAttachment","searchChats","menuNavigation"]
+        actionInfo.actions = [newAction,priorAction,focusAction,attachAction,searchAction]
         actionsFixture.setProviders([actionInfo,codexInfo]); try credentials.save(actionsFixture.token,for:actionsFixture.name)
         let originalChat = ChatRecord(id:"chat-\(actionsFixture.name)",title:"Original chat",state:"Idle")
         let otherChat = ChatRecord(id:"second-action-chat",title:"Second chat",state:"Idle")
@@ -942,14 +1110,35 @@ final class FixtureCredentials: ControllerCredentialVault {
         let navPosted = actionsFixture.received.compactMap { try? JSONDecoder().decode(RemoteCommand.self,from:$0.2) }.last
         expect(navPosted?.navigationSession == firstLease && navPosted?.chatID == created.id && actionsFixture.navigationCount == 1,
                "Navigation input carries its exact session, chat, and generation")
+        // Previous and Next pressed while a step is in flight wait their turn. Select never waits.
+        actionsFixture.hold("/v1/commands/menuNext")
+        let heldStep = Task { await actionStore.navigate("menuNext") }
+        for _ in 0..<100 {
+            if actionsFixture.heldCount("/v1/commands/menuNext") == 1 { break }
+            try? await Task.sleep(nanoseconds: 10_000_000)
+        }
+        let postedWhileHeld = actionsFixture.received.count
+        await actionStore.navigate("menuPrevious"); await actionStore.navigate("menuSelect"); await actionStore.navigate("menuPrevious")
+        expect(actionStore.isBusy && actionsFixture.received.count == postedWhileHeld, "Menu presses during a step in flight send nothing yet")
+        actionsFixture.release("/v1/commands/menuNext")
+        await heldStep.value
+        let menuSteps = actionsFixture.received.compactMap { try? JSONDecoder().decode(RemoteCommand.self,from:$0.2) }.map(\.action).filter { $0.hasPrefix("menu") }
+        expect(Array(menuSteps.suffix(3)) == ["menuNext","menuPrevious","menuPrevious"] && !actionStore.isBusy && actionStore.navigation.active,
+               "Queued Previous and Next run in order after the step in flight, and a Select pressed meanwhile is never sent")
         actionsFixture.setActionResult("menuSelect",chat:created)
         await actionStore.navigate("menuSelect")
         expect(actionStore.selectedChat?.id == created.id && actionStore.draft == "Keep this new chat draft",
                "Verified same-chat file selection keeps the draft and target intact")
         actionsFixture.setActionResult("menuSelect")
         await actionStore.navigate("menuSelect")
+        expect(actionStore.selectedChat?.id == created.id && actionStore.draft == "Keep this new chat draft",
+               "A confirmed choice in the chat's own menu keeps that chat, even when the Mac names none")
+        // A search result may be any chat, so the same outcome there clears the target.
+        actionsFixture.setNavigation(true)
+        await actionStore.runAction("searchChats")
+        await actionStore.navigate("menuSelect")
         expect(actionStore.selectedChat == nil && !actionStore.canSend,
-               "Menu Select without verified activeChat clears a possibly changed target")
+               "Menu Select after a search, without a verified chat, clears a possibly changed target")
         await actionStore.runAction("previousControllerChat"); await actionStore.refreshNavigation()
         let acceptedBefore = actionsFixture.navigationCount
         actionsFixture.setNavigation(true,rotate:true)
@@ -1274,7 +1463,7 @@ final class FixtureCredentials: ControllerCredentialVault {
         let cases: [(String, Bool, [String], String)] = [
             ("closed", true, ["openChat"], "Open Claude on readiness-mac, then refresh."),
             ("locked", true, ["openChat"], "Unlock readiness-mac to open its chats."),
-            ("needsAccessibility", true, ["openChat"], "Allow Accessibility for Genesis on readiness-mac."),
+            ("needsAccessibility", true, ["openChat"], "Allow Accessibility for Agent Micro Controller on readiness-mac."),
             ("missing", false, [], "Install Claude on readiness-mac, then refresh."),
             ("loading", true, ["openChat"], "Claude is not ready on readiness-mac. Open it, then refresh."),
             ("ready", true, [], "Chat switching is not available for Claude on this Mac yet.")
@@ -1288,7 +1477,7 @@ final class FixtureCredentials: ControllerCredentialVault {
                    "\(readiness) blocked chat tap preserves the exact selection and draft")
         }
         mac.setProviders([]); await store.refresh(); await store.selectChat(chat)
-        expect(store.lastError == "Open Claude on readiness-mac, then refresh Genesis to check its controls.",
+        expect(store.lastError == "Open Claude on readiness-mac, then refresh to check its controls.",
                "An absent provider suggests checking the app instead of claiming an unsupported feature")
 
         mac.hold("/v1/status")

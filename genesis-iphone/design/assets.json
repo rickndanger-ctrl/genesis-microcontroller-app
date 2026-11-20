@@ -10,7 +10,7 @@
   ],
   "assets": [
     {
-      "file": "ios/Resources/ControllerDial.png",
+      "file": "design/renders/ControllerDial.png",
       "width": 512,
       "height": 512,
       "mode": "RGBA",
@@ -23,7 +23,7 @@
       "sha256": "ae711598bb958d8e7df35cba08ae85120932334bc0696b280223eab67b8895eb"
     },
     {
-      "file": "ios/Resources/ControllerDialSilver.png",
+      "file": "design/renders/ControllerDialSilver.png",
       "width": 512,
       "height": 512,
       "mode": "RGBA",
@@ -36,7 +36,7 @@
       "sha256": "258907b726583a813eafa05f24a5df04a27d5a262a6db667bfa24142b321b528"
     },
     {
-      "file": "ios/Resources/ControllerKey.png",
+      "file": "design/renders/ControllerKey.png",
       "width": 512,
       "height": 512,
       "mode": "RGBA",
@@ -49,7 +49,7 @@
       "sha256": "944ebf85e40a0111b02c45ca69c39f670a8505434fa2f488f11ee9b2883eac1d"
     },
     {
-      "file": "ios/Resources/ControllerShell.png",
+      "file": "design/renders/ControllerShell.png",
       "width": 1536,
       "height": 1536,
       "mode": "RGBA",

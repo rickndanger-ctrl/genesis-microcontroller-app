@@ -40,6 +40,16 @@ struct ControllerAction: Identifiable, Equatable {
         .init("rename","Rename session","Session","Open the current chat’s rename field."),
         .init("options","Session options","Session","Open the current chat menu. Choose pin, archive or other options in Claude.")
     ]
+    /// Claude names its permission chooser after the mode in use and adds modes
+    /// over time, so a list of names goes stale. It is found by position
+    /// instead: the one other chooser in the composer row that holds exactly
+    /// one "Model:" chooser. Anything less certain returns nil.
+    static func permissionChooser(among row:[(role:String,text:String)]) -> Int? {
+        func chooser(_ item:(role:String,text:String)) -> Bool {item.role=="AXPopUpButton" && !item.text.isEmpty}
+        guard row.filter({chooser($0) && $0.text.hasPrefix("Model:")}).count==1 else {return nil}
+        let others=row.indices.filter {chooser(row[$0]) && !row[$0].text.hasPrefix("Model:") && !row[$0].text.hasPrefix("Usage:")}
+        return others.count==1 ? others[0] : nil
+    }
     static let groups=["Compose","Navigate","Panels","Session"]
     static func find(_ id:String)->ControllerAction? {all.first{$0.id==id}}
     // Keep Send immediately left of dictation. Unknown or duplicate saved IDs are discarded.

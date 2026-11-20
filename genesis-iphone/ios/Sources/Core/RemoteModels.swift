@@ -12,6 +12,21 @@ struct RemoteHost: Codable, Identifiable, Equatable {
     var name: String
     var baseURL: String
     var hostID: String?
+    /// The Mac on the local network, and the fingerprint of the certificate it
+    /// must present there. Set when it was paired over Wi-Fi.
+    var lanURL: String? = nil
+    var pin: String? = nil
+
+    enum Route: Equatable { case wifi, tailnet }
+    /// Where this Mac can be reached, Wi-Fi first. A Mac paired only over Wi-Fi
+    /// has one route; one with Tailscale too has both.
+    var routes: [(route: Route, url: String)] {
+        var all: [(route: Route, url: String)] = []
+        if let lanURL, pin != nil { all.append((.wifi, lanURL)) }
+        let base = baseURL.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+        if base != lanURL?.trimmingCharacters(in: CharacterSet(charactersIn: "/")) { all.append((.tailnet, baseURL)) }
+        return all
+    }
     static let demoHosts: [RemoteHost] = [
         .init(id: "mini-1", name: "Mini 1", baseURL: "https://preview.invalid:8451", hostID: nil),
         .init(id: "mini-2", name: "Mini 2", baseURL: "https://preview.invalid:8451", hostID: nil),
@@ -29,6 +44,9 @@ struct ProviderInfo: Codable, Equatable, Identifiable {
     func supports(_ action: String) -> Bool {
         guard capabilities.contains(action) else { return false }
         if action == "artifacts" { return true } // Registered exports do not require an interactive desktop.
+        if action == "launchApp" { return installed && readiness == "closed" } // Only offered while the app is shut.
+        // The Mac offers this only while the app's background service cannot be reached.
+        if action == "restartService" { return installed && readiness == "unavailable" }
         if id == "codex", ["newChat", "openSettings", "openSkills"].contains(action) {
             return installed && readiness != "locked" // Explicit launch routes do not need saved-chat inventory.
         }
@@ -106,8 +124,8 @@ struct RemoteAction: Codable, Equatable, Identifiable {
         .init(id:"sendPrompt",title:"Send prompt",group:"Compose",detail:"Send the reviewed iPhone draft to the selected chat once.",requiresChat:true,changesChat:false),
         .init(id:"stop",title:"Stop response",group:"Compose",detail:"Stop the selected chat’s current response.",requiresChat:true,changesChat:false),
         .init(id:"nativeVoice",title:"Voice mode",group:"Compose",detail:"Start verified two-way voice in the selected chat.",requiresChat:true,changesChat:false),
-        .init(id:"previousControllerChat",title:"Previous controller chat",group:"Navigate",detail:"Go back through chats opened from Genesis on this Mac and provider.",requiresChat:false,changesChat:true),
-        .init(id:"nextControllerChat",title:"Next controller chat",group:"Navigate",detail:"Go forward through chats opened from Genesis on this Mac and provider.",requiresChat:false,changesChat:true),
+        .init(id:"previousControllerChat",title:"Previous controller chat",group:"Navigate",detail:"Go back through chats opened from this controller on this Mac and provider.",requiresChat:false,changesChat:true),
+        .init(id:"nextControllerChat",title:"Next controller chat",group:"Navigate",detail:"Go forward through chats opened from this controller on this Mac and provider.",requiresChat:false,changesChat:true),
         .init(id:"artifacts",title:"Artifact shelf",group:"Artifacts",detail:"Browse this Mac’s shared documents, images, and app links.",requiresChat:false,changesChat:false)
     ]
 }
@@ -134,6 +152,27 @@ enum ControllerShortcut: String, CaseIterable, Identifiable {
         }
     }
 }
+/// What a press needs before it can do anything, said in terms of that press,
+/// with the one step that gets there when there is one. Shown instead of a
+/// catch-all message, so a key that cannot act yet says why and offers the way.
+struct ControllerHint: Equatable, Identifiable {
+    enum Step: Equatable {
+        case assignKey(Int)     // choose a chat for this key
+        case writeDraft         // put the cursor in the draft
+        case reviewSend         // look at the Send whose result is unknown
+        case pairMac            // open Settings to pair
+        case openApp            // open (or widen) the app on the Mac
+        case restartService     // restart the app's background service on the Mac
+        case refresh            // ask the Mac again
+    }
+    var title: String
+    var message: String
+    var step: Step? = nil
+    /// The button that takes the step. Present exactly when `step` is.
+    var stepLabel: String? = nil
+    var id: String { title + "\n" + message }
+}
+
 struct DictationControlPresentation: Equatable {
     var label: String
     var accessibilityLabel: String
@@ -145,10 +184,20 @@ struct DictationControlPresentation: Equatable {
         if recording { return .init(label:"RELEASE TO REVIEW",accessibilityLabel:"Stop dictation",summary:nil,explanation:nil,icon:"waveform") }
         if finalizing { return blocked("FINISHING…", "Finishing your recording.", "Your recording is being turned into text. Wait a moment before recording again.") }
         if !paired { return blocked("PAIR YOUR MAC", "Pair a Mac to use dictation.", "Open controller settings and pair this Mac before using dictation.") }
-        guard let info else { return blocked("NOT CONNECTED", "Connect to your Mac to use dictation.", "Check that Tailscale and the Genesis companion are running, then refresh the connection.") }
-        if info.readiness == "locked" { return blocked("MAC LOCKED", "Unlock your Mac to use dictation.", "Unlock the selected Mac, then refresh the controller connection.") }
-        if info.readiness == "needsAccessibility" { return blocked("SETUP NEEDED", "Allow Genesis Accessibility on your Mac.", "Enable Accessibility for Genesis Agent Micro Controller on the selected Mac, then refresh.") }
-        if info.readiness == "closed" { return blocked("OPEN THE APP", "Open \(provider.name) on your Mac.", "Open \(provider.name) on the selected Mac, then refresh the controller connection.") }
+        // Recording and the draft live on this device. With a chat chosen, a Mac
+        // that is away only blocks Send, so the draft can be ready when it is back.
+        func later(_ why: String) -> DictationControlPresentation {
+            .init(label:"HOLD TO TALK",accessibilityLabel:"Dictate a draft to send later",
+                  summary:"\(why) This records a draft here to send later.",
+                  explanation:"\(why) Hold to record; the draft is saved on this device for the selected chat. Send it once the Mac is reachable and \(provider.name) is ready.",icon:"mic")
+        }
+        let canDraft = hasChat && !busy
+        guard let info else {
+            return canDraft ? later("Your Mac isn’t answering.") : blocked("NOT CONNECTED", "Connect to your Mac to use dictation.", "Check that your Mac is awake, Agent Micro Controller is running on it, and your phone is on the same Wi-Fi, then refresh the connection.")
+        }
+        if info.readiness == "locked" { return canDraft ? later("Your Mac is locked.") : blocked("MAC LOCKED", "Unlock your Mac to use dictation.", "Unlock the selected Mac, then refresh the controller connection.") }
+        if info.readiness == "needsAccessibility" { return blocked("SETUP NEEDED", "Allow Accessibility for the companion on your Mac.", "Enable Accessibility for Agent Micro Controller on the selected Mac, then refresh.") }
+        if info.readiness == "closed" { return canDraft ? later("\(provider.name) isn’t ready on your Mac.") : blocked("OPEN THE APP", "Open \(provider.name) on your Mac.", "Open \(provider.name) on the selected Mac, then refresh the controller connection.") }
         if !info.supportsPhoneDictation {
             return blocked("NOT CONNECTED", "\(provider.name) Talk and Send aren’t connected yet.", "Talk and Send aren’t connected to \(provider.name) in this iPhone app yet. The available chat, menu, and artifact controls still work. This button will not start recording.")
         }
@@ -175,11 +224,57 @@ struct HostStatus: Codable, Equatable {
     var hostID: String
     var hostName: String
     var providers: [ProviderInfo]
+    /// Absent from companions older than 0.6.0. See `CompanionSupport`.
+    var companionVersion: String? = nil
 }
 struct ChatRecord: Codable, Identifiable, Equatable {
     var id: String
     var title: String
     var state: String
+    /// What the chat is doing, which is what its key's light shows.
+    var activity: ChatActivity { ChatActivity(state: state) }
+}
+
+/// What a chat is doing, read from the state its app reports on the Mac.
+/// The key lights mean one thing each: white is idle, blue is working, green
+/// has finished since you last looked, yellow is waiting on you, red is an error.
+enum ChatActivity: String, CaseIterable, Equatable {
+    case idle, thinking, complete, needsInput, error
+
+    /// The states the Mac companion reports today. Anything it does not
+    /// recognise is idle: a light must never claim work it cannot see.
+    init(state: String) {
+        switch state.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() {
+        case "working", "running", "thinking", "answering": self = .thinking
+        case "unread", "complete", "completed", "done": self = .complete
+        case "awaiting input", "needs input", "waiting": self = .needsInput
+        case "something went wrong", "error", "failed": self = .error
+        default: self = .idle
+        }
+    }
+
+    /// One or two words, for the chat header and for VoiceOver.
+    var label: String {
+        switch self {
+        case .idle: return "Idle"
+        case .thinking: return "Thinking"
+        case .complete: return "Done"
+        case .needsInput: return "Needs input"
+        case .error: return "Error"
+        }
+    }
+    /// A sentence for the legend in Settings.
+    var meaning: String {
+        switch self {
+        case .idle: return "Nothing is running."
+        case .thinking: return "The agent is working."
+        case .complete: return "Finished since you last opened it."
+        case .needsInput: return "Waiting for you to answer or approve."
+        case .error: return "Something went wrong, or a Send is unconfirmed."
+        }
+    }
+    /// Lights that mean "look at this" are stronger than the ones that do not.
+    var wantsAttention: Bool { self == .needsInput || self == .error }
 }
 struct ControllerChatHistory: Codable, Equatable {
     var entries: [ChatRecord] = []
@@ -212,7 +307,10 @@ struct RemoteProfile: Codable, Equatable {
     static let defaultQuickActions = ["sendPrompt", "stop", "nativeVoice", "artifacts"]
     var quickActionIDs: [String] {
         if let quickActions, quickActions.count == 4 { return quickActions }
-        return provider == "codex" ? ["newChat", "previousControllerChat", "keyboardShortcuts", "artifacts"] : Self.defaultQuickActions
+        if provider == "codex" { return ["newChat", "previousControllerChat", "keyboardShortcuts", "artifacts"] }
+        // Muse cannot be stopped from here, so its second key starts a new side chat instead.
+        if provider == "muse" { return ["sendPrompt", "newChat", "nativeVoice", "artifacts"] }
+        return Self.defaultQuickActions
     }
     static func empty(_ provider: ProviderID) -> RemoteProfile { .init(provider: provider.rawValue, revision: 0, slots: (0..<6).map(SlotMapping.empty)) }
     var orderedSlots: [SlotMapping] { (0..<6).map { index in slots.first { $0.index == index } ?? .empty(index) } }
@@ -227,6 +325,8 @@ struct RemoteCommand: Codable, Equatable {
     var artifactID: String?
     var generation: Int
     var navigationSession: String? = nil
+    /// Sent only after you were told the Mac's message box has text in it and chose to replace it.
+    var replaceDraft: Bool? = nil
 }
 struct RemoteNavigationState: Codable, Equatable {
     var active: Bool
@@ -241,6 +341,8 @@ struct CommandReceipt: Codable, Equatable {
     var message: String
     var activeChat: ChatRecord? = nil
     var navigation: RemoteNavigationState? = nil
+    /// Why nothing was done, when there is a way past it from here. "macDraft": the Mac's message box already has text.
+    var blocker: String? = nil
     var isConfirmed: Bool { status == "confirmed" }
     var isQueued: Bool { status == "queued" }
     // Accepted queue custody ends this Send attempt, without asserting that
@@ -260,15 +362,26 @@ struct ArtifactRecord: Codable, Identifiable, Equatable {
     var provider: String
     var chatID: String
 }
-struct ChatsResponse: Codable { var chats: [ChatRecord] }
+/// `leftOut` lists titles carried by more than one chat on the Mac, which it cannot tell apart.
+struct ChatsResponse: Codable { var chats: [ChatRecord]; var leftOut: [String]? = nil }
 struct ArtifactsResponse: Codable { var artifacts: [ArtifactRecord] }
 
+/// What a pairing QR code carries. In version 1 `token` is the Mac's one
+/// shared secret. In version 2 it is a single-use code, which is traded for a
+/// secret belonging to this device alone.
 struct PairingPayload: Codable, Equatable {
     var v: Int
     var name: String
     var hostID: String
     var baseURL: String
     var token: String
+    /// Present when the Mac offers Wi-Fi pairing: its local address and its certificate's fingerprint.
+    var lanURL: String? = nil
+    var pin: String? = nil
+
+    static func validPin(_ pin: String) -> Bool {
+        pin.count == 43 && pin.unicodeScalars.allSatisfy { CharacterSet(charactersIn: "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_").contains($0) }
+    }
 
     static func decode(_ url: URL, allowLocalhost: Bool = false) throws -> PairingPayload {
         guard url.scheme?.lowercased() == "genesiscontroller", url.host?.lowercased() == "pair", url.path.isEmpty || url.path == "/",
@@ -278,11 +391,18 @@ struct PairingPayload: Codable, Equatable {
         var b64 = encoded.replacingOccurrences(of: "-", with: "+").replacingOccurrences(of: "_", with: "/")
         b64 += String(repeating: "=", count: (4 - b64.count % 4) % 4)
         guard let data = Data(base64Encoded: b64), let payload = try? JSONDecoder().decode(PairingPayload.self, from: data),
-              payload.v == 1, UUID(uuidString: payload.hostID) != nil,
+              [1, 2].contains(payload.v), UUID(uuidString: payload.hostID) != nil,
               !payload.name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty, payload.name.count <= 100,
               payload.token.count >= 32, payload.token.count <= 1024,
               payload.token.unicodeScalars.allSatisfy({ $0.value >= 33 && $0.value <= 126 }),
               validEndpoint(payload.baseURL, allowLocalhost: allowLocalhost) else { throw RemoteError.invalidPairing }
+        // Wi-Fi details come as a pair: an address without a fingerprint could
+        // not be trusted, and a fingerprint without an address means nothing.
+        switch (payload.lanURL, payload.pin) {
+        case (nil, nil): break
+        case let (lan?, pin?): guard validEndpoint(lan), validPin(pin) else { throw RemoteError.invalidPairing }
+        default: throw RemoteError.invalidPairing
+        }
         return payload
     }
 
@@ -300,15 +420,15 @@ enum RemoteError: LocalizedError {
     case server(Int, String), capability(String), unresolvedSend
     var errorDescription: String? {
         switch self {
-        case .invalidPairing: return "This is not a valid Genesis pairing code. Scan the code shown by your Mac companion."
+        case .invalidPairing: return "This is not a valid pairing code. Scan the code shown by your Mac companion."
         case .unpaired: return "Pair this Mac before connecting."
         case .invalidEndpoint: return "The companion must use a private HTTPS address."
         case .wrongHost: return "This connection belongs to a different Mac. Pair it again before sending."
-        case .unsupportedProtocol: return "Update the Mac companion to a compatible Genesis version."
+        case .unsupportedProtocol: return "Update the Mac companion to a compatible version."
         case .invalidResponse: return "The companion returned an unexpected response."
         case let .server(code, message):
             if code == 401 { return "Pairing expired or was revoked. Pair this Mac again." }
-            if code == 502 { return "Could not reach the Mac's Genesis companion (502). Open Genesis Agent Micro Controller on the selected Mac, then tap Refresh." }
+            if code == 502 { return "Could not reach the Mac companion (502). Open Agent Micro Controller on the selected Mac, then tap Refresh." }
             return message
         case let .capability(action): return "\(action) is not available for this Mac and provider yet."
         case .unresolvedSend: return "The previous Send is still unconfirmed. Check its receipt before sending another prompt."

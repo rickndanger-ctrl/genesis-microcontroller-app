@@ -3,14 +3,39 @@ import CryptoKit
 import Security
 
 struct RemoteProvider: Codable { var id: String; var name: String; var installed: Bool; var readiness: String; var capabilities: [String]; var reason: String?; var actions: [RemoteAction]? = nil }
-struct RemoteHostStatus: Codable { var protocolVersion = 1; var hostID: String; var hostName: String; var providers: [RemoteProvider]; var displaySession: Bool = true }
+struct RemoteHostStatus: Codable { var protocolVersion = 1; var hostID: String; var hostName: String; var providers: [RemoteProvider]; var displaySession: Bool = true; var companionVersion: String? = nil }
 struct RemoteChat: Codable { var id: String; var title: String; var state: String }
+/// A provider's chats, plus the titles that could not be offered because more
+/// than one chat carries them. The phone says so instead of leaving them out silently.
+struct RemoteChatList: Codable { var chats: [RemoteChat]; var leftOut: [String]? = nil }
+enum RemoteLeftOut {
+    static let maximumTitles = 20, maximumLength = 80
+    /// Sorted, trimmed and capped; nil when nothing was left out.
+    static func titles(_ shared: Set<String>) -> [String]? {
+        let tidy = shared.map { String($0.trimmingCharacters(in: .whitespacesAndNewlines).prefix(maximumLength)) }.filter { !$0.isEmpty }
+        guard !tidy.isEmpty else { return nil }
+        return Array(Set(tidy).sorted { $0.localizedCaseInsensitiveCompare($1) == .orderedAscending }.prefix(maximumTitles))
+    }
+}
 struct RemoteSlot: Codable { var index: Int; var kind: String; var title: String; var targetID: String }
 struct RemoteProfile: Codable { var provider: String; var revision: Int; var slots: [RemoteSlot]; var quickActions: [String]? = nil }
-struct RemoteCommand: Codable { var id: String; var hostID: String; var provider: String; var chatID: String?; var action: String; var text: String?; var artifactID: String?; var generation: Int; var navigationSession: String? = nil }
-struct RemoteReceipt: Codable { var id: String; var status: String; var message: String; var activeChat: RemoteChat? = nil; var navigation: RemoteNavigationState? = nil }
+struct RemoteCommand: Codable { var id: String; var hostID: String; var provider: String; var chatID: String?; var action: String; var text: String?; var artifactID: String?; var generation: Int; var navigationSession: String? = nil
+    /// Set only after the person holding the controller was told the Mac's message box has text in it and chose to replace it.
+    var replaceDraft: Bool? = nil }
+struct RemoteReceipt: Codable { var id: String; var status: String; var message: String; var activeChat: RemoteChat? = nil; var navigation: RemoteNavigationState? = nil
+    /// Why nothing was done, when the controller can offer a way past it. "macDraft": the Mac's message box already has text.
+    var blocker: String? = nil }
 struct RemoteArtifact: Codable { var id: String; var title: String; var kind: String; var url: String?; var mimeType: String?; var hostID: String; var provider: String; var chatID: String }
-struct RemotePairing: Codable { var v = 1; var name: String; var hostID: String; var baseURL: String; var token: String }
+/// What the pairing QR code carries. Version 1 put the Mac's one shared secret
+/// in `token`. Version 2 puts a single-use code there, which the phone trades
+/// for a secret of its own at /v1/pair.
+struct RemotePairing: Codable {
+    var v = 2; var name: String; var hostID: String; var baseURL: String; var token: String
+    /// This Mac on the local network, and its certificate's fingerprint. Absent when Wi-Fi pairing is off.
+    var lanURL: String? = nil; var pin: String? = nil
+}
+struct RemotePairRequest: Codable { var code: String; var deviceName: String? = nil }
+struct RemotePairResponse: Codable { var token: String; var deviceID: String; var deviceName: String }
 struct RemoteFault: Error { let status: Int; let message: String }
 
 struct RemoteAction: Codable, Equatable {
@@ -75,14 +100,16 @@ enum RemoteActionCatalog {
 
 enum RemotePolicy {
     static let providers = ["codex", "claude", "muse"]
-    static let commands = ["openChat", "sendPrompt", "stop", "openArtifact", "nativeVoice"] + RemoteActionCatalog.commandIDs
+    static let commands = ["openChat", "sendPrompt", "stop", "openArtifact", "nativeVoice", "launchApp", "restartService"] + RemoteActionCatalog.commandIDs
     static let maximumBody = 131_072
     static func digest(_ bytes: Data) -> String { SHA256.hash(data: bytes).map { String(format:"%02x", $0) }.joined() }
     static func chatID(_ provider: String, _ title: String) -> String { "\(provider)-" + String(digest(Data(title.utf8)).prefix(32)) }
     static func validate(_ command: RemoteCommand, hostID: String) throws {
         guard UUID(uuidString: command.id) != nil, command.hostID == hostID,
               providers.contains(command.provider), commands.contains(command.action), command.generation >= 0 else { throw RemoteFault(status:422,message:"Invalid command or host identity.") }
-        if (["openChat", "sendPrompt", "stop", "nativeVoice"].contains(command.action) || (command.provider == "claude" && RemoteActionCatalog.claudeEntry(command.action)?.action.requiresChat == true)), command.chatID?.isEmpty != false { throw RemoteFault(status:422,message:"Choose a chat first.") }
+        // Muse's call belongs to the assistant, not to a chat, so it needs none.
+        let needsChat = command.action == "nativeVoice" ? command.provider != "muse" : ["openChat", "sendPrompt", "stop"].contains(command.action)
+        if (needsChat || (command.provider == "claude" && RemoteActionCatalog.claudeEntry(command.action)?.action.requiresChat == true)), command.chatID?.isEmpty != false { throw RemoteFault(status:422,message:"Choose a chat first.") }
         if RemoteActionCatalog.menuIDs.contains(command.action), UUID(uuidString:command.navigationSession ?? "") == nil {throw RemoteFault(status:422,message:"Open and refresh a controller menu first.")}
         if command.action == "sendPrompt", command.text?.trimmingCharacters(in:.whitespacesAndNewlines).isEmpty != false { throw RemoteFault(status:422,message:"The prompt is empty.") }
         if (command.text?.utf8.count ?? 0) > 64_000 { throw RemoteFault(status:413,message:"The prompt is too long.") }
@@ -103,6 +130,13 @@ enum RemotePolicy {
         guard left.count == right.count else { return false }
         return zip(left,right).reduce(UInt8(0)) { $0 | ($1.0 ^ $1.1) } == 0
     }
+}
+
+/// What the Muse connection offers. "newChat" reuses the shared action ID so
+/// the phone's existing key and icon apply; in Muse it opens a new side chat.
+enum RemoteMuse {
+    static let capabilities = ["openChat","sendPrompt","nativeVoice","newChat","artifacts"]
+    static let actions = [RemoteAction(id:"newChat",title:"New side chat",group:"Navigate",detail:"Open a new side chat in Muse.",requiresChat:false,changesChat:true)]
 }
 
 enum RemoteComposerPolicy {
@@ -156,8 +190,12 @@ enum RemoteClaudeLookup {
         // Inactive Electron rows may omit their text descendants and append a
         // status to the button's AXTitle. Match the complete known suffix, and
         // still require the independently named menu in this same row.
-        let suffixes=statuses+["Unread response","Cloud"]
-        let knownStatusSuffix=suffixes.contains{label==title+" "+$0}
+        // The suffix may be a state, a tag, or several of them ("Something went
+        // wrong Merged", "Cloud · Draft"), so it is recognised by how it begins.
+        // The row's own "More options for <title>" menu is what ties it to this title.
+        let suffixes=statuses+["Unread response","Cloud","Draft","Merged","Closed","Archived"]
+        let rest=label.hasPrefix(title+" ") ? String(label.dropFirst(title.count+1)):""
+        let knownStatusSuffix = !rest.isEmpty && suffixes.contains{rest==$0 || rest.hasPrefix($0+" ")}
         return hasMatchingRowMenu && (label==title || label.hasSuffix(" "+title) || knownStatusSuffix || (hasExactTitleChild && label.contains(title)))
     }
     // Cached labels can locate a hidden sidebar, but never authorize a Send.
@@ -247,6 +285,8 @@ final class RemoteStore {
 
 struct RemoteHTTPRequest {
     var method: String; var target: String; var headers: [String:String]; var body: Data
+    /// Arrived on the Wi-Fi listener. Such a request never counts as made on this Mac.
+    var viaNetwork = false
     static func parse(_ data: Data) throws -> RemoteHTTPRequest? {
         guard data.count <= RemotePolicy.maximumBody + 16_384 else {throw RemoteFault(status:413,message:"Request too large.")}
         guard let split = data.range(of:Data("\r\n\r\n".utf8)) else {

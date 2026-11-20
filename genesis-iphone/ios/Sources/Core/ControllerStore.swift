@@ -9,12 +9,21 @@ final class ControllerStore: ObservableObject {
     @Published private(set) var selectedProvider: ProviderID
     @Published private(set) var status: HostStatus?
     @Published private(set) var chats: [ChatRecord] = []
+    /// Titles the Mac left out of `chats` because more than one chat carries them.
+    @Published private(set) var leftOutChatTitles: [String] = []
+    var leftOutChatsNotice: String? { CompanionSupport.leftOutNotice(titles: leftOutChatTitles, app: selectedProvider.name) }
     @Published private(set) var profile: RemoteProfile
     @Published private(set) var selectedChat: ChatRecord?
     @Published var draft = "" { didSet { persistDraft(); publishGlassesDraft() } }
     @Published private(set) var artifacts: [ArtifactRecord] = []
     @Published private(set) var connectionMessage = "Pair your Mac to connect"
     @Published private(set) var isBusy = false
+    private var navigating = false
+    private var queuedMenuSteps: [String] = []
+    /// The open menu belongs to the selected chat (model, permissions, an
+    /// attachment), so choosing something in it does not leave that chat.
+    /// A search does: its result may be any chat.
+    private var navigationKeepsChat = false
     @Published private(set) var isRefreshingChats = false
     @Published private(set) var isRecording = false
     @Published private(set) var isFinalizing = false
@@ -66,6 +75,7 @@ final class ControllerStore: ObservableObject {
         settings = saved
         let restoredHosts = demo ? RemoteHost.demoHosts : saved.hosts
         hosts = restoredHosts
+        if let glassesPreferences { GlassesFeature.prepare(glassesPreferences, demo: demo, hasPairedMac: !saved.hosts.isEmpty) }
         selectedHostID = restoredHosts.first(where: { $0.id == saved.selectedHostID })?.id ?? restoredHosts.first?.id ?? ""
         selectedProvider = saved.selectedProvider
         profile = .empty(saved.selectedProvider)
@@ -98,8 +108,10 @@ final class ControllerStore: ObservableObject {
         return selectedProvider != .codex || isDemo || UUID(uuidString: chat.id) != nil
     }
     var canDictate: Bool {
-        isPaired && hasDictationChat && !isBusy && !isFinalizing && providerInfo?.supportsPhoneDictation == true
+        isPaired && hasDictationChat && !isBusy && !isFinalizing && (providerInfo?.supportsPhoneDictation == true || !macIsReady)
     }
+    /// The Mac is answering and the selected app is ready to be controlled.
+    private var macIsReady: Bool { status != nil && providerInfo?.readiness == "ready" }
     var dictationControl: DictationControlPresentation {
         .make(provider:selectedProvider,info:providerInfo,paired:isPaired,hasChat:hasDictationChat,
               busy:isBusy,recording:isRecording,finalizing:isFinalizing)
@@ -109,29 +121,182 @@ final class ControllerStore: ObservableObject {
     var availableShortcuts: [ControllerShortcut] { providerInfo?.controllerShortcuts ?? [] }
     var availableActions: [RemoteAction] { providerInfo?.availableActions ?? [] }
     func action(_ id: String) -> RemoteAction? { (providerInfo?.actionCatalog ?? RemoteAction.defaults).first { $0.id == id } }
+    /// Whether an action needs a chat selected. Muse's call belongs to the
+    /// assistant, not to a chat, so it works from anywhere.
+    private func needsChat(_ action: RemoteAction) -> Bool {
+        action.requiresChat && !(action.id == "nativeVoice" && selectedProvider == .muse)
+    }
     func canRunAction(_ id: String) -> Bool {
         // A local recording must remain stoppable even if the Mac disconnects.
         if id == "dictate", isRecording { return true }
         guard !isBusy, let action = action(id), providerInfo?.supportsControllerAction(action) == true,
-              !action.requiresChat || selectedChat != nil else { return false }
+              !needsChat(action) || selectedChat != nil else { return false }
         if id == "sendPrompt" { return canSend }
         if id == "dictate" { return canDictate }
         if ["previousControllerChat", "nextControllerChat"].contains(id) { return historyDestination(id) != nil }
         return true
     }
+    /// True while a command in flight is the only thing stopping this action,
+    /// so its key stays lit and a press can wait its turn. See `DeferredTap`.
+    func canDeferAction(_ id: String) -> Bool {
+        guard isBusy, DeferredTap.mayWait(id), let action = action(id), providerInfo?.supportsControllerAction(action) == true,
+              !needsChat(action) || selectedChat != nil else { return false }
+        if ["previousControllerChat", "nextControllerChat"].contains(id) { return historyDestination(id) != nil }
+        return true
+    }
+    /// A press that could not act: what it needs and how to get there. The
+    /// deck shows this in place of a general error.
+    @Published var hint: ControllerHint?
+
+    /// Why an action cannot run right now, as something to do about it.
+    func hint(forAction id: String) -> ControllerHint {
+        let app = selectedProvider.name, mac = selectedHost?.name ?? "your Mac"
+        let name: String = id == "dictate" ? "Hold to Talk" : id == "sendPrompt" ? "Send" : (action(id)?.title ?? "This key")
+        if !isPaired {
+            return .init(title: "Pair a Mac first", message: "\(name) needs a Mac to work with. Pair one in Settings.", step: .pairMac, stepLabel: "Open Settings")
+        }
+        if id == "sendPrompt", isRecording || isFinalizing {
+            return .init(title: "Still recording", message: "Release the microphone and check the draft, then press Send.")
+        }
+        // Recording a draft only needs a chat; everything else needs the Mac and the app.
+        let needsMac = id != "dictate" && id != "artifacts"
+        if needsMac {
+            guard status != nil, let info = providerInfo else {
+                return .init(title: "Can’t reach \(mac)", message: "\(name) needs the Mac. Check that it is awake and on the same Wi-Fi, or that Tailscale is connected, then try again.", step: .refresh, stepLabel: "Refresh")
+            }
+            switch info.readiness {
+            case "locked":
+                return .init(title: "\(mac) is locked", message: "Unlock the Mac to use \(name).")
+            case "needsAccessibility":
+                return .init(title: "Setup needed on \(mac)", message: "Allow Accessibility for Agent Micro Controller in System Settings on that Mac, then refresh.", step: .refresh, stepLabel: "Refresh")
+            case "closed":
+                if providerNeedsWiderWindow {
+                    return .init(title: "\(app)’s window is too narrow", message: "\(app) hides its chats in a narrow window. Widen it from here and \(name) will work.", step: .openApp, stepLabel: "Widen \(app)")
+                }
+                if info.supports("launchApp") {
+                    return .init(title: "\(app) is closed on \(mac)", message: "Open it from here, then \(name) will work.", step: .openApp, stepLabel: "Open \(app)")
+                }
+                return .init(title: "\(app) is closed on \(mac)", message: "Open \(app) on the Mac to use \(name).")
+            case "unavailable":
+                if info.supports("restartService") {
+                    return .init(title: "\(app)’s background service stopped answering", message: info.reason ?? "Restart it from here to bring your chats back.", step: .restartService, stepLabel: "Restart service")
+                }
+            default: break
+            }
+        }
+        if id == "stop", selectedProvider == .muse {
+            return .init(title: "Stop isn’t available for Muse", message: "Muse can’t be stopped from the controller. Stop it in Muse on the Mac.")
+        }
+        if id == "nativeVoice", providerInfo?.supports("nativeVoice") != true {
+            return .init(title: "Voice isn’t connected here", message: "Two-way voice mode is not connected here yet. Use Hold to talk to dictate a draft, then Send.")
+        }
+        if id == "sendPrompt", macIsReady, providerInfo?.supports("sendPrompt") != true {
+            return .init(title: "Send isn’t connected for \(app) here", message: "This Mac can open \(app) chats from the controller, but it can’t send to them yet.")
+        }
+        let wantsChat = id == "sendPrompt" || id == "dictate" || (action(id).map(needsChat) ?? false)
+        if wantsChat, selectedChat == nil {
+            let chatKeys = profile.slots.filter { $0.kind == "chat" }
+            if chatKeys.isEmpty {
+                let free = (0..<6).first { index in !profile.slots.contains { $0.index == index && $0.kind != "empty" } } ?? 0
+                return .init(title: "No chat on any key yet", message: "\(name) works on the chat you have open. Put a chat on a key to begin.", step: .assignKey(free), stepLabel: "Assign a chat")
+            }
+            return .init(title: "Choose a chat first", message: "\(name) works on the chat you have open. Tap one of your chat keys, then try again.")
+        }
+        if id == "sendPrompt" {
+            if hasUnresolvedSend {
+                return .init(title: "Check the last Send first", message: "The Mac never confirmed your previous Send to this chat. Look at it before sending again, so nothing goes twice.", step: .reviewSend, stepLabel: "Review it")
+            }
+            if draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                return .init(title: "Nothing to send yet", message: "Hold the microphone to dictate a draft, or type one. Then press Send.", step: .writeDraft, stepLabel: "Type a draft")
+            }
+        }
+        if id == "dictate", !canDictate {
+            let control = dictationControl
+            return .init(title: control.summary ?? "Hold to Talk isn’t ready", message: control.explanation ?? "Finish the current recording first.")
+        }
+        if id == "previousControllerChat", historyDestination(id) == nil {
+            return .init(title: "No earlier chat", message: "This key steps back through chats you opened from the controller. Open another chat first.")
+        }
+        if id == "nextControllerChat", historyDestination(id) == nil {
+            return .init(title: "No later chat", message: "This key steps forward again after you have gone back. You are on the latest chat.")
+        }
+        if isBusy { return .init(title: "One moment", message: "Another action is still finishing. Try again in a second.") }
+        return .init(title: "\(name) isn’t available right now", message: actionUnavailableReason(id) ?? "This action is not available for \(app) on this Mac.")
+    }
+    /// A key whose chat is gone from the Mac: say so, and offer to choose another for that key.
+    func hint(forMissingChatOn slot: SlotMapping) -> ControllerHint? {
+        guard let message = missingChatMessage(slot) else { return nil }
+        return .init(title: "This key’s chat can’t be found", message: message, step: .assignKey(slot.index), stepLabel: "Choose a chat")
+    }
+
     func actionUnavailableReason(_ id: String) -> String? {
         if id == "dictate", isRecording { return nil }
         if id == "nativeVoice", providerInfo?.supports("nativeVoice") != true {
-            return "Two-way voice mode is not connected in Genesis yet. Use Hold to talk to dictate a draft, then Send."
+            return "Two-way voice mode is not connected here yet. Use Hold to talk to dictate a draft, then Send."
         }
+        if id == "stop", selectedProvider == .muse { return "Muse can’t be stopped from the controller. Stop it in Muse on the Mac." }
         guard let action = action(id), providerInfo?.supportsControllerAction(action) == true else { return "This action is not available for this connection." }
         if isBusy { return "Another action is finishing." }
-        if action.requiresChat && selectedChat == nil { return "Choose a chat first." }
+        if needsChat(action) && selectedChat == nil { return "Choose a chat first." }
         if id == "sendPrompt", !canSend { return hasUnresolvedSend ? "Check the previous Send receipt first." : "Finish and review a draft first." }
         if id == "dictate", !canDictate { return dictationControl.explanation ?? "Finish the current recording first." }
-        if ["previousControllerChat", "nextControllerChat"].contains(id), historyDestination(id) == nil { return "No \(id == "previousControllerChat" ? "earlier" : "later") chat opened from Genesis." }
+        if ["previousControllerChat", "nextControllerChat"].contains(id), historyDestination(id) == nil { return "No \(id == "previousControllerChat" ? "earlier" : "later") chat opened from this controller." }
         return nil
     }
+    /// A sentence to show when the selected Mac's companion is older than this app is written for.
+    var companionNotice: String? {
+        guard !isDemo, let status else { return nil }
+        return CompanionSupport.notice(hostName: selectedHost?.name ?? "", reported: status.companionVersion)
+    }
+    /// The selected app is installed but shut, and the Mac can open it for us.
+    var canOpenProviderApp: Bool { !isBusy && providerInfo?.supports("launchApp") == true }
+    /// The app is open, but in a window too narrow for the controller; "open" then means widen it.
+    var providerNeedsWiderWindow: Bool { providerInfo?.supports("launchApp") == true && providerInfo?.reason?.contains("too narrow") == true }
+    /// Opens the selected app on the Mac. It sends nothing to it.
+    func openProviderApp() async {
+        guard canOpenProviderApp else { return }
+        let receipt = await execute(action: "launchApp", chatID: nil)
+        guard receipt?.isConfirmed == true else { return }
+        // Give the app a moment to draw its window before asking what it shows.
+        try? await Task.sleep(nanoseconds: 2_000_000_000)
+        await refresh()
+    }
+    /// The selected app's background service cannot be reached, and the Mac can restart it for us.
+    var canRestartProviderService: Bool { !isBusy && providerInfo?.supports("restartService") == true }
+    /// Restarts the selected app's background service on the Mac. It opens no chat and sends nothing.
+    func restartProviderService() async {
+        guard canRestartProviderService else { return }
+        let receipt = await execute(action: "restartService", chatID: nil)
+        // Whatever came back, ask the Mac what it has now: a slow restart may have worked.
+        if receipt?.isConfirmed != true { try? await Task.sleep(nanoseconds: 3_000_000_000) }
+        await refresh()
+    }
+    /// Asks the selected Mac what it can find in the apps it controls.
+    func selfCheck() async throws -> SelfCheckReport {
+        if isDemo { return Self.demoSelfCheck }
+        let (host, token) = try connection()
+        return try await client.fetch(SelfCheckReport.self, host: host, token: token, path: "/v1/diagnostics/selfcheck", deadline: 45)
+    }
+    func recentActivity() async throws -> ActivityReport {
+        if isDemo { return Self.demoActivity }
+        let (host, token) = try connection()
+        return try await client.fetch(ActivityReport.self, host: host, token: token, path: "/v1/diagnostics/activity", deadline: 10)
+    }
+    private static let demoSelfCheck = SelfCheckReport(checkedAt: Date(), companionVersion: "0.6.0", summary: "1 of 8 checks needs attention: Codex – Menu controls.", items: [
+        .init(provider: "mac", name: "Unlocked", ok: true, detail: "This Mac is unlocked."),
+        .init(provider: "mac", name: "Accessibility", ok: true, detail: "Agent Micro Controller is allowed to control other apps."),
+        .init(provider: "claude", name: "Session list", ok: true, detail: "6 sessions found."),
+        .init(provider: "claude", name: "Message box", ok: true, detail: "One message box found."),
+        .init(provider: "muse", name: "Chats", ok: true, detail: "4 chats offered."),
+        .init(provider: "muse", name: "Message box", ok: true, detail: "One message box found."),
+        .init(provider: "codex", name: "Saved chats", ok: true, detail: "12 saved chats found."),
+        .init(provider: "codex", name: "Menu controls", ok: false, detail: "Open Codex to use its menu controls."),
+    ])
+    private static let demoActivity = ActivityReport(entries: [
+        .init(time: Date().addingTimeInterval(-180), provider: "claude", action: "openChat", status: "confirmed", message: "Opened Design studio.", durationMs: 640),
+        .init(time: Date().addingTimeInterval(-95), provider: "claude", action: "sendPrompt", status: "confirmed", message: "Prompt sent; Claude is responding.", durationMs: 1820),
+        .init(time: Date().addingTimeInterval(-20), provider: "codex", action: "toggleSidebar", status: "failed", message: "Open Codex on this Mac before using its menu controls.", durationMs: 40),
+    ])
     var chatAvailabilityMessage: String {
         if !isPaired { return "Pair this Mac to see its available chats." }
         guard let info = providerInfo else {
@@ -140,12 +305,12 @@ final class ControllerStore: ObservableObject {
                     ? "Connecting to \(selectedHost?.name ?? "your Mac"). Wait for the connection, then try again."
                     : "Refresh the connection to check this Mac’s available controls."
             }
-            return "Open \(selectedProvider.name) on \(selectedHost?.name ?? "your Mac"), then refresh Genesis to check its controls."
+            return "Open \(selectedProvider.name) on \(selectedHost?.name ?? "your Mac"), then refresh to check its controls."
         }
         if !info.installed { return "Install \(selectedProvider.name) on \(selectedHost?.name ?? "your Mac"), then refresh." }
         switch info.readiness {
         case "locked": return "Unlock \(selectedHost?.name ?? "your Mac") to open its chats."
-        case "needsAccessibility": return "Allow Accessibility for Genesis on \(selectedHost?.name ?? "your Mac")."
+        case "needsAccessibility": return "Allow Accessibility for Agent Micro Controller on \(selectedHost?.name ?? "your Mac")."
         case "closed": return "Open \(selectedProvider.name) on \(selectedHost?.name ?? "your Mac"), then refresh."
         default: break
         }
@@ -159,6 +324,42 @@ final class ControllerStore: ObservableObject {
         currentRoute.map { settings.ledger.pendingSends[$0.storageKey] == nil } == true
     }
     var hasUnresolvedSend: Bool { currentRoute.map { settings.ledger.pendingSends[$0.storageKey] != nil } ?? false }
+    /// What the chat on a key is doing. Nil when the key holds no chat, or a
+    /// chat the Mac did not list this time: its light stays off, not white.
+    func activity(slot index: Int) -> ChatActivity? {
+        guard let slot = profile.slots.first(where: { $0.index == index && $0.kind == "chat" }) else { return nil }
+        // A Send whose result is unknown needs you whatever the Mac reports.
+        // That is known on this device, so it shows even while offline.
+        let route = DraftRoute(hostID: selectedHost?.hostID ?? selectedHostID, provider: selectedProvider.rawValue, chatID: slot.targetID)
+        if settings.ledger.pendingSends[route.storageKey] != nil { return .error }
+        guard lightsAreLive else { return nil }
+        return chats.first { $0.id == slot.targetID }?.activity
+    }
+    /// What the open chat is doing.
+    var selectedActivity: ChatActivity? {
+        if hasUnresolvedSend { return .error }
+        guard lightsAreLive, let chat = selectedChat else { return nil }
+        // Only what the Mac just listed. A chat that has left the list has no
+        // light; its last known state would otherwise pulse on forever.
+        return chats.first { $0.id == chat.id }?.activity
+    }
+    /// A light is only shown while the Mac is answering and its app is ready.
+    /// Offline, locked or closed, the last colors would be a guess, so the keys go dark.
+    /// Codex is left out: its saved-chat list says nothing about what a chat is
+    /// doing, and a white "idle" light on a working chat would be a false claim.
+    var lightsAreLive: Bool { isDemo || (status != nil && providerInfo?.readiness == "ready" && selectedProvider != .codex) }
+    /// Between full refreshes, re-reads only what the chats are doing, so a
+    /// light is a few seconds old at most. Claude only: reading its sidebar
+    /// changes nothing on the Mac, whereas listing Muse's chats opens its chat
+    /// panel, and Codex's saved-chat list carries no live state.
+    func refreshLights() async {
+        guard !isDemo, !isBusy, !isRecording, !isFinalizing, refreshGeneration != gate.generation,
+              selectedProvider == .claude, lightsAreLive, providerInfo?.supports("openChat") == true else { return }
+        let generation = gate.generation, provider = selectedProvider
+        guard let (host, token) = try? connection() else { return }
+        // A failure here is left to the next status poll, which reports a lost connection.
+        try? await refreshChats(host: host, token: token, provider: provider, generation: generation, enabled: true)
+    }
     private var scope: String { "\(selectedHost?.hostID ?? selectedHostID).\(selectedProvider.rawValue)" }
     private var currentRoute: DraftRoute? {
         guard let chat = selectedChat else { return nil }
@@ -174,6 +375,14 @@ final class ControllerStore: ObservableObject {
         guard !loadingDraft, let route = currentRoute else { return }
         settings.ledger.set(draft, for: route); persist()
     }
+    /// After the key mappings change, the ring goes to whichever key now holds the
+    /// open chat, or nowhere. Home (no ring, by choice) is left as it is.
+    private func syncSelectedSlot() {
+        guard let current = selectedSlotIndex else { return }
+        let holders = profile.slots.filter { $0.kind == "chat" && $0.targetID == selectedChat?.id }.map(\.index)
+        // The same chat may sit on two keys; stay on the one that was pressed.
+        selectedSlotIndex = holders.contains(current) ? current : holders.first
+    }
     private func restoreSelection() {
         profile = settings.profiles[scope] ?? .empty(selectedProvider)
         selectedChat = settings.selectedChats[scope]
@@ -186,7 +395,7 @@ final class ControllerStore: ObservableObject {
         glasses.stop("Selection changed. Turn on Follow for this Mac and provider.")
         glassesConfirmedChatID = nil
         dictationIntent &+= 1; speech.cancel(); captureRoute = nil
-        gate.advance(); status = nil; chats = []; artifacts = []; lastReceipt = nil; lastError = nil; requestedPanel = nil
+        gate.advance(); status = nil; chats = []; leftOutChatTitles = []; artifacts = []; lastReceipt = nil; lastError = nil; requestedPanel = nil
         isBusy = false; isRefreshingChats = false; sendReady = false
         navigation = .inactive; navigationGeneration = nil
     }
@@ -200,11 +409,17 @@ final class ControllerStore: ObservableObject {
         persistDraft(); invalidateSelection(); selectedProvider = provider; restoreSelection(); persist()
         if isDemo { loadDemo() } else { connectionMessage = isPaired ? "Connecting…" : "Pair this Mac"; Task { await refresh() } }
     }
-    func returnHome() { selectedSlotIndex = nil }
+    /// Home is "no chat selected", on the deck and in the menus alike. The
+    /// chat's draft stays saved for when its key is pressed again. Nothing is
+    /// sent to the Mac.
+    func returnHome() {
+        guard !isRecording, !isFinalizing else { return }
+        clearChatAfterNavigation()
+    }
 
     func enableGlassesFollow(takeover: Bool = false) {
         guard foreground, !isDemo, selectedProvider != .muse else {
-            glasses.stop("Glasses follow is available for Codex and Claude while Genesis is open."); return
+            glasses.stop("Glasses follow is available for Codex and Claude while this app is open."); return
         }
         do {
             let (host, token) = try connection()
@@ -258,7 +473,8 @@ final class ControllerStore: ObservableObject {
                 try? await Task.sleep(nanoseconds: 2_000_000_000)
                 guard !Task.isCancelled, let self, self.foreground else { return }
                 tick += 1
-                if tick % 5 == 0 { await self.refresh() } else { await self.refreshStatus() }
+                if tick % 5 == 0 { await self.refresh() }
+                else { await self.refreshStatus(); if tick % 2 == 0 { await self.refreshLights() } }
             }
         }
     }
@@ -278,7 +494,8 @@ final class ControllerStore: ObservableObject {
         case "ready": connectionMessage = "Connected · \(selectedHost?.name ?? status.hostName)"
         case "locked": connectionMessage = "Mac locked · unlock to control"
         case "needsAccessibility": connectionMessage = "Allow Accessibility on this Mac"
-        case "closed": connectionMessage = "Open \(selectedProvider.name) on this Mac"
+        case "closed": connectionMessage = provider?.reason?.contains("too narrow") == true
+            ? "\(selectedProvider.name)’s window is too narrow on this Mac" : "Open \(selectedProvider.name) on this Mac"
         default:
             if provider?.id == "codex", provider?.supports("newChat") == true { connectionMessage = "New chat ready · saved chats unavailable" }
             else { connectionMessage = provider?.supports("artifacts") == true ? "Artifacts ready · chat controls unavailable" : (provider?.reason ?? "Provider unavailable") }
@@ -296,10 +513,18 @@ final class ControllerStore: ObservableObject {
             let (host, token) = try connection()
             let live = try await client.fetch(HostStatus.self, host: host, token: token, path: "/v1/status")
             guard gate.accepts(generation) else { return }
-            try validate(live, host: host); applyStatus(live)
+            try validate(live, host: host); applyStatus(live); missedStatusPolls = 0
             await recoverPendingSend()
-        } catch { if gate.accepts(generation) { failConnection(error) } }
+        } catch {
+            guard gate.accepts(generation) else { return }
+            // One dropped poll on a phone network is common. Going offline on it made
+            // every light and the Talk key blink; a second miss in a row is believed.
+            missedStatusPolls += 1
+            if case RemoteError.unpaired = error { failConnection(error) }
+            else if missedStatusPolls >= 2 || status == nil { failConnection(error) }
+        }
     }
+    private var missedStatusPolls = 0
     func refresh() async {
         guard !isDemo, refreshGeneration != gate.generation, !isBusy else { return }
         let generation = gate.generation, provider = selectedProvider
@@ -320,7 +545,8 @@ final class ControllerStore: ObservableObject {
                                                      chat: selectedChat, enabled: capability?.supports("artifacts") == true)
             async let receipts: Void = recoverPendingSend()
             _ = try await (mappings, list, shelf, receipts)
-        } catch { if gate.accepts(generation) { failConnection(error); if isPaired { lastError = error.localizedDescription } } }
+            await recoverOtherPendingSends()
+        } catch { if gate.accepts(generation) { failConnection(error); if isPaired { lastError = ConnectionHelp.describe(error, mac: selectedHost?.name) } } }
     }
 
     private func refreshProfile(host: RemoteHost, token: String, provider: ProviderID, generation: Int) async throws {
@@ -330,7 +556,7 @@ final class ControllerStore: ObservableObject {
         // A GET started before a successful PUT may arrive last. Revisions are
         // monotonic on the host; never roll a just-saved mapping backward.
         guard gate.accepts(generation), saved.provider == provider.rawValue, saved.revision >= profile.revision else { return }
-        if profile != saved { profile = saved; settings.profiles[scope] = saved; persist() }
+        if profile != saved { profile = saved; settings.profiles[scope] = saved; syncSelectedSlot(); persist() }
     }
 
     private func refreshChats(host: RemoteHost, token: String, provider: ProviderID, generation: Int, enabled: Bool) async throws {
@@ -341,6 +567,7 @@ final class ControllerStore: ObservableObject {
             query: [URLQueryItem(name: "provider", value: provider.rawValue)])
         guard gate.accepts(generation) else { return }
         chats = list.chats
+        leftOutChatTitles = Array((list.leftOut ?? []).prefix(20))
         if let match = list.chats.first(where: { $0.id == selectedChat?.id }) { selectedChat = match }
     }
 
@@ -349,9 +576,25 @@ final class ControllerStore: ObservableObject {
         let payload = try PairingPayload.decode(url, allowLocalhost: RemoteClient.localDevelopmentAllowed)
         try await installPairing(payload, activate: true)
     }
-    private func installPairing(_ payload: PairingPayload, activate: Bool) async throws {
+    /// What this device is called in the Mac's list of paired devices. The app
+    /// sets it at launch; the core has no access to the device's name.
+    static var deviceName: () -> String = { "iPhone or iPad" }
+    private struct PairExchange: Encodable { let code: String; let deviceName: String }
+    private struct PairIssued: Decodable { let token: String }
+
+    private func installPairing(_ scanned: PairingPayload, activate: Bool) async throws {
         let generation = gate.generation
-        let candidate = RemoteHost(id: payload.hostID, name: payload.name, baseURL: payload.baseURL, hostID: payload.hostID)
+        var payload = scanned
+        let candidate = RemoteHost(id: payload.hostID, name: payload.name, baseURL: payload.baseURL, hostID: payload.hostID, lanURL: payload.lanURL, pin: payload.pin)
+        if payload.v == 2 {
+            // The code is good once. Trade it for a secret that belongs to this
+            // device alone, which the Mac can later revoke without touching others.
+            let body = try JSONEncoder().encode(PairExchange(code: payload.token, deviceName: Self.deviceName()))
+            let issued = try await client.fetch(PairIssued.self, host: candidate, token: "", path: "/v1/pair", method: "POST", body: body)
+            guard issued.token.count >= 32, issued.token.count <= 1024,
+                  issued.token.unicodeScalars.allSatisfy({ $0.value >= 33 && $0.value <= 126 }) else { throw RemoteError.invalidPairing }
+            payload.token = issued.token
+        }
         let remote = try await client.fetch(HostStatus.self, host: candidate, token: payload.token, path: "/v1/status")
         try validate(remote, host: candidate)
         guard !activate || gate.accepts(generation) else { throw CancellationError() }
@@ -417,7 +660,7 @@ final class ControllerStore: ObservableObject {
                 }
             }
             pendingProvisioning = retry
-            if !failed.isEmpty { lastError = "Could not finish pairing \(failed.joined(separator: ", ")). Connect Tailscale and scan that Mac’s pairing code." }
+            if !failed.isEmpty { lastError = "Could not finish pairing \(failed.joined(separator: ", ")). Join the same Wi-Fi as that Mac (or connect Tailscale) and scan its pairing code." }
         } catch {
             try? FileManager.default.removeItem(at: url)
             lastError = "The private setup file could not be imported. Scan the pairing code from the Mac instead."
@@ -439,34 +682,49 @@ final class ControllerStore: ObservableObject {
     }
     private func saveProfile(_ edited: RemoteProfile) async -> Bool {
         lastError = nil
-        if isDemo { profile = edited; settings.profiles[scope] = edited; return true }
+        if isDemo { profile = edited; settings.profiles[scope] = edited; syncSelectedSlot(); return true }
         let generation = gate.generation
         isBusy = true; defer { if gate.accepts(generation) { isBusy = false } }
         do {
             let (host, token) = try connection()
             let saved = try await client.fetch(RemoteProfile.self, host: host, token: token, path: "/v1/profile", method: "PUT", body: JSONEncoder().encode(edited))
             guard gate.accepts(generation), saved.provider == selectedProvider.rawValue else { return false }
-            profile = saved; settings.profiles[scope] = saved; persist()
+            profile = saved; settings.profiles[scope] = saved; syncSelectedSlot(); persist()
             return true
-        } catch { if gate.accepts(generation) { lastError = error.localizedDescription }; return false }
+        } catch { if gate.accepts(generation) { lastError = ConnectionHelp.describe(error, mac: selectedHost?.name) }; return false }
     }
 
     func openSlot(_ index: Int) async {
         guard !isBusy, let slot = profile.slots.first(where: { $0.index == index }) else { return }
         lastError = nil
         if slot.kind == "chat" {
+            // The Mac gets the first word: it can sometimes reach a chat the list
+            // does not show. If it cannot, say why in terms of this key.
+            let missing = missingChatMessage(slot)
             let chat = chats.first { $0.id == slot.targetID } ?? ChatRecord(id: slot.targetID, title: slot.title, state: "Unknown")
             await selectChat(chat, preferredSlotIndex: index)
+            if missing != nil, selectedChat?.id != chat.id, lastError != nil { lastError = nil; hint = hint(forMissingChatOn: slot) }
         } else if slot.kind == "action" {
             await runAction(slot.targetID)
         }
     }
 
+    /// Why a key's chat probably cannot be opened: the Mac has just listed its
+    /// chats and this one is not among them. Nil when it is there, or when the
+    /// list is not fresh enough to say. Used to explain a failed open.
+    func missingChatMessage(_ slot: SlotMapping) -> String? {
+        guard !isDemo, lightsAreLive, !chats.isEmpty, !chats.contains(where: { $0.id == slot.targetID }) else { return nil }
+        if leftOutChatTitles.contains(slot.title) {
+            return "More than one \(selectedProvider.name) chat is titled “\(slot.title)”, so this key can’t tell them apart. Rename one on the Mac, or hold the key to choose another chat."
+        }
+        return "“\(slot.title)” isn’t in \(selectedProvider.name) on this Mac any more. It may have been renamed or closed. Hold the key to choose a chat for it."
+    }
     @discardableResult func runAction(_ id: String) async -> Bool {
         guard let action = action(id), canRunAction(id) else {
             let message = actionUnavailableReason(id) ?? "This action is not available."
-            if id == "sendPrompt", let route = currentRoute, let pending = settings.ledger.pendingSends[route.storageKey] { commandError(message,id:pending.commandID) }
-            else { lastError = message }
+            if id == "sendPrompt", let route = currentRoute, let pending = settings.ledger.pendingSends[route.storageKey] { errorCommandID = pending.commandID }
+            _ = message
+            hint = hint(forAction: id)
             return false
         }
         lastError = nil
@@ -499,6 +757,7 @@ final class ControllerStore: ObservableObject {
         }
         if action.changesChat { Task { await refresh() } }
         if receipt.isConfirmed, action.opensNavigation == true {
+            navigationKeepsChat = action.requiresChat && !action.changesChat
             let menuGeneration = gate.generation
             await refreshNavigation()
             if gate.accepts(menuGeneration), navigation.active { requestedPanel = "navigate" }
@@ -518,11 +777,20 @@ final class ControllerStore: ObservableObject {
     func selectChat(_ chat: ChatRecord, preferredSlotIndex: Int? = nil) async {
         guard !isBusy else { return }
         if isDemo {
-            changeChat(chat, preferredSlotIndex: preferredSlotIndex); return
+            acknowledgeCompletion(chat.id); changeChat(chat, preferredSlotIndex: preferredSlotIndex); return
         }
         guard providerInfo?.supports("openChat") == true else { lastError = chatAvailabilityMessage; return }
         let receipt = await execute(action: "openChat", chatID: chat.id)
-        if receipt?.isConfirmed == true { changeChat(chat, preferredSlotIndex: preferredSlotIndex) }
+        guard let receipt, receipt.isConfirmed else { return }
+        acknowledgeCompletion(chat.id)
+        if let named = receipt.activeChat, !named.id.isEmpty, named.id != chat.id { changeChat(named) }
+        else { changeChat(chat, preferredSlotIndex: preferredSlotIndex) }
+    }
+    /// Opening a finished chat is what clears its green light. The Mac reports
+    /// that on the next refresh; this keeps the key from staying green until then.
+    private func acknowledgeCompletion(_ id: String) {
+        guard let index = chats.firstIndex(where: { $0.id == id }), chats[index].activity == .complete else { return }
+        chats[index].state = "Idle"
     }
     private func historyDestination(_ id: String) -> (Int, ChatRecord)? {
         guard let history = settings.chatHistory?[scope],
@@ -584,9 +852,28 @@ final class ControllerStore: ObservableObject {
         guard !state.active || state.session.flatMap(UUID.init(uuidString:)) != nil else { navigation = .inactive; navigationGeneration = nil; return }
         navigation = state; navigationGeneration = state.active ? generation : nil
     }
+    /// Moves or acts on the menu open on the Mac. Previous and Next pressed
+    /// while a menu step is still in flight wait their turn, because moving
+    /// the highlight is harmless to repeat. Select, Back and Close never wait:
+    /// each acts on what the Mac shows at the moment it runs.
     func navigate(_ action: String) async {
         guard ["menuPrevious","menuNext","menuSelect","menuBack","menuHome"].contains(action),
-              navigation.active, navigationGeneration == gate.generation, let session = navigation.session, !isBusy else { return }
+              navigation.active, navigationGeneration == gate.generation else { return }
+        if isBusy {
+            if navigating, ["menuPrevious","menuNext"].contains(action), queuedMenuSteps.count < 8 { queuedMenuSteps.append(action) }
+            return
+        }
+        navigating = true
+        defer { navigating = false; queuedMenuSteps.removeAll() }
+        await navigateOnce(action)
+        while !queuedMenuSteps.isEmpty {
+            let next = queuedMenuSteps.removeFirst()
+            guard navigation.active, navigationGeneration == gate.generation, lastError == nil, !isBusy, !Task.isCancelled else { return }
+            await navigateOnce(next)
+        }
+    }
+    private func navigateOnce(_ action: String) async {
+        guard navigation.active, navigationGeneration == gate.generation, let session = navigation.session, !isBusy else { return }
         if isDemo {
             if action == "menuHome" { clearChatAfterNavigation(); returnHome() }
             else { navigation.selection = action == "menuPrevious" ? "Demo · Previous menu item" : action == "menuNext" ? "Demo · Next menu item" : "Demo · Selection preview" }
@@ -601,7 +888,11 @@ final class ControllerStore: ObservableObject {
         }
         if receipt.isConfirmed, let active = receipt.activeChat, !active.id.isEmpty {
             if active.id != selectedChat?.id { changeChat(active) }
-        } else if action == "menuSelect" { clearChatAfterNavigation() }
+        } else if action == "menuSelect", !(receipt.isConfirmed && navigationKeepsChat) {
+            // A confirmed choice in the chat's own menu (its model, an attachment)
+            // leaves the chat where it was. Anything else may have moved the Mac.
+            clearChatAfterNavigation()
+        }
         if action == "menuHome", receipt.isConfirmed { clearChatAfterNavigation(); returnHome() }
         if let state = receipt.navigation, gate.accepts(generation) { applyNavigation(state,generation:generation) }
         else { navigation = .inactive; navigationGeneration = nil; await refreshNavigation() }
@@ -641,7 +932,7 @@ final class ControllerStore: ObservableObject {
             if dictationIntent == intent {
                 captureRoute = nil
                 sendReady = !draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-                lastError = error.localizedDescription
+                lastError = ConnectionHelp.describe(error, mac: selectedHost?.name)
             }
         }
     }
@@ -666,7 +957,11 @@ final class ControllerStore: ObservableObject {
         if intent == dictationIntent { captureRoute = nil; sendReady = !draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
     }
 
-    func sendDraft() async {
+    /// The last Send was refused because the Mac's message box already has text
+    /// in it. The alert then offers to replace that text, which is your call.
+    @Published var macDraftBlocksSend = false
+    func sendDraft(replacingMacDraft: Bool = false) async {
+        macDraftBlocksSend = false
         guard canSend, let route = currentRoute, let chat = selectedChat else {
             if let route = currentRoute, let pending = settings.ledger.pendingSends[route.storageKey] {
                 commandError(RemoteError.unresolvedSend.localizedDescription, id: pending.commandID)
@@ -684,10 +979,16 @@ final class ControllerStore: ObservableObject {
             try settings.ledger.begin(pending)
             guard persist() else { settings.ledger.pendingSends.removeValue(forKey: route.storageKey); return }
         }
-        catch { lastError = error.localizedDescription; return }
-        let receipt = await execute(action: "sendPrompt", chatID: chat.id, text: text, id: id)
+        catch { lastError = ConnectionHelp.describe(error, mac: selectedHost?.name); return }
+        let receipt = await execute(action: "sendPrompt", chatID: chat.id, text: text, id: id, replaceDraft: replacingMacDraft)
         guard let receipt else { return }
         finishSend(receipt, pending: pending)
+        macDraftBlocksSend = receipt.status == "failed" && receipt.blocker == "macDraft"
+        // A first prompt turns a new, unnamed session into a named chat. The Mac
+        // says which; keep working in it instead of in a session that is gone.
+        if receipt.isAcceptedSend, let named = receipt.activeChat, !named.id.isEmpty, named.id != chat.id, selectedChat?.id == chat.id {
+            changeChat(named); Task { await refresh() }
+        }
     }
     private static func digest(_ text: String) -> String { SHA256.hash(data: Data(text.utf8)).map { String(format: "%02x", $0) }.joined() }
     private func commandError(_ message: String, id: String) {
@@ -732,6 +1033,24 @@ final class ControllerStore: ObservableObject {
         }
     }
     /// Only call after the user explicitly checks the destination chat.
+    /// Sends whose result the Mac has not yet confirmed, on any chat.
+    var unresolvedSendCount: Int { settings.ledger.pendingSends.count }
+    /// A Send left unconfirmed on a chat that is not open still turns that chat's
+    /// key red. Ask the Mac about those too, so the key clears once the Mac knows,
+    /// without having to open each chat. Nothing is ever sent again.
+    private func recoverOtherPendingSends() async {
+        guard !isDemo, !isBusy else { return }
+        let hostID = selectedHost?.hostID ?? selectedHostID, current = currentRoute?.storageKey
+        let others = settings.ledger.pendingSends.values.filter { $0.route.hostID == hostID && $0.route.storageKey != current }
+        guard !others.isEmpty, let (host, token) = try? connection() else { return }
+        for pending in others.prefix(6) where recoveringCommands.insert(pending.commandID).inserted {
+            defer { recoveringCommands.remove(pending.commandID) }
+            guard let receipt = try? await client.fetch(CommandReceipt.self, host: host, token: token, path: "/v1/commands/\(pending.commandID)", deadline: 3),
+                  receipt.id == pending.commandID,
+                  settings.ledger.pendingSends[pending.route.storageKey]?.commandID == pending.commandID else { continue }
+            finishSend(receipt, pending: pending)
+        }
+    }
     func acknowledgeUncertainSend(wasSent: Bool) {
         guard let route = currentRoute, let pending = settings.ledger.pendingSends[route.storageKey] else { return }
         let receipt = CommandReceipt(id: pending.commandID, status: wasSent ? "confirmed" : "failed",
@@ -743,7 +1062,7 @@ final class ControllerStore: ObservableObject {
     func startNativeVoice() async { _ = await execute(action: "nativeVoice", chatID: selectedChat?.id) }
 
     private func execute(action: String, chatID: String?, text: String? = nil, artifactID: String? = nil, id: String = UUID().uuidString,
-                         navigationSession: String? = nil) async -> CommandReceipt? {
+                         navigationSession: String? = nil, replaceDraft: Bool = false) async -> CommandReceipt? {
         guard !isBusy else { return nil }
         if isDemo {
             let receipt = CommandReceipt(id: id, status: "confirmed", message: "Demo only — no Mac action performed.")
@@ -764,7 +1083,8 @@ final class ControllerStore: ObservableObject {
             let (host, token) = try connection()
             requestContext = (host, token)
             let command = RemoteCommand(id: id, hostID: host.hostID!, provider: provider.rawValue, chatID: chatID,
-                action: action, text: text, artifactID: artifactID, generation: generation, navigationSession:navigationSession)
+                action: action, text: text, artifactID: artifactID, generation: generation, navigationSession:navigationSession,
+                replaceDraft: replaceDraft ? true : nil)
             let body = try JSONEncoder().encode(command)
             posted = true
             let receipt = try await client.fetch(CommandReceipt.self, host: host, token: token, path: "/v1/commands", method: "POST", body: body)
@@ -807,7 +1127,7 @@ final class ControllerStore: ObservableObject {
         do {
             let (host, token) = try connection()
             await refreshArtifacts(host: host, token: token, provider: provider, generation: generation, chat: chat, enabled: true)
-        } catch { if gate.accepts(generation) { lastError = error.localizedDescription } }
+        } catch { if gate.accepts(generation) { lastError = ConnectionHelp.describe(error, mac: selectedHost?.name) } }
     }
     private func refreshArtifacts(host: RemoteHost, token: String, provider: ProviderID, generation: Int,
                                   chat: ChatRecord?, enabled: Bool) async {
@@ -819,8 +1139,8 @@ final class ControllerStore: ObservableObject {
             if let chat { query.append(URLQueryItem(name: "chatID", value: chat.id)) }
             let result = try await client.fetch(ArtifactsResponse.self, host: host, token: token, path: "/v1/artifacts", query: query)
             guard gate.accepts(generation) else { return }
-            artifacts = result.artifacts.filter { $0.hostID == host.hostID && $0.provider == provider.rawValue && (chat == nil || $0.chatID == chat?.id) }
-        } catch { if gate.accepts(generation) { lastError = error.localizedDescription } }
+            artifacts = result.artifacts.filter { $0.hostID == host.hostID && $0.provider == provider.rawValue && (chat == nil || $0.chatID.isEmpty || $0.chatID == chat?.id) }
+        } catch { if gate.accepts(generation) { lastError = ConnectionHelp.describe(error, mac: selectedHost?.name) } }
     }
     func openArtifact(_ artifact: ArtifactRecord) async {
         guard artifact.provider == selectedProvider.rawValue, artifact.hostID == selectedHost?.hostID else { return }
@@ -860,8 +1180,10 @@ final class ControllerStore: ObservableObject {
                 return .init(id:provider.rawValue,name:provider.name,installed:true,readiness:"ready",capabilities:base + actions.map(\.id),
                              reason:"Design preview only. No Mac commands are sent. Native live voice is not connected.",actions:actions)
             })
-        chats = ["Genesis iPhone", "OMAC workspace", "Design studio", "Weekly review", "Build notes", "Ideas & experiments"].enumerated().map {
-            ChatRecord(id: "demo-\(selectedProvider.rawValue)-\($0.offset)", title: $0.element, state: $0.offset == 0 ? "Working" : "Idle")
+        chats = ["Controller app", "OMAC workspace", "Design studio", "Weekly review", "Build notes", "Ideas & experiments"].enumerated().map {
+            // One of each light, so the demo shows what the colors mean.
+            ChatRecord(id: "demo-\(selectedProvider.rawValue)-\($0.offset)", title: $0.element,
+                       state: ["Working", "Unread", "Needs input", "Idle", "Something went wrong", "Idle"][$0.offset])
         }
         if settings.profiles[scope] == nil {
             profile = .init(provider: selectedProvider.rawValue, revision: 1, slots: chats.enumerated().map {

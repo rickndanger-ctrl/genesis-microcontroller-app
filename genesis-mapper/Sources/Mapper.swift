@@ -60,6 +60,23 @@ final class ClaudeAccess {
     }
     var lastActivitySnapshot=""
     let states=["Awaiting input","Something went wrong","Needs input","Working","Running","Idle","Unread"]
+    /// What a self-check needs to know about Claude's window, from one read.
+    func selfCheck(installed:Bool,running:Bool)->SelfCheck.Claude {
+        guard running,AXIsProcessTrusted() else {
+            return .init(installed:installed,running:running,sessionRows:0,promptFields:0,sendOrStopButtons:0,modelChoosers:0,permissionChooserFound:false)
+        }
+        let all=nodes()
+        func role(_ e:AXUIElement)->String {value(e,kAXRoleAttribute) as? String ?? ""}
+        let prompts=all.filter {role($0)==kAXTextAreaRole && value($0,kAXDescriptionAttribute) as? String=="Prompt"}.count
+        let send=all.filter {role($0)==kAXButtonRole && ["Send","Stop"].contains(text($0))}.count
+        let models=all.filter {role($0)==kAXPopUpButtonRole && text($0).hasPrefix("Model:")}
+        var permission=false
+        if models.count==1,let parent=value(models[0],kAXParentAttribute),CFGetTypeID(parent)==AXUIElementGetTypeID(),
+           let row=value(parent as! AXUIElement,kAXChildrenAttribute) as? [AXUIElement] {
+            permission=ControllerAction.permissionChooser(among:row.map {(role:role($0),text:text($0))}) != nil
+        }
+        return .init(installed:installed,running:running,sessionRows:sessions(all).count,promptFields:prompts,sendOrStopButtons:send,modelChoosers:models.count,permissionChooserFound:permission)
+    }
     func sessions(_ nodes: [AXUIElement]) -> [Session] {
         var result=[Session]()
         for e in nodes where value(e,kAXRoleAttribute) as? String == kAXButtonRole {
@@ -81,8 +98,8 @@ final class ClaudeAccess {
                 let e=children[index];index+=1;labels.append(text(e))
                 if let nested=value(e,kAXChildrenAttribute) as? [AXUIElement] {children.append(contentsOf:nested)}
             }
-            let state=states.first {state in labels.contains{ $0==title+" "+state || $0==state+" "+title || $0==state }} ?? "Open"
-            result.append(Session(title:title,state:state))
+            // Claude words a row's state differently between versions; see ClaudeSidebar.
+            result.append(Session(title:title,state:ClaudeSidebar.state(title:title,labels:labels)))
         }
         // An open fork may lack a recognized status prefix in the sidebar.
         // The session header is also used to verify navigation and dictation.
@@ -106,6 +123,43 @@ final class ClaudeAccess {
             result.append(Session(title:title,state:state))
         }
         return result
+    }
+    /// What Claude shows for a session that has just been created and has no name yet.
+    struct NewSession {
+        let headings:Int        // headings that read "New session"
+        let namedHeaders:Int    // "<title>, rename session" controls, which only a named session has
+        let composers:Int       // message boxes
+        let folderLabel:String? // the "Folder: …" control
+        var showing:Bool {headings==1 && namedHeaders==0}
+    }
+    func newSession(_ nodes:[AXUIElement]?=nil)->NewSession {
+        let all=nodes ?? self.nodes()
+        return NewSession(
+            headings:all.filter{value($0,kAXRoleAttribute) as? String=="AXHeading" && text($0)==ClaudeSidebar.newSessionTitle}.count,
+            namedHeaders:all.filter{text($0).hasSuffix(", rename session")}.count,
+            composers:all.filter{value($0,kAXRoleAttribute) as? String==kAXTextAreaRole && value($0,kAXDescriptionAttribute) as? String=="Prompt"}.count,
+            folderLabel:all.first{value($0,kAXRoleAttribute) as? String==kAXPopUpButtonRole && text($0).hasPrefix("Folder: ")}.map(text))
+    }
+    /// The sidebar's "New session in <project>" button for the project a session is
+    /// filed under. Starting the new session there gives it that project's folder.
+    /// Nil when the session sits somewhere that names no single project, such as Pinned.
+    func projectNewSessionButton(for title:String,in nodes:[AXUIElement])->AXUIElement? {
+        guard let row=sidebarTargets(title,in:nodes).first else{return nil}
+        var node:AXUIElement?=row
+        for _ in 0..<8 {
+            guard let current=node else{break}
+            var subtree=[current],index=0
+            while index<subtree.count && index<600 {
+                if let children=value(subtree[index],kAXChildrenAttribute) as? [AXUIElement] {subtree.append(contentsOf:children)}
+                index+=1
+            }
+            let buttons=subtree.filter{value($0,kAXRoleAttribute) as? String==kAXButtonRole && text($0).hasPrefix("New session in ")}
+            if buttons.count==1 {return buttons[0]}
+            if buttons.count>1 {return nil}
+            guard let parent=value(current,kAXParentAttribute),CFGetTypeID(parent)==AXUIElementGetTypeID() else{break}
+            node=(parent as! AXUIElement)
+        }
+        return nil
     }
     func press(_ e: AXUIElement) -> Bool {
         if let enabled=value(e,kAXEnabledAttribute) as? Bool, !enabled { return false }
@@ -182,7 +236,14 @@ final class ClaudeAccess {
     // Only click a freshly resolved, unobscured Claude navigation control.
     @MainActor func navigationClick(_ element: AXUIElement, app: NSRunningApplication, contextIsCurrent: (() -> Bool)? = nil) async -> Bool {
         guard (value(element,kAXEnabledAttribute) as? Bool) != false,
-              NSWorkspace.shared.frontmostApplication?.processIdentifier == app.processIdentifier,
+              NSWorkspace.shared.frontmostApplication?.processIdentifier == app.processIdentifier else {return false}
+        // A row further down a long list is not under any point on screen until
+        // it is scrolled to, and the hit test below would refuse it. Bring it
+        // into view first; the positions are read again after it settles.
+        if AXUIElementPerformAction(element,"AXScrollToVisible" as CFString) == .success {try? await Task.sleep(nanoseconds:220_000_000)}
+        // Never click through someone's drag.
+        guard await MacInput.waitForQuiet(needed:0,timeout:1.5) else {return false}
+        guard NSWorkspace.shared.frontmostApplication?.processIdentifier == app.processIdentifier,
               let pv=value(element,kAXPositionAttribute), let sv=value(element,kAXSizeAttribute),
               CFGetTypeID(pv)==AXValueGetTypeID(), CFGetTypeID(sv)==AXValueGetTypeID() else {return false}
         var point=CGPoint.zero, size=CGSize.zero
@@ -285,13 +346,24 @@ final class ClaudeAccess {
         if let menu=action.menu {
             let bars=all.filter {value($0,kAXRoleAttribute) as? String==kAXMenuBarItemRole && text($0)==menu}
             guard bars.count==1,contextOK(),press(bars[0]) else {return "Claude’s \(menu) menu is unavailable."}
-            var descendants=[bars[0]],index=0
-            while index<descendants.count && index<300 {
-                let node=descendants[index];index+=1
-                if let children=value(node,kAXChildrenAttribute) as? [AXUIElement] {descendants.append(contentsOf:children)}
+            // A menu that has only just opened may not have filled in yet. Reading it in the
+            // same instant found nothing and reported a working command as missing.
+            var items=[AXUIElement]()
+            for attempt in 0..<8 {
+                var descendants=[bars[0]],index=0
+                while index<descendants.count && index<300 {
+                    let node=descendants[index];index+=1
+                    if let children=value(node,kAXChildrenAttribute) as? [AXUIElement] {descendants.append(contentsOf:children)}
+                }
+                items=descendants.filter {value($0,kAXRoleAttribute) as? String==kAXMenuItemRole && action.labels.contains(text($0))}
+                if items.count==1 || attempt==7 {break}
+                try? await Task.sleep(nanoseconds:120_000_000)
             }
-            let items=descendants.filter {value($0,kAXRoleAttribute) as? String==kAXMenuItemRole && action.labels.contains(text($0))}
-            guard items.count==1 else {return "This command is not available in this Claude version."}
+            guard items.count==1 else {
+                // Do not leave the menu hanging open over the user's work.
+                _ = AXUIElementPerformAction(bars[0],kAXCancelAction as CFString)
+                return "This command is not available in this Claude version."
+            }
             guard contextOK(),press(items[0]) else {return "\(action.title) is disabled in this view."}
             return "Requested \(action.title)"
         }
@@ -301,6 +373,15 @@ final class ClaudeAccess {
             let fields=all.filter {value($0,kAXRoleAttribute) as? String==kAXTextAreaRole && value($0,kAXDescriptionAttribute) as? String=="Prompt"}
             guard fields.count==1,contextOK() else {return "No unique prompt field is available."}
             return AXUIElementSetAttributeValue(fields[0],kAXFocusedAttribute as CFString,kCFBooleanTrue) == .success ? "Prompt focused" : "Could not focus the prompt."
+        }
+        if action.id=="permissions" {
+            // Prefer the chooser's place beside "Model:" to its name, which changes with the mode.
+            let models=all.filter {value($0,kAXRoleAttribute) as? String==kAXPopUpButtonRole && text($0).hasPrefix("Model:")}
+            if models.count==1,let parent=value(models[0],kAXParentAttribute),CFGetTypeID(parent)==AXUIElementGetTypeID(),
+               let row=value(parent as! AXUIElement,kAXChildrenAttribute) as? [AXUIElement],
+               let index=ControllerAction.permissionChooser(among:row.map {(role:value($0,kAXRoleAttribute) as? String ?? "",text:text($0))}) {
+                candidates=[row[index]]
+            }
         }
         if action.id=="rename" {candidates=all.filter{text($0)==title+", rename session" && value($0,kAXRoleAttribute) as? String==kAXButtonRole}}
         if action.id=="options" {
@@ -443,6 +524,9 @@ final class HIDLink {
     @Published var mode="Waiting for Genesis"
     @Published var status="Open Claude’s Code sidebar, then Refresh sessions."
     @Published var trusted=false
+    /// Whether Genesis Mini hardware has ever been connected to this Mac. Its
+    /// controls stay out of the menu for everyone else.
+    @Published var hardwareSeen=UserDefaults.standard.bool(forKey:"genesis.hardwareSeen")
     @Published var selected = -1
     @Published var selecting=false
     @Published var loginEnabled=LoginLaunch.enabled
@@ -522,7 +606,7 @@ final class HIDLink {
     }
     func refresh() {
         trusted=AXIsProcessTrusted()
-        guard trusted else {status="Enable Accessibility for Genesis Agent Micro Controller to read Claude controls.";return}
+        guard trusted else {status="Enable Accessibility for Agent Micro Controller to read Claude controls.";return}
         guard !sessionScanBusy else{return}
         sessionScanBusy=true
         sessionScanQueue.async { [weak self] in
@@ -763,6 +847,8 @@ final class HIDLink {
     func tick() {
         let uptime=ProcessInfo.processInfo.systemUptime
         refreshQuietStudioProcess()
+        // Notice an Accessibility change made in System Settings straight away.
+        let nowTrusted=AXIsProcessTrusted();if nowTrusted != trusted {trusted=nowTrusted}
         guard !isSystemSleeping else { return }
         if let cancel=promptGate.leaseExpired(now:uptime) { sendPromptURL(cancel) }
         if hid.device==nil {
@@ -874,6 +960,7 @@ final class HIDLink {
         }
         if let result=msg["result"] as? [String:Any],result["version"] != nil {
             let firstReply=firmware=="Not connected"
+            if !hardwareSeen {hardwareSeen=true;UserDefaults.standard.set(true,forKey:"genesis.hardwareSeen")}
             firmware=result["version"] as? String ?? "Not connected"
             supportsCatalog=(result["action_catalog"] as? Int)==1
             supportsNavigation=(result["navigation_protocol"] as? Int)==1

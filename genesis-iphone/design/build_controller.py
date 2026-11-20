@@ -12,7 +12,9 @@ from pathlib import Path
 from mathutils import Vector
 
 ROOT = Path(__file__).resolve().parent
-RESOURCES = ROOT.parent / "ios" / "Resources"
+# The app now draws the deck natively (ios/Sources/DeckSurfaces.swift), so
+# these renders are reference artwork and stay out of the app bundle.
+RESOURCES = ROOT / "renders"
 RESOURCES.mkdir(parents=True, exist_ok=True)
 
 bpy.ops.object.select_all(action="SELECT")

@@ -17,8 +17,8 @@ struct MainView: View {
   HStack(spacing:0) {
    VStack(alignment:.leading,spacing:10) {
     Image(nsImage:NSImage(contentsOf:Bundle.main.url(forResource:"Genesis",withExtension:"png")!) ?? NSImage()).resizable().scaledToFit().frame(width:76,height:76).clipShape(RoundedRectangle(cornerRadius:18)).padding(.bottom,8)
-    Text("GENESIS").font(.system(size:23,weight:.bold,design:.rounded)).lineSpacing(3)
-    Text("AGENT MICRO\nCONTROLLER").font(.system(size:9,weight:.semibold)).tracking(2).foregroundStyle(.secondary).padding(.bottom,24)
+    Text("AGENT MICRO").font(.system(size:17,weight:.bold,design:.rounded)).lineSpacing(3)
+    Text("CONTROLLER").font(.system(size:9,weight:.semibold)).tracking(2).foregroundStyle(.secondary).padding(.bottom,24)
     nav("Agent keys",icon:"square.grid.3x2",index:0)
     nav("Actions",icon:"waveform",index:1)
     nav("Codex controls",icon:"dial.low",index:2)
@@ -34,7 +34,7 @@ struct MainView: View {
      Text(model.mode=="Claude" ? "CLAUDE MODE":model.mode=="Codex" ? "CODEX MODE":"OFFLINE").font(.system(size:10,weight:.semibold)).padding(.horizontal,12).padding(.vertical,7).background(accent.opacity(0.12)).clipShape(Capsule())
     }
     if !model.trusted {
-     HStack {Image(systemName:"hand.raised.fill");Text("Allow Genesis Agent Micro Controller to use Claude’s controls.");Spacer();Button("Enable access"){NSWorkspace.shared.open(URL(string:"x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility")!)}}.font(.callout).padding(12).background(Color.orange.opacity(0.12)).cornerRadius(10)
+     HStack {Image(systemName:"hand.raised.fill");Text("Allow Agent Micro Controller to use Claude’s controls.");Spacer();Button("Enable access"){_=AXIsProcessTrustedWithOptions([kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String:true] as CFDictionary)}}.font(.callout).padding(12).background(Color.orange.opacity(0.12)).cornerRadius(10)
     }
     if section==0 {agentPage}
     else if section==1 {actionsPage}
@@ -51,7 +51,7 @@ struct MainView: View {
  var agentPage: some View {
   HStack(alignment:.top,spacing:24) {
    VStack(spacing:18) {
-    HStack {Circle().fill(.green.opacity(model.mode=="Claude" ? 1:0.2)).frame(width:6,height:6);Text("GENESIS  /  CONTROL DECK").font(.system(size:9,weight:.bold,design:.monospaced)).tracking(1);Spacer();Image(systemName:"cable.connector").foregroundStyle(.secondary)}
+    HStack {Circle().fill(.green.opacity(model.mode=="Claude" ? 1:0.2)).frame(width:6,height:6);Text("AGENT MICRO  /  CONTROL DECK").font(.system(size:9,weight:.bold,design:.monospaced)).tracking(1);Spacer();Image(systemName:"cable.connector").foregroundStyle(.secondary)}
     LazyVGrid(columns:Array(repeating:GridItem(.flexible(),spacing:10),count:3),spacing:10) {
      ForEach(0..<6,id:\.self) {i in
       Button {selectedKey=i} label:{VStack(spacing:9) {HStack {Circle().fill(keyColors[i]).frame(width:7,height:7);Spacer();Text("C\(i+1)").font(.system(size:11,weight:.bold,design:.monospaced))};Text(model.slotLabel(i)).font(.system(size:11,weight:.medium)).lineLimit(2).frame(maxWidth:.infinity,minHeight:30,alignment:.leading)}.padding(11).frame(height:94).background(keyColors[i].opacity(selectedKey==i ? 0.25:0.09)).cornerRadius(11).overlay(RoundedRectangle(cornerRadius:11).stroke(keyColors[i].opacity(selectedKey==i ? 1:0.35),lineWidth:selectedKey==i ? 2:1))}.buttonStyle(.plain).accessibilityLabel("Configure C\(i+1)")
@@ -131,7 +131,7 @@ struct MainView: View {
  var codexPage: some View {
   ScrollView {
    VStack(alignment:.leading,spacing:16) {
-    Text("Codex owns its mappings. Choose chats, shortcuts, keycaps or skills in Settings → Codex Micro. Genesis mirrors those assignments; changing a keycap can also change its command.").font(.callout).foregroundStyle(.secondary)
+    Text("Codex owns its mappings. Choose chats, shortcuts, keycaps or skills in Settings → Codex Micro. Agent Micro Controller mirrors those assignments; changing a keycap can also change its command.").font(.callout).foregroundStyle(.secondary)
     HStack {Text("CURRENT NATIVE CONTROLS").font(.caption.bold());Spacer();Button("Refresh mappings"){model.nativeControls=CodexControls.current();model.syncCatalog()}}
     ForEach(model.nativeControls) {control in
      HStack {VStack(alignment:.leading,spacing:3) {Text(control.title).font(.headline);Text(control.detail).font(.caption).foregroundStyle(.secondary)};Spacer();Text(control.enabled ? "Available":"Unassigned").font(.caption).foregroundStyle(control.enabled ? Color.green:Color.secondary)}.padding(12).background(panel).cornerRadius(9)
@@ -157,7 +157,7 @@ struct MainView: View {
     Text("Off by default. When enabled, the Genesis Prompt button controls Quiet Studio while the app is open. Otherwise the button keeps its normal native behavior.").font(.caption).foregroundStyle(.secondary)
    }.padding(12)}
    GroupBox {VStack(spacing:18) {
-    Toggle("Launch Genesis Agent Micro Controller when I sign in",isOn:Binding(get:{model.loginEnabled},set:{model.setLogin($0)}))
+    Toggle("Launch Agent Micro Controller when I sign in",isOn:Binding(get:{model.loginEnabled},set:{model.setLogin($0)}))
     Divider()
     Toggle("Alert sound",isOn:Binding(get:{model.soundEnabled},set:{model.configure(["sound_enabled":$0])})).disabled(!model.supportsSettings)
     HStack {Text("Knob movement");Spacer();Picker("Knob movement",selection:Binding(get:{model.encoderDetents},set:{model.configure(["encoder_detents":$0])})){Text("Every click").tag(1);Text("Every two clicks").tag(2)}.labelsHidden().frame(width:185).disabled(!model.supportsSettings)}
@@ -172,14 +172,38 @@ struct MainView: View {
 @main struct MapperApp: App {
  @StateObject private var model=Model()
  @StateObject private var remote=GenesisRemoteBridge.shared
+ @NSApplicationDelegateAdaptor(SetupAppDelegate.self) private var appDelegate
+ init() {
+  // One companion per Mac: a second copy would fight the first for the port and the hardware.
+  if let id=Bundle.main.bundleIdentifier,
+     LoginLaunch.anotherCopyIsRunning(mine:ProcessInfo.processInfo.processIdentifier,
+                                      running:NSRunningApplication.runningApplications(withBundleIdentifier:id).filter{!$0.isTerminated}.map(\.processIdentifier)) {
+   exit(0)
+  }
+  // A menu bar app with no window open gets App Nap, which slows its timers and
+  // makes phones wait seconds for answers. It serves the phone at any moment,
+  // so it opts out, while still letting the Mac sleep when idle.
+  MapperApp.activity=ProcessInfo.processInfo.beginActivity(options:.userInitiatedAllowingIdleSystemSleep,reason:"Answering paired phones and tablets")
+ }
+ static var activity:NSObjectProtocol?
  var body: some Scene {
-  WindowGroup("Genesis Agent Micro Controller",id:"controller"){MainView(model:model)}.defaultSize(width:1040,height:740)
-  WindowGroup("Genesis iPhone Pairing",id:"phone-pairing"){RemotePairingView(bridge:remote)}.defaultSize(width:800,height:760)
-  MenuBarExtra("Genesis Agent Micro Controller",systemImage:"dial.medium.fill") {ControllerMenu(model:model)}
+  // The menu bar dial comes first so that SwiftUI opens no window by itself;
+  // the dial opens setup when something is left to do.
+  MenuBarExtra {ControllerMenu(model:model)} label:{MenuBarDial(bridge:remote)}
+  // Tall enough to show all four steps and the whole pairing code; macOS
+  // shrinks it to fit a smaller screen, where the steps scroll.
+  Window("Set Up Agent Micro Controller",id:"setup"){SetupView(bridge:remote,model:model)}.defaultSize(width:900,height:900).windowResizability(.contentMinSize)
+  WindowGroup("Genesis Mini Controls",id:"controller"){MainView(model:model)}.defaultSize(width:1040,height:740)
+  WindowGroup("Phones and Devices",id:"phone-pairing"){RemotePairingView(bridge:remote)}.defaultSize(width:800,height:760)
  }
 }
 struct ControllerMenu: View {
  @ObservedObject var model:Model
  @Environment(\.openWindow) var openWindow
- var body: some View {Text(model.mode);Button("Open Genesis Agent Micro Controller"){openWindow(id:"controller");NSApp.activate()};Button("Pair iPhone / Artifacts"){openWindow(id:"phone-pairing");NSApp.activate()};Button("Refresh sessions"){model.discoverSessions()};Divider();Button("Quit Genesis Agent Micro Controller"){NSApp.terminate(nil)}}
+ var body: some View {
+  Button("Set Up and Pair a Phone…"){openWindow(id:"setup");SetupWindow.bringForward()}
+  Button("Phones, Devices and Artifacts…"){openWindow(id:"phone-pairing");NSApp.activate()}
+  if model.hardwareSeen {Divider();Text("Genesis Mini: \(model.mode)");Button("Genesis Mini Controls…"){openWindow(id:"controller");NSApp.activate()};Button("Refresh sessions"){model.discoverSessions()}}
+  Divider();Button("Quit Agent Micro Controller"){NSApp.terminate(nil)}
+ }
 }

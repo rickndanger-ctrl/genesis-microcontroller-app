@@ -4,6 +4,15 @@ check(ControllerAction.all.count==26,"Catalog count")
 check(Set(ControllerAction.all.map(\.id)).count==26,"No duplicate dispatch IDs")
 check(ControllerAction.all.allSatisfy{$0.id.utf8.count<12},"Firmware key capacity")
 check(ControllerAction.menu(["model","model","bad","dictate","send"])==["send","dictate","model"],"Normalize saved choices without moving voice/send")
+// The permission chooser is found beside "Model:", whatever mode names it.
+let row:[(role:String,text:String)]=[("AXPopUpButton","Model: Fable 5.2 High"),("AXPopUpButton","Plan mode"),("AXPopUpButton","Usage: Weekly 65%"),("AXGroup","")]
+check(ControllerAction.permissionChooser(among:row)==1,"A mode the catalog has never heard of is still found")
+check(ControllerAction.permissionChooser(among:[row[1],row[0],row[2]])==0,"Order within the row does not matter")
+check(ControllerAction.permissionChooser(among:[row[0],row[2]])==nil,"No chooser beside Model means no click")
+check(ControllerAction.permissionChooser(among:row+[("AXPopUpButton","Add")])==nil,"Two candidates are ambiguous, so no click")
+check(ControllerAction.permissionChooser(among:[row[1],row[2]])==nil,"A row without Model is not the composer row")
+check(ControllerAction.permissionChooser(among:[row[0],row[0],row[1]])==nil,"Two Model choosers are not a composer row")
+check(ControllerAction.permissionChooser(among:[row[0],("AXButton","Plan mode"),row[2]])==nil,"Only a chooser counts, not a plain button")
 let config="""
 [desktop.codex-micro-layout]
 separateMicrophoneKeys = false

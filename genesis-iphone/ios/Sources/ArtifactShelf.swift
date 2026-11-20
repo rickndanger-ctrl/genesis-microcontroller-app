@@ -47,6 +47,10 @@ struct ArtifactShelf: View {
                 }
                 .task { await store.refreshArtifacts() }
                 .sheet(item: $selected) { artifact in ArtifactPreview(store: store, artifact: artifact) }
+                // A failure while this sheet is up would otherwise be reported behind it, unseen.
+                .alert("Controller update", isPresented: Binding(get: { store.lastError != nil }, set: { if !$0 { store.lastError = nil } })) {
+                    Button("OK", role: .cancel) { ControllerSound.shared.keyClick(); store.lastError = nil }
+                } message: { Text(store.lastError ?? "") }
         }
     }
     private func togglePin(_ artifact: ArtifactRecord) {
@@ -75,6 +79,10 @@ struct ArtifactPreview: View {
                 else { ProgressView("Opening artifact…") }
             }
             .navigationTitle(artifact.title).navigationBarTitleDisplayMode(.inline)
+            // A failure while this sheet is up would otherwise be reported behind it, unseen.
+            .alert("Controller update", isPresented: Binding(get: { store.lastError != nil }, set: { if !$0 { store.lastError = nil } })) {
+                Button("OK", role: .cancel) { ControllerSound.shared.keyClick(); store.lastError = nil }
+            } message: { Text(store.lastError ?? "") }
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) { Button("Done") { ControllerSound.shared.keyClick(); dismiss() } }
                 ToolbarItem(placement: .primaryAction) { Button { ControllerSound.shared.keyClick(); Task { await store.openArtifact(artifact) } } label: { Image(systemName: "desktopcomputer") }.accessibilityLabel("Open on Mac") }
@@ -122,6 +130,11 @@ struct ArtifactWebView: UIViewRepresentable {
             let scheme = url.scheme?.lowercased()
             decisionHandler(scheme == "https" || scheme == "about" ? .allow : .cancel)
         }
+        /// A Mac reached over Wi-Fi must present the certificate from its QR code.
+        func webView(_ webView: WKWebView, didReceive challenge: URLAuthenticationChallenge,
+                     completionHandler: @escaping (URLSession.AuthChallengeDisposition, URLCredential?) -> Void) {
+            let answer = PinnedCertificates.evaluate(challenge); completionHandler(answer.0, answer.1)
+        }
     }
 }
 
@@ -130,6 +143,10 @@ final class ArtifactDownloadGuard: NSObject, URLSessionTaskDelegate {
                     newRequest request: URLRequest, completionHandler: @escaping (URLRequest?) -> Void) {
         // Export endpoints do not redirect; never forward a pairing credential to a web destination.
         completionHandler(nil)
+    }
+    func urlSession(_ session: URLSession, task: URLSessionTask, didReceive challenge: URLAuthenticationChallenge,
+                    completionHandler: @escaping (URLSession.AuthChallengeDisposition, URLCredential?) -> Void) {
+        let answer = PinnedCertificates.evaluate(challenge); completionHandler(answer.0, answer.1)
     }
 }
 

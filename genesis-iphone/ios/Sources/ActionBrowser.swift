@@ -15,6 +15,7 @@ struct ActionCatalogSections: View {
         ForEach(groups, id: \.self) { group in
             Section(group) {
                 ForEach(actions.filter { $0.group == group }) { action in
+                    let unavailable = executing && !store.canRunAction(action.id)
                     Button {
                         // Running Dictate may open the microphone immediately.
                         // Assignment choices are ordinary buttons, not capture.
@@ -23,12 +24,14 @@ struct ActionCatalogSections: View {
                     } label: {
                         HStack(alignment: .top, spacing: 12) {
                             Image(systemName: action.icon).frame(width: 22).padding(.top, 2)
+                            // Only the icon carries the tint. Tinted body text reads
+                            // as pale blue on white and is hard to make out.
                             VStack(alignment: .leading, spacing: 4) {
-                                Text(action.title)
-                                Text(executing ? store.actionUnavailableReason(action.id) ?? action.detail : action.detail).font(.caption).foregroundStyle(.secondary)
+                                Text(action.title).foregroundStyle(Color.primary)
+                                Text(executing ? store.actionUnavailableReason(action.id) ?? action.detail : action.detail).font(.caption).foregroundStyle(Color.secondary)
                             }
-                        }.padding(.vertical, 4)
-                    }.disabled(executing && !store.canRunAction(action.id))
+                        }.padding(.vertical, 4).opacity(unavailable ? 0.45 : 1)
+                    }.disabled(unavailable)
                 }
             }
         }
@@ -121,6 +124,9 @@ struct MenuNavigationScreen: View {
         }
     }
     private func control(_ title: String, icon: String, action: String) -> some View {
-        Button { ControllerSound.shared.keyClick(); Task { await store.navigate(action) } } label: { Label(title, systemImage: icon).frame(maxWidth: .infinity, minHeight: 44) }.disabled(!enabled)
+        // Previous and Next stay live while the Mac answers; the store queues them.
+        let waits = ["menuPrevious", "menuNext"].contains(action)
+        return Button { ControllerSound.shared.keyClick(); Task { await store.navigate(action) } } label: { Label(title, systemImage: icon).frame(maxWidth: .infinity, minHeight: 44) }
+            .disabled(waits ? !store.navigation.active : !enabled)
     }
 }

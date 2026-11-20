@@ -1,5 +1,6 @@
 import Foundation
 import Security
+import CryptoKit
 
 protocol ControllerCredentialVault {
     func token(for hostID: String) -> String?
@@ -41,17 +42,81 @@ final class GenesisCredentials: ControllerCredentialVault {
     }
 }
 
-/// Never forward the pairing token through an HTTP redirect.
+/// The certificates this device trusts for Macs it reaches over Wi-Fi, by
+/// host and port. Each came from a QR code scanned off that Mac's screen.
+/// Any connection to a listed address must present exactly that certificate;
+/// other addresses (Tailscale) get the system's normal checks.
+final class PinnedCertificates: @unchecked Sendable {
+    static let shared = PinnedCertificates()
+    private let lock = NSLock()
+    private var pins: [String: String] = [:]
+    private static func key(_ host: String, _ port: Int) -> String { host.lowercased() + ":" + String(port) }
+
+    func remember(_ pin: String, for url: URL) {
+        guard let host = url.host else { return }
+        lock.lock(); pins[Self.key(host, url.port ?? 443)] = pin; lock.unlock()
+    }
+    func pin(host: String, port: Int) -> String? {
+        lock.lock(); defer { lock.unlock() }
+        return pins[Self.key(host, port)]
+    }
+
+    static func fingerprint(_ certificateDER: Data) -> String {
+        Data(SHA256.hash(data: certificateDER)).base64EncodedString()
+            .replacingOccurrences(of: "+", with: "-").replacingOccurrences(of: "/", with: "_").replacingOccurrences(of: "=", with: "")
+    }
+
+    /// Answers a server-trust challenge for URLSession and WKWebView alike.
+    static func evaluate(_ challenge: URLAuthenticationChallenge) -> (URLSession.AuthChallengeDisposition, URLCredential?) {
+        let space = challenge.protectionSpace
+        guard space.authenticationMethod == NSURLAuthenticationMethodServerTrust, let trust = space.serverTrust,
+              let expected = shared.pin(host: space.host, port: space.port) else { return (.performDefaultHandling, nil) }
+        guard let chain = SecTrustCopyCertificateChain(trust) as? [SecCertificate], let leaf = chain.first,
+              fingerprint(SecCertificateCopyData(leaf) as Data) == expected else { return (.cancelAuthenticationChallenge, nil) }
+        return (.useCredential, URLCredential(trust: trust))
+    }
+}
+
+/// Never forward the pairing token through an HTTP redirect, and hold Wi-Fi
+/// connections to the certificate their Mac introduced in its QR code.
 private final class NoRedirects: NSObject, URLSessionTaskDelegate {
     func urlSession(_ session: URLSession, task: URLSessionTask,
                     willPerformHTTPRedirection response: HTTPURLResponse,
                     newRequest request: URLRequest, completionHandler: @escaping (URLRequest?) -> Void) {
         completionHandler(nil)
     }
+    func urlSession(_ session: URLSession, task: URLSessionTask, didReceive challenge: URLAuthenticationChallenge,
+                    completionHandler: @escaping (URLSession.AuthChallengeDisposition, URLCredential?) -> Void) {
+        let answer = PinnedCertificates.evaluate(challenge); completionHandler(answer.0, answer.1)
+    }
+}
+
+/// Which way to try a Mac first. After Wi-Fi fails and Tailscale works, the
+/// client sticks with Tailscale for a minute, so a phone away from home does
+/// not wait on Wi-Fi before every request.
+final class RouteMemory: @unchecked Sendable {
+    static let tailnetHold: TimeInterval = 60
+    private let lock = NSLock()
+    private var tailnetUntil: [String: Date] = [:]
+    private var lastUsed: [String: RemoteHost.Route] = [:]
+    func ordered(_ host: RemoteHost, now: Date = Date()) -> [(route: RemoteHost.Route, url: String)] {
+        let all = host.routes
+        lock.lock(); let hold = tailnetUntil[host.id]; lock.unlock()
+        guard let hold, hold > now else { return all }
+        return all.filter { $0.route == .tailnet } + all.filter { $0.route != .tailnet }
+    }
+    func worked(_ route: RemoteHost.Route, for host: RemoteHost, afterFailure: Bool, now: Date = Date()) {
+        lock.lock(); defer { lock.unlock() }
+        lastUsed[host.id] = route
+        if route == .tailnet, afterFailure { tailnetUntil[host.id] = now.addingTimeInterval(Self.tailnetHold) }
+        if route == .wifi { tailnetUntil[host.id] = nil }
+    }
+    func last(_ host: RemoteHost) -> RemoteHost.Route? { lock.lock(); defer { lock.unlock() }; return lastUsed[host.id] }
 }
 
 final class RemoteClient {
     private let session: URLSession
+    let routes = RouteMemory()
     init(configuration: URLSessionConfiguration? = nil) {
         let config = configuration ?? URLSessionConfiguration.ephemeral
         config.timeoutIntervalForRequest = 12
@@ -62,13 +127,20 @@ final class RemoteClient {
         session = URLSession(configuration: config, delegate: NoRedirects(), delegateQueue: nil)
     }
 
+    /// A request on the way this Mac is best reached right now.
     func request(_ host: RemoteHost, token: String, path: String, query: [URLQueryItem] = [],
                  method: String = "GET", body: Data? = nil) throws -> URLRequest {
+        guard let first = routes.ordered(host).first else { throw RemoteError.invalidEndpoint }
+        return try request(host, via: first, token: token, path: path, query: query, method: method, body: body)
+    }
+    private func request(_ host: RemoteHost, via route: (route: RemoteHost.Route, url: String), token: String, path: String,
+                         query: [URLQueryItem], method: String, body: Data?) throws -> URLRequest {
         guard (body?.count ?? 0) <= 131_072 else { throw RemoteError.server(413, "This prompt is too long for the controller. Shorten it before sending.") }
-        guard PairingPayload.validEndpoint(host.baseURL, allowLocalhost: Self.localDevelopmentAllowed),
-              var parts = URLComponents(string: host.baseURL), path.hasPrefix("/v1/"), !path.contains("..") else {
+        guard PairingPayload.validEndpoint(route.url, allowLocalhost: Self.localDevelopmentAllowed),
+              var parts = URLComponents(string: route.url), path.hasPrefix("/v1/"), !path.contains("..") else {
             throw RemoteError.invalidEndpoint
         }
+        if route.route == .wifi, let pin = host.pin, let url = parts.url { PinnedCertificates.shared.remember(pin, for: url) }
         parts.path = path; parts.queryItems = query.isEmpty ? nil : query
         guard let url = parts.url else { throw RemoteError.invalidEndpoint }
         var req = URLRequest(url: url)
@@ -88,8 +160,24 @@ final class RemoteClient {
     func fetch<T: Decodable>(_ type: T.Type, host: RemoteHost, token: String, path: String,
                               query: [URLQueryItem] = [], method: String = "GET", body: Data? = nil,
                               deadline: TimeInterval? = nil) async throws -> T {
-        let req = try request(host, token: token, path: path, query: query, method: method, body: body)
-        let (data, response) = try await data(for: req, deadline: deadline)
+        let order = routes.ordered(host)
+        guard !order.isEmpty else { throw RemoteError.invalidEndpoint }
+        var data = Data(), response: URLResponse?
+        for (index, route) in order.enumerated() {
+            var req = try request(host, via: route, token: token, path: path, query: query, method: method, body: body)
+            let fallback = index < order.count - 1
+            // With Tailscale to fall back on, give up on Wi-Fi quickly.
+            if fallback, route.route == .wifi { req.timeoutInterval = 4 }
+            do {
+                (data, response) = try await self.data(for: req, deadline: fallback && route.route == .wifi ? min(deadline ?? 4, 4) : deadline)
+                routes.worked(route.route, for: host, afterFailure: index > 0)
+                break
+            } catch {
+                // A task cancelled by the app also surfaces as .cancelled; never retry that.
+                guard fallback, !Task.isCancelled, Self.shouldTryNextRoute(error, method: method) else { throw error }
+            }
+        }
+        guard let response else { throw RemoteError.invalidResponse }
         guard let http = response as? HTTPURLResponse, data.count <= 2_097_152 else { throw RemoteError.invalidResponse }
         guard (200..<300).contains(http.statusCode) else {
             let error = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
@@ -97,6 +185,18 @@ final class RemoteClient {
         }
         do { return try JSONDecoder().decode(T.self, from: data) }
         catch { throw RemoteError.invalidResponse }
+    }
+
+    /// Whether a failure on one route means the request may go the other way.
+    /// A request that changes something (a Send) is retried only when it
+    /// certainly never reached the Mac; a read may also be retried after a timeout.
+    static func shouldTryNextRoute(_ error: Error, method: String) -> Bool {
+        guard let code = (error as? URLError)?.code else { return false }
+        let neverSent: Set<URLError.Code> = [.cannotFindHost, .cannotConnectToHost, .dnsLookupFailed, .notConnectedToInternet,
+                                             .secureConnectionFailed, .serverCertificateUntrusted, .serverCertificateHasBadDate,
+                                             .serverCertificateNotYetValid, .serverCertificateHasUnknownRoot, .cancelled]
+        if neverSent.contains(code) { return true }
+        return method == "GET" && [.timedOut, .networkConnectionLost].contains(code)
     }
 
     private func data(for request: URLRequest, deadline: TimeInterval?) async throws -> (Data, URLResponse) {
