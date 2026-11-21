@@ -199,6 +199,93 @@ final class ControllerUITests: XCTestCase {
     }
 
     @MainActor
+    func testDeckOnlySizeStepsRotatesAndPinches() throws {
+        guard UIDevice.current.userInterfaceIdiom == .pad else {
+            throw XCTSkip("Deck only is an iPad size")
+        }
+        continueAfterFailure = false
+        let app = XCUIApplication()
+        app.launchArguments = ["--demo"]
+        XCUIDevice.shared.orientation = .landscapeLeft
+        app.launch()
+        let enter = app.buttons["controller.fullscreen"]
+        XCTAssertTrue(enter.waitForExistence(timeout: 8))
+        waitForObservedOrientation(app, landscape: true)
+        app.buttons["Start dictation"].press(forDuration: 1.0)
+        let retained = "Show me the latest changes and what still needs attention."
+
+        enter.tap()
+        let deckOnly = app.buttons["controller.deckOnly"]
+        XCTAssertTrue(deckOnly.waitForExistence(timeout: 3), "Full screen offers one size bigger")
+        deckOnly.tap()
+        let shrink = app.buttons["controller.shrink"]
+        XCTAssertTrue(shrink.waitForExistence(timeout: 3))
+        XCTAssertFalse(app.buttons["controller.exitFullscreen"].exists, "Deck only has no side panel")
+        let computer = app.buttons["controller.chooseComputer"].value as? String
+        let provider = app.buttons["controller.chooseProvider"].value as? String
+        let chat = app.staticTexts["controller.currentChat"]
+        let chatBefore = chat.label
+
+        for landscape in [true, false, true] {
+            XCUIDevice.shared.orientation = landscape ? .landscapeLeft : .portrait
+            waitForObservedOrientation(app, landscape: landscape)
+            XCTAssertTrue(shrink.waitForExistence(timeout: 3), "Rotation keeps deck only")
+            assertDeckOnlyGeometry(app)
+            XCTAssertEqual(app.buttons["controller.chooseComputer"].value as? String, computer)
+            XCTAssertEqual(app.buttons["controller.chooseProvider"].value as? String, provider)
+            XCTAssertTrue(app.buttons["controller.sendDraft"].isEnabled, "The display keeps the ready draft")
+            app.buttons["controller.reviewDraft"].tap()
+            XCTAssertTrue(app.navigationBars["Review draft"].waitForExistence(timeout: 3))
+            XCTAssertEqual(app.textFields["controller.draft"].value as? String, retained)
+            app.navigationBars["Review draft"].buttons["Done"].tap()
+            XCTAssertTrue(shrink.waitForExistence(timeout: 3))
+            saveFullscreenScreenshot("Deck only")
+        }
+
+        shrink.tap()
+        XCTAssertTrue(app.buttons["controller.exitFullscreen"].waitForExistence(timeout: 3), "Shrinking deck only steps to full screen")
+        deckOnly.tap()
+        XCTAssertTrue(shrink.waitForExistence(timeout: 3))
+
+        // Pinching in steps down a size at a time, and out steps back up.
+        app.pinch(withScale: 0.45, velocity: -1)
+        XCTAssertTrue(app.buttons["controller.exitFullscreen"].waitForExistence(timeout: 3), "Pinching in steps down to full screen")
+        app.pinch(withScale: 0.45, velocity: -1)
+        XCTAssertTrue(enter.waitForExistence(timeout: 3), "Pinching in again returns to the dashboard")
+        app.pinch(withScale: 2.2, velocity: 1)
+        XCTAssertTrue(app.buttons["controller.exitFullscreen"].waitForExistence(timeout: 3), "Pinching out enters full screen")
+        app.pinch(withScale: 2.2, velocity: 1)
+        XCTAssertTrue(shrink.waitForExistence(timeout: 3), "Pinching out again reaches deck only")
+        XCTAssertEqual(chat.label, chatBefore, "A pinch never presses a chat key")
+        XCTAssertFalse(app.navigationBars.firstMatch.exists, "A pinch opens no sheet")
+        XCTAssertFalse(app.alerts.firstMatch.exists)
+        app.buttons["controller.reviewDraft"].tap()
+        XCTAssertEqual(app.textFields["controller.draft"].value as? String, retained, "Changing size never clears or sends the draft")
+        app.navigationBars["Review draft"].buttons["Done"].tap()
+        shrink.tap()
+        app.buttons["controller.exitFullscreen"].tap()
+        XCTAssertTrue(enter.waitForExistence(timeout: 3))
+    }
+
+    @MainActor
+    private func assertDeckOnlyGeometry(_ app: XCUIApplication) {
+        let ids = ["controller.shrink", "controller.chooseComputer", "controller.chooseProvider", "controller.reviewDraft",
+                   "controller.sendDraft", "controller.actions", "controller.glasses", "controller.settings"]
+        for id in ids {
+            let control = app.buttons[id]
+            XCTAssertTrue(control.exists, "\(id) is on the display")
+            XCTAssertTrue(control.isHittable, "\(id) is reachable without scrolling")
+            XCTAssertGreaterThanOrEqual(control.frame.height, 40, "\(id) is a real touch target")
+            XCTAssertTrue(app.frame.insetBy(dx: -1, dy: -1).contains(control.frame), "\(id) stays on screen")
+        }
+        for id in ["Chat dial", "Artifact dial"] {
+            let dial = app.descendants(matching: .any).matching(identifier: id).firstMatch
+            XCTAssertTrue(dial.isHittable, "\(id) remains directly usable")
+            XCTAssertTrue(app.frame.insetBy(dx: -1, dy: -1).contains(dial.frame))
+        }
+    }
+
+    @MainActor
     private func waitForObservedOrientation(_ app: XCUIApplication, landscape: Bool) {
         // Check actual app bounds, not only the orientation requested from the
         // simulator: a rejected rotation must not count as portrait coverage.
