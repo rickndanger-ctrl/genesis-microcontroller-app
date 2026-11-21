@@ -199,6 +199,205 @@ final class ControllerUITests: XCTestCase {
     }
 
     @MainActor
+    func testFullscreenIPadThreadPane() throws {
+        guard UIDevice.current.userInterfaceIdiom == .pad else {
+            throw XCTSkip("The thread pane is part of the iPad landscape layout")
+        }
+        continueAfterFailure = false
+        let app = XCUIApplication()
+        app.launchArguments = ["--demo"]
+        XCUIDevice.shared.orientation = .landscapeLeft
+        app.launch()
+        XCTAssertTrue(app.buttons["controller.fullscreen"].waitForExistence(timeout: 8))
+        waitForObservedOrientation(app, landscape: true)
+        app.buttons["controller.fullscreen"].tap()
+        XCTAssertTrue(app.buttons["controller.exitFullscreen"].waitForExistence(timeout: 3))
+        func element(_ id: String) -> XCUIElement { app.descendants(matching: .any).matching(identifier: id).firstMatch }
+        // The hidden choice is remembered across launches; start from shown.
+        if app.buttons["thread.show"].exists { app.buttons["thread.show"].tap() }
+
+        let pane = element("thread.pane")
+        XCTAssertTrue(pane.waitForExistence(timeout: 3), "The thread pane is in the full-screen rail")
+        let first = element("thread.message.0")
+        XCTAssertTrue(first.waitForExistence(timeout: 3), "The open chat shows its first message")
+        XCTAssertTrue(first.isHittable, "The first message is on screen")
+        XCTAssertTrue(app.frame.contains(pane.frame), "The pane stays inside the window")
+        XCTAssertTrue(first.label.hasPrefix("You: "), "A message names who said it")
+        let before = first.label
+        assertFullscreenGeometry(app)
+        saveFullscreenScreenshot("Thread pane shown")
+
+        app.buttons["C2, OMAC workspace"].tap()
+        let changed = NSPredicate { _, _ in element("thread.message.0").label != before }
+        expectation(for: changed, evaluatedWith: nil)
+        waitForExpectations(timeout: 5)
+        XCTAssertTrue(app.buttons["thread.refresh"].isHittable)
+        app.buttons["thread.refresh"].tap()
+        XCTAssertTrue(element("thread.message.0").waitForExistence(timeout: 3), "Refresh keeps the shown messages")
+
+        XCTAssertTrue(app.buttons["thread.hide"].isHittable, "One toggle in the status strip hides the pane")
+        XCTAssertEqual(app.buttons["thread.hide"].label, "Hide thread")
+        app.buttons["thread.hide"].tap()
+        XCTAssertTrue(app.buttons["thread.show"].waitForExistence(timeout: 3))
+        XCTAssertEqual(app.buttons["thread.show"].label, "Show thread")
+        XCTAssertTrue(app.buttons["thread.show"].isHittable)
+        XCTAssertFalse(pane.exists, "A hidden thread leaves only its one-line button")
+        assertFullscreenGeometry(app)
+        saveFullscreenScreenshot("Thread pane hidden")
+
+        app.buttons["thread.show"].tap()
+        XCTAssertTrue(element("thread.pane").waitForExistence(timeout: 3))
+        XCTAssertTrue(element("thread.message.0").waitForExistence(timeout: 3))
+        assertFullscreenGeometry(app)
+
+        XCUIDevice.shared.orientation = .portrait
+        waitForObservedOrientation(app, landscape: false)
+        XCTAssertTrue(app.buttons["controller.exitFullscreen"].exists)
+        XCTAssertFalse(element("thread.pane").exists, "Portrait does not show the pane in this stage")
+        XCTAssertFalse(app.buttons["thread.hide"].exists || app.buttons["thread.show"].exists, "Portrait has no thread toggle")
+        assertFullscreenGeometry(app)
+
+        XCUIDevice.shared.orientation = .landscapeLeft
+        waitForObservedOrientation(app, landscape: true)
+        XCTAssertTrue(element("thread.pane").waitForExistence(timeout: 3), "The pane returns in landscape")
+        XCTAssertTrue(element("thread.message.0").waitForExistence(timeout: 3))
+        assertFullscreenGeometry(app)
+    }
+
+    @MainActor
+    func testThreadSheetOnPhoneAndPortrait() {
+        continueAfterFailure = false
+        let app = XCUIApplication()
+        app.launchArguments = ["--demo"]
+        XCUIDevice.shared.orientation = .portrait
+        app.launch()
+        XCTAssertTrue(app.buttons["controller.fullscreen"].waitForExistence(timeout: 8))
+        func element(_ id: String) -> XCUIElement { app.descendants(matching: .any).matching(identifier: id).firstMatch }
+        // A short thread, so its first message is not scrolled out of the sheet.
+        app.buttons["C2, OMAC workspace"].tap()
+        let current = NSPredicate(format: "value CONTAINS %@", "Current chat")
+        expectation(for: current, evaluatedWith: app.buttons["C2, OMAC workspace"])
+        waitForExpectations(timeout: 5)
+
+        func openAndCheck(_ where_: String) -> String {
+            let open = app.buttons["thread.open"]
+            XCTAssertTrue(open.waitForExistence(timeout: 3), "\(where_) offers the thread")
+            XCTAssertTrue(open.isHittable)
+            open.tap()
+            let first = element("thread.message.0")
+            XCTAssertTrue(first.waitForExistence(timeout: 3), "\(where_): the sheet shows the first message")
+            XCTAssertTrue(first.isHittable, "\(where_): the first message is on screen")
+            XCTAssertTrue(element("thread.pane").exists)
+            XCTAssertTrue(app.textFields["controller.draft"].exists, "\(where_): the draft field is in the sheet")
+            XCTAssertTrue(app.buttons["controller.sendDraft"].exists, "\(where_): Send is in the sheet")
+            saveFullscreenScreenshot("Thread sheet, \(where_)")
+            let label = first.label
+            app.buttons["Done"].tap()
+            let gone = NSPredicate { _, _ in !element("thread.pane").exists }
+            expectation(for: gone, evaluatedWith: nil)
+            waitForExpectations(timeout: 5)
+            return label
+        }
+        let fromDashboard = openAndCheck("Dashboard")
+
+        app.buttons["controller.fullscreen"].tap()
+        XCTAssertTrue(app.buttons["controller.exitFullscreen"].waitForExistence(timeout: 3))
+        XCTAssertEqual(openAndCheck("Full screen"), fromDashboard)
+
+        app.buttons["C1, Controller app"].tap()
+        expectation(for: current, evaluatedWith: app.buttons["C1, Controller app"])
+        waitForExpectations(timeout: 5)
+        app.buttons["thread.open"].tap()
+        let first = element("thread.message.0")
+        XCTAssertTrue(first.waitForExistence(timeout: 3))
+        XCTAssertNotEqual(first.label, fromDashboard, "Another chat shows its own thread")
+        app.buttons["Done"].tap()
+    }
+
+    @MainActor
+    func testDeckOnlyThread() throws {
+        guard UIDevice.current.userInterfaceIdiom == .pad else {
+            throw XCTSkip("Deck only is an iPad size")
+        }
+        continueAfterFailure = false
+        let app = XCUIApplication()
+        app.launchArguments = ["--demo"]
+        XCUIDevice.shared.orientation = .landscapeLeft
+        app.launch()
+        XCTAssertTrue(app.buttons["controller.fullscreen"].waitForExistence(timeout: 8))
+        waitForObservedOrientation(app, landscape: true)
+        app.buttons["controller.fullscreen"].tap()
+        XCTAssertTrue(app.buttons["controller.deckOnly"].waitForExistence(timeout: 3))
+        app.buttons["controller.deckOnly"].tap()
+        XCTAssertTrue(app.buttons["controller.shrink"].waitForExistence(timeout: 3))
+        func element(_ id: String) -> XCUIElement { app.descendants(matching: .any).matching(identifier: id).firstMatch }
+        let tracked = ["controller.reviewDraft", "controller.sendDraft", "controller.settings", "controller.actions", "controller.chooseComputer"]
+        func frames() -> [String: CGRect] { Dictionary(uniqueKeysWithValues: tracked.map { ($0, app.buttons[$0].frame) }) }
+        // The hidden choice is remembered across launches; start from hidden.
+        if app.buttons["thread.hide"].exists { app.buttons["thread.hide"].tap() }
+        XCTAssertTrue(app.buttons["thread.show"].waitForExistence(timeout: 3))
+
+        for landscape in [true, false] {
+            XCUIDevice.shared.orientation = landscape ? .landscapeLeft : .portrait
+            waitForObservedOrientation(app, landscape: landscape)
+            XCTAssertTrue(app.buttons["thread.show"].waitForExistence(timeout: 3))
+            XCTAssertFalse(element("thread.pane").exists, "A hidden thread is not drawn")
+            assertDeckOnlyGeometry(app)
+            let today = frames()
+            let keyBefore = app.buttons["C1, Controller app"].frame.height
+
+            app.buttons["thread.show"].tap()
+            let pane = element("thread.pane")
+            XCTAssertTrue(pane.waitForExistence(timeout: 3), "The display shows the thread")
+            // A short thread, so its first message is not scrolled up out of the small pane.
+            app.buttons["C2, OMAC workspace"].tap()
+            let first = element("thread.message.0")
+            XCTAssertTrue(first.waitForExistence(timeout: 3))
+            XCTAssertTrue(first.isHittable, "The first message is on screen")
+            XCTAssertTrue(first.label.hasPrefix("You: "))
+            XCTAssertTrue(app.frame.insetBy(dx: -1, dy: -1).contains(pane.frame), "The thread stays in the window")
+            XCTAssertTrue(app.buttons["thread.hide"].isHittable)
+            XCTAssertTrue(app.buttons["thread.refresh"].isHittable)
+            assertDeckOnlyGeometry(app)
+            for key in ["C1, Controller app", "C2, OMAC workspace", "C6, Ideas & experiments"] {
+                XCTAssertGreaterThanOrEqual(app.buttons[key].frame.height, 44, "\(key) stays a real key with the thread shown")
+            }
+            if !landscape { XCTAssertLessThan(app.buttons["C1, Controller app"].frame.height, keyBefore, "The taller display takes height from the keys") }
+            saveFullscreenScreenshot("Deck only with thread")
+
+            let label = first.label
+            app.buttons["C1, Controller app"].tap()
+            let changed = NSPredicate { _, _ in element("thread.message.0").label != label }
+            expectation(for: changed, evaluatedWith: nil)
+            waitForExpectations(timeout: 5)
+
+            app.buttons["thread.hide"].tap()
+            XCTAssertTrue(app.buttons["thread.show"].waitForExistence(timeout: 3))
+            XCTAssertFalse(element("thread.pane").exists)
+            let after = frames()
+            for id in tracked {
+                XCTAssertEqual(after[id]!.minX, today[id]!.minX, accuracy: 1, "\(id) returns to its place")
+                XCTAssertEqual(after[id]!.minY, today[id]!.minY, accuracy: 1, "\(id) returns to its place")
+                XCTAssertEqual(after[id]!.height, today[id]!.height, accuracy: 1, "\(id) returns to its size")
+            }
+            XCTAssertEqual(app.buttons["C1, Controller app"].frame.height, keyBefore, accuracy: 1)
+        }
+
+        // Shown, the choice carries to full screen and back.
+        app.buttons["thread.show"].tap()
+        XCTAssertTrue(element("thread.pane").waitForExistence(timeout: 3))
+        XCUIDevice.shared.orientation = .landscapeLeft
+        waitForObservedOrientation(app, landscape: true)
+        app.buttons["controller.shrink"].tap()
+        XCTAssertTrue(app.buttons["controller.exitFullscreen"].waitForExistence(timeout: 3))
+        XCTAssertTrue(element("thread.message.0").waitForExistence(timeout: 3), "Full screen shows the same choice")
+        XCTAssertTrue(app.buttons["thread.hide"].exists)
+        app.buttons["controller.deckOnly"].tap()
+        XCTAssertTrue(element("thread.message.0").waitForExistence(timeout: 3), "Deck only shows it again after a size change")
+        app.buttons["thread.hide"].tap()
+    }
+
+    @MainActor
     func testDeckOnlySizeStepsRotatesAndPinches() throws {
         guard UIDevice.current.userInterfaceIdiom == .pad else {
             throw XCTSkip("Deck only is an iPad size")
@@ -278,6 +477,11 @@ final class ControllerUITests: XCTestCase {
             XCTAssertGreaterThanOrEqual(control.frame.height, 40, "\(id) is a real touch target")
             XCTAssertTrue(app.frame.insetBy(dx: -1, dy: -1).contains(control.frame), "\(id) stays on screen")
         }
+        for id in ["controller.chooseComputer", "controller.chooseProvider"] {
+            XCTAssertGreaterThanOrEqual(app.buttons[id].frame.height, 44, "\(id) is a full-size touch target")
+        }
+        let refresh = app.buttons["thread.refresh"]
+        if refresh.exists { XCTAssertGreaterThanOrEqual(refresh.frame.height, 44); XCTAssertGreaterThanOrEqual(refresh.frame.width, 44) }
         for id in ["Chat dial", "Artifact dial"] {
             let dial = app.descendants(matching: .any).matching(identifier: id).firstMatch
             XCTAssertTrue(dial.isHittable, "\(id) remains directly usable")
@@ -1002,6 +1206,10 @@ final class ControllerUITests: XCTestCase {
         app.buttons["Settings and Mac pairing"].tap()
         app.buttons["Scan pairing code"].tap()
         XCTAssertTrue(app.navigationBars["Scan pairing code"].waitForExistence(timeout: 5))
+        // With the camera denied, the scanner explains and offers Settings (if this simulator has it allowed, there is nothing to check).
+        if app.staticTexts["Camera access is off. Allow it in Settings to scan, or paste the pairing link in this app’s settings."].waitForExistence(timeout: 3) {
+            XCTAssertTrue(app.buttons["scanner.openSettings"].exists, "A denied camera offers Open Settings")
+        }
         app.buttons["Cancel"].tap()
         if app.buttons["Cancel"].exists { app.buttons["Cancel"].tap() }
         XCTAssertTrue(app.navigationBars["Your controller"].waitForExistence(timeout: 3))

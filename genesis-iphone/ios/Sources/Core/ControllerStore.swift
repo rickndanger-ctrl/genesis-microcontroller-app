@@ -13,7 +13,9 @@ final class ControllerStore: ObservableObject {
     @Published private(set) var leftOutChatTitles: [String] = []
     var leftOutChatsNotice: String? { CompanionSupport.leftOutNotice(titles: leftOutChatTitles, app: selectedProvider.name) }
     @Published private(set) var profile: RemoteProfile
-    @Published private(set) var selectedChat: ChatRecord?
+    @Published private(set) var selectedChat: ChatRecord? { didSet { if oldValue?.id != selectedChat?.id { threadSelectionChanged() } } }
+    /// The open chat's conversation, shown only while a pane asks for it. Held in memory, never saved or logged.
+    @Published private(set) var thread: ThreadState = .idle
     @Published var draft = "" { didSet { persistDraft(); publishGlassesDraft() } }
     @Published private(set) var artifacts: [ArtifactRecord] = []
     @Published private(set) var connectionMessage = "Pair your Mac to connect"
@@ -54,6 +56,14 @@ final class ControllerStore: ObservableObject {
     private var dictationIntent = 0
     private var captureRoute: DraftRoute?
     private var foreground = false
+    /// The panes showing the thread right now; it is read from the Mac only while there is one.
+    private var threadOwners = Set<UUID>()
+    private var threadVisible: Bool { !threadOwners.isEmpty }
+    /// The Sends this app is waiting on right now, each from its start until its own receipt is handled.
+    @Published private var sendingCommandIDs = Set<String>()
+    private var threadInFlight: String?
+    /// Macs whose companion answered the thread route with 404 this session; not asked again until Refresh or a Mac change.
+    private var threadNotOnCompanion = Set<String>()
     private var glassesConfirmedChatID: String?
     private var importingProvisioning = false
     private var provisioningTask: Task<Void, Never>?
@@ -164,6 +174,9 @@ final class ControllerStore: ObservableObject {
             guard status != nil, let info = providerInfo else {
                 return .init(title: "Can’t reach \(mac)", message: "\(name) needs the Mac. Check that it is awake and on the same Wi-Fi, or that Tailscale is connected, then try again.", step: .refresh, stepLabel: "Refresh")
             }
+            if !info.installed {
+                return .init(title: "\(app) isn’t installed on \(mac)", message: "Install \(app) on \(mac) to use \(name).")
+            }
             switch info.readiness {
             case "locked":
                 return .init(title: "\(mac) is locked", message: "Unlock the Mac to use \(name).")
@@ -203,7 +216,10 @@ final class ControllerStore: ObservableObject {
             return .init(title: "Choose a chat first", message: "\(name) works on the chat you have open. Tap one of your chat keys, then try again.")
         }
         if id == "sendPrompt" {
-            if hasUnresolvedSend {
+            if hasSendInFlight {
+                return .init(title: "One moment", message: "Another action is still finishing. Try again in a second.")
+            }
+            if hasUnconfirmedSend {
                 return .init(title: "Check the last Send first", message: "The Mac never confirmed your previous Send to this chat. Look at it before sending again, so nothing goes twice.", step: .reviewSend, stepLabel: "Review it")
             }
             if draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
@@ -238,7 +254,7 @@ final class ControllerStore: ObservableObject {
         guard let action = action(id), providerInfo?.supportsControllerAction(action) == true else { return "This action is not available for this connection." }
         if isBusy { return "Another action is finishing." }
         if needsChat(action) && selectedChat == nil { return "Choose a chat first." }
-        if id == "sendPrompt", !canSend { return hasUnresolvedSend ? "Check the previous Send receipt first." : "Finish and review a draft first." }
+        if id == "sendPrompt", !canSend { return hasUnconfirmedSend ? "Check the previous Send receipt first." : hasSendInFlight ? "Another action is finishing." : "Finish and review a draft first." }
         if id == "dictate", !canDictate { return dictationControl.explanation ?? "Finish the current recording first." }
         if ["previousControllerChat", "nextControllerChat"].contains(id), historyDestination(id) == nil { return "No \(id == "previousControllerChat" ? "earlier" : "later") chat opened from this controller." }
         return nil
@@ -323,7 +339,21 @@ final class ControllerStore: ObservableObject {
         !isBusy && !isRecording && !isFinalizing && providerInfo?.supports("sendPrompt") == true &&
         currentRoute.map { settings.ledger.pendingSends[$0.storageKey] == nil } == true
     }
+    /// A Send this app is still waiting on works like any busy chat. Once it
+    /// is no longer being waited on (it failed, timed out, or was left from an
+    /// earlier launch) and still has no confirmed result, it needs you.
+    private func sendActivity(_ pending: PendingSend) -> ChatActivity { sendingCommandIDs.contains(pending.commandID) ? .thinking : .error }
     var hasUnresolvedSend: Bool { currentRoute.map { settings.ledger.pendingSends[$0.storageKey] != nil } ?? false }
+    /// A Send whose result is unknown and is no longer on its way: the one to warn about.
+    var hasUnconfirmedSend: Bool {
+        guard let route = currentRoute, let pending = settings.ledger.pendingSends[route.storageKey] else { return false }
+        return !sendingCommandIDs.contains(pending.commandID)
+    }
+    /// This chat's Send is still on its way; a second one waits.
+    var hasSendInFlight: Bool {
+        guard let route = currentRoute, let pending = settings.ledger.pendingSends[route.storageKey] else { return false }
+        return sendingCommandIDs.contains(pending.commandID)
+    }
     /// What the chat on a key is doing. Nil when the key holds no chat, or a
     /// chat the Mac did not list this time: its light stays off, not white.
     func activity(slot index: Int) -> ChatActivity? {
@@ -331,13 +361,13 @@ final class ControllerStore: ObservableObject {
         // A Send whose result is unknown needs you whatever the Mac reports.
         // That is known on this device, so it shows even while offline.
         let route = DraftRoute(hostID: selectedHost?.hostID ?? selectedHostID, provider: selectedProvider.rawValue, chatID: slot.targetID)
-        if settings.ledger.pendingSends[route.storageKey] != nil { return .error }
+        if let pending = settings.ledger.pendingSends[route.storageKey] { return sendActivity(pending) }
         guard lightsAreLive else { return nil }
         return chats.first { $0.id == slot.targetID }?.activity
     }
     /// What the open chat is doing.
     var selectedActivity: ChatActivity? {
-        if hasUnresolvedSend { return .error }
+        if let route = currentRoute, let pending = settings.ledger.pendingSends[route.storageKey] { return sendActivity(pending) }
         guard lightsAreLive, let chat = selectedChat else { return nil }
         // Only what the Mac just listed. A chat that has left the list has no
         // light; its last known state would otherwise pulse on forever.
@@ -360,6 +390,70 @@ final class ControllerStore: ObservableObject {
         // A failure here is left to the next status poll, which reports a lost connection.
         try? await refreshChats(host: host, token: token, provider: provider, generation: generation, enabled: true)
     }
+    // MARK: Thread
+
+    /// A pane that shows the open chat's conversation tells the store while it is on screen.
+    func setThreadVisible(_ visible: Bool, owner: UUID) {
+        let before = threadVisible
+        if visible { threadOwners.insert(owner) } else { threadOwners.remove(owner) }
+        guard before != threadVisible else { return }
+        if threadVisible { threadSelectionChanged() } else { thread = .idle; threadInFlight = nil }
+    }
+
+    private func threadSelectionChanged() {
+        thread = .idle
+        guard threadVisible else { return }
+        if isDemo { thread = Self.demoThread(for: selectedChat) } else { Task { await refreshThread() } }
+    }
+
+    /// Reads the open chat from the Mac. A background re-poll never shows a spinner or
+    /// replaces shown messages with anything but newer ones; a tap on Refresh may show an error.
+    func refreshThread(userInitiated: Bool = false) async {
+        guard threadVisible else { return }
+        if isDemo { thread = Self.demoThread(for: selectedChat); return }
+        guard let chat = selectedChat, let route = currentRoute else { return }
+        if userInitiated { threadNotOnCompanion.remove(selectedHostID) }
+        else if threadNotOnCompanion.contains(selectedHostID) { thread = .needsUpdate; return }
+        let key = route.storageKey, provider = selectedProvider
+        guard userInitiated || threadInFlight != key else { return }
+        threadInFlight = key
+        defer { if threadInFlight == key { threadInFlight = nil } }
+        switch thread {
+        case .idle: thread = .loading
+        case .loaded, .loading: break
+        default: if userInitiated { thread = .loading }
+        }
+        do {
+            let (host, token) = try connection()
+            let reply = try await client.fetch(ThreadResponse.self, host: host, token: token, path: "/v1/thread",
+                query: [URLQueryItem(name: "provider", value: provider.rawValue), URLQueryItem(name: "chatID", value: chat.id)])
+            guard threadVisible, currentRoute?.storageKey == key else { return }
+            guard reply.provider == provider.rawValue, reply.chatID == chat.id else {
+                thread = .failed(RemoteError.invalidResponse.localizedDescription); return
+            }
+            let next: ThreadState
+            if reply.status == "ok" { next = .loaded(reply.turns ?? [], truncated: reply.truncated == true) }
+            else {
+                let note = reply.message?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+                next = .unavailable(note.isEmpty ? "This conversation can’t be shown right now." : note)
+            }
+            if thread != next { thread = next }
+        } catch {
+            guard threadVisible, currentRoute?.storageKey == key, !Task.isCancelled, (error as? URLError)?.code != .cancelled else { return }
+            if case RemoteError.server(404, _) = error { threadNotOnCompanion.insert(selectedHostID); thread = .needsUpdate; return }
+            if case .loaded = thread, !userInitiated { return }
+            thread = .failed(threadFailureText(error))
+        }
+    }
+
+    private func threadFailureText(_ error: Error) -> String {
+        if case let RemoteError.server(code, _) = error, code != 401 {
+            return code == 502 ? "Could not reach the Mac companion. Open Agent Micro Controller on the selected Mac, then tap Refresh."
+                : "The Mac couldn’t send this thread. Try Refresh in a moment."
+        }
+        return ConnectionHelp.describe(error, mac: selectedHost?.name)
+    }
+
     private var scope: String { "\(selectedHost?.hostID ?? selectedHostID).\(selectedProvider.rawValue)" }
     private var currentRoute: DraftRoute? {
         guard let chat = selectedChat else { return nil }
@@ -397,10 +491,12 @@ final class ControllerStore: ObservableObject {
         dictationIntent &+= 1; speech.cancel(); captureRoute = nil
         gate.advance(); status = nil; chats = []; leftOutChatTitles = []; artifacts = []; lastReceipt = nil; lastError = nil; requestedPanel = nil
         isBusy = false; isRefreshingChats = false; sendReady = false
+        threadSelectionChanged()
         navigation = .inactive; navigationGeneration = nil
     }
     func selectHost(_ id: String) {
         guard id != selectedHostID, hosts.contains(where: { $0.id == id }) else { return }
+        threadNotOnCompanion.removeAll()
         persistDraft(); invalidateSelection(); selectedHostID = id; restoreSelection(); persist()
         if isDemo { loadDemo() } else { connectionMessage = isPaired ? "Connecting…" : "Pair this Mac"; Task { await refresh() } }
     }
@@ -468,6 +564,7 @@ final class ControllerStore: ObservableObject {
             await provision?.value
             guard !Task.isCancelled else { return }
             await self?.refresh()
+            await self?.refreshThread()
             var tick = 0
             while !Task.isCancelled {
                 try? await Task.sleep(nanoseconds: 2_000_000_000)
@@ -475,6 +572,7 @@ final class ControllerStore: ObservableObject {
                 tick += 1
                 if tick % 5 == 0 { await self.refresh() }
                 else { await self.refreshStatus(); if tick % 2 == 0 { await self.refreshLights() } }
+                if tick % 2 == 0 { Task { await self.refreshThread() } }
             }
         }
     }
@@ -489,6 +587,8 @@ final class ControllerStore: ObservableObject {
     }
     private func applyStatus(_ status: HostStatus) {
         self.status = status
+        // A thread still waiting on the Mac's first answer need not wait for the next thread poll.
+        if case .idle = thread, threadVisible { Task { await refreshThread() } }
         let provider = status.providers.first { $0.id == selectedProvider.rawValue }
         switch provider?.readiness {
         case "ready": connectionMessage = "Connected · \(selectedHost?.name ?? status.hostName)"
@@ -722,7 +822,7 @@ final class ControllerStore: ObservableObject {
     @discardableResult func runAction(_ id: String) async -> Bool {
         guard let action = action(id), canRunAction(id) else {
             let message = actionUnavailableReason(id) ?? "This action is not available."
-            if id == "sendPrompt", let route = currentRoute, let pending = settings.ledger.pendingSends[route.storageKey] { errorCommandID = pending.commandID }
+            if id == "sendPrompt", hasUnconfirmedSend, let route = currentRoute, let pending = settings.ledger.pendingSends[route.storageKey] { errorCommandID = pending.commandID }
             _ = message
             hint = hint(forAction: id)
             return false
@@ -963,7 +1063,7 @@ final class ControllerStore: ObservableObject {
     func sendDraft(replacingMacDraft: Bool = false) async {
         macDraftBlocksSend = false
         guard canSend, let route = currentRoute, let chat = selectedChat else {
-            if let route = currentRoute, let pending = settings.ledger.pendingSends[route.storageKey] {
+            if hasUnconfirmedSend, let route = currentRoute, let pending = settings.ledger.pendingSends[route.storageKey] {
                 commandError(RemoteError.unresolvedSend.localizedDescription, id: pending.commandID)
             }
             return
@@ -980,6 +1080,8 @@ final class ControllerStore: ObservableObject {
             guard persist() else { settings.ledger.pendingSends.removeValue(forKey: route.storageKey); return }
         }
         catch { lastError = ConnectionHelp.describe(error, mac: selectedHost?.name); return }
+        sendingCommandIDs.insert(id)
+        defer { sendingCommandIDs.remove(id) }
         let receipt = await execute(action: "sendPrompt", chatID: chat.id, text: text, id: id, replaceDraft: replacingMacDraft)
         guard let receipt else { return }
         finishSend(receipt, pending: pending)
@@ -1011,6 +1113,8 @@ final class ControllerStore: ObservableObject {
     func recoverPendingSend() async {
         guard !isDemo, !isBusy, let route = currentRoute,
               let pending = settings.ledger.pendingSends[route.storageKey],
+              // Its own request is still out; asking the Mac now could report it missing.
+              !sendingCommandIDs.contains(pending.commandID),
               recoveringCommands.insert(pending.commandID).inserted else { return }
         defer { recoveringCommands.remove(pending.commandID) }
         let generation = gate.generation, sequence = commandSequence
@@ -1052,7 +1156,8 @@ final class ControllerStore: ObservableObject {
         }
     }
     func acknowledgeUncertainSend(wasSent: Bool) {
-        guard let route = currentRoute, let pending = settings.ledger.pendingSends[route.storageKey] else { return }
+        guard let route = currentRoute, let pending = settings.ledger.pendingSends[route.storageKey],
+              !sendingCommandIDs.contains(pending.commandID) else { return }
         let receipt = CommandReceipt(id: pending.commandID, status: wasSent ? "confirmed" : "failed",
             message: wasSent ? "You confirmed this prompt arrived." : "You confirmed this prompt did not arrive. It has not been resent.")
         finishSend(receipt, pending: pending); lastReceipt = receipt
@@ -1193,6 +1298,22 @@ final class ControllerStore: ObservableObject {
         if selectedChat == nil { selectedChat = chats[0]; settings.selectedChats[scope] = chats[0]; selectedSlotIndex = 0 }
         connectionMessage = "Interactive preview · no Mac connected"
         loadDemoArtifacts()
+        threadSelectionChanged()
+    }
+
+    private static func demoThread(for chat: ChatRecord?) -> ThreadState {
+        guard let chat, let index = chat.id.split(separator: "-").last.flatMap({ Int($0) }) else { return .idle }
+        func u(_ t: String) -> ThreadTurn { .init(role: "user", text: t) }
+        func a(_ t: String) -> ThreadTurn { .init(role: "assistant", text: t) }
+        let samples: [[ThreadTurn]] = [
+            [u("Can you check why the volume dial feels slow?"), a("It reads the turn every frame. I smoothed it to every other frame and the dial now follows your finger."), u("Nice. Add a test for it."), a("Added a test that spins the dial and checks the value. It passes.")],
+            [u("Summarize what changed in the workspace today."), a("Three files changed: the settings panel, its tests, and the build notes. Nothing is waiting on you.")],
+            [u("Try a calmer color for the idle keys."), a("I tried a soft slate. It reads well beside the lit keys."), u("Keep it.")],
+            [u("What is left on this week’s list?"), a("Two items: write the release notes and check the tablet layout."), u("Do the notes first."), a("Done. The notes are in the build folder.")],
+            [u("Collect the build notes into one page."), a("I gathered them into a single page, newest first. The older ones are on your Mac.")],
+            [u("Give me three ideas for the next experiment."), a("A quieter startup sound, a larger Talk key, and a night theme."), u("Start with the night theme.")]
+        ]
+        return .loaded(samples[index % samples.count], truncated: index == 3)
     }
 
     private func loadDemoArtifacts() {

@@ -173,7 +173,11 @@ struct SetupView: View {
         .onDisappear { state.stop() }
         .onChange(of: allDone) { _, done in if done { SetupState.finished = true } }
         // A code lasts ten minutes; replace it a little before that while the window is open.
-        .task { while !Task.isCancelled { bridge.refreshPairingCode(); try? await Task.sleep(nanoseconds: 540_000_000_000) } }
+        // Closing the window cancels this task, which retires every live code.
+        .task {
+            bridge.pairingWindowOpened(); defer { bridge.pairingWindowClosed() }
+            while !Task.isCancelled { try? await Task.sleep(nanoseconds: 540_000_000_000); if !Task.isCancelled { bridge.refreshPairingCode() } }
+        }
     }
 
     private func step<Content: View>(_ number: Int, _ title: String, done: Bool, enabled: Bool = true,
@@ -219,6 +223,10 @@ struct SetupView: View {
 
     @ViewBuilder private var agentsStep: some View {
         Text(anyAgent ? "Found on this Mac. Keep the ones you use open." : "Install at least one of these.").font(.callout).foregroundStyle(anyAgent ? .secondary : .primary)
+        // Only while Muse is missing: it is the one agent with no download button.
+        if state.agents.contains(where: { $0.agent.id == "muse" && !$0.installed }) {
+            Text(SetupPlan.museNote).font(.caption).foregroundStyle(.secondary)
+        }
         ForEach(state.agents, id: \.agent.id) { row in
             HStack(spacing: 10) {
                 Image(systemName: row.installed ? (row.running ? "checkmark.circle.fill" : "circle.dashed") : "xmark.circle")
@@ -242,7 +250,7 @@ struct SetupView: View {
                     .padding(10).background(.white).clipShape(RoundedRectangle(cornerRadius: 12))
                 VStack(alignment: .leading, spacing: 10) {
                     Text("Point your iPhone’s camera at the code, then tap the link.").font(.callout.weight(.medium))
-                    Text("Or open Agent Micro Controller, tap Pair a Mac, then Scan pairing code. Your phone needs to be on the same Wi-Fi as this Mac.").font(.callout).foregroundStyle(.secondary)
+                    Text("Or open Agent Micro Controller on your phone and tap Scan the code. Your phone needs to be on the same Wi-Fi as this Mac.").font(.callout).foregroundStyle(.secondary)
                     Link("Get the iPhone and iPad app", destination: URL(string: "https://apps.apple.com/app/id6835749940")!).font(.callout)
                     Text("The code works once and for ten minutes. Show it only to your own devices.").font(.caption).foregroundStyle(.secondary)
                     if let device = bridge.devices.max(by: { $0.pairedAt < $1.pairedAt }) {
@@ -267,7 +275,7 @@ struct SetupView: View {
             Text("Pairing over Wi-Fi is off.").font(.callout)
             Button("Turn on Wi-Fi pairing") { bridge.setWiFi(true) }.controlSize(.large)
         case .needsNewerMacOS:
-            Text("Pairing over Wi-Fi needs macOS 15 or later. Update macOS, or use Tailscale on this Mac and your phone.").font(.callout)
+            Text(SetupPlan.wifiNeedsNewerMacOS).font(.callout)
             HStack {
                 Button("Software Update") { NSWorkspace.shared.open(URL(string: "x-apple.systempreferences:com.apple.Software-Update-Settings.extension")!) }
                 Button("Tailscale settings…") { openWindow(id: "phone-pairing"); NSApp.activate() }

@@ -1,6 +1,17 @@
 import Foundation
 import CoreGraphics
 
+/// What the outline diagnostic may say about a control's label.
+enum OutlineLabel {
+    /// Roles whose labels are chat titles, conversation headings or page titles.
+    static let structural: Set<String> = ["AXWindow", "AXSheet", "AXLink", "AXHeading", "AXWebArea"]
+    static func shown(role: String, subrole: String, name: String) -> String {
+        if name.isEmpty { return "(no label)" }
+        if structural.contains(role) || subrole.hasPrefix("AXLandmark") || name.count > 44 { return "(label of \(name.count) characters)" }
+        return name
+    }
+}
+
 /// The rules for reading Muse's chat panel and for judging a draft, kept free
 /// of accessibility calls so they can be tested without the app.
 ///

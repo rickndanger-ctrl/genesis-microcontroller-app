@@ -25,18 +25,21 @@ enum CodexInventoryError: LocalizedError {
 enum CodexReadOnly {
     static func chats(maximum: Int = 500) async throws -> [CodexSavedChat] {
         let task = Task.detached(priority: .userInitiated) {
-            let environment = ProcessInfo.processInfo.environment
-            let home: URL
-            if let path = environment["CODEX_HOME"], !path.isEmpty {
-                guard path.hasPrefix("/") else { throw CodexInventoryError.unavailable }
-                home = URL(fileURLWithPath: path, isDirectory: true)
-            } else {
-                home = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".codex", isDirectory: true)
-            }
-            let connection = try CodexMetadataSocket(path: home.appendingPathComponent("app-server-control/app-server-control.sock").path)
+            let connection = try CodexMetadataSocket(path: try socketPath())
             return try connection.list(maximum: maximum)
         }
         return try await withTaskCancellationHandler(operation: { try await task.value }, onCancel: { task.cancel() })
+    }
+    static func socketPath() throws -> String {
+        let environment = ProcessInfo.processInfo.environment
+        let home: URL
+        if let path = environment["CODEX_HOME"], !path.isEmpty {
+            guard path.hasPrefix("/") else { throw CodexInventoryError.unavailable }
+            home = URL(fileURLWithPath: path, isDirectory: true)
+        } else {
+            home = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".codex", isDirectory: true)
+        }
+        return home.appendingPathComponent("app-server-control/app-server-control.sock").path
     }
 }
 
@@ -160,12 +163,13 @@ enum CodexInventoryProtocol {
     }
 }
 
-private final class CodexMetadataSocket {
+final class CodexMetadataSocket {
     private var descriptor: Int32 = -1
-    private let deadline = ProcessInfo.processInfo.systemUptime + 8
+    private let deadline: Double
     private var buffered = Data()
     private var nextID = 1
-    init(path: String) throws {
+    init(path: String, timeout: Double = 8) throws {
+        deadline = ProcessInfo.processInfo.systemUptime + timeout
         let resolved = URL(fileURLWithPath: path).resolvingSymlinksInPath().path
         var info = stat()
         guard stat(resolved, &info) == 0, info.st_uid == geteuid(),
@@ -272,6 +276,16 @@ private final class CodexMetadataSocket {
             if let result = try CodexInventoryProtocol.result(message(), id: id) { return result }
         }
         throw CodexInventoryError.invalidResponse
+    }
+    /// One request on a session that has been initialized. Callers pass read-only methods only.
+    func call(_ method: String, _ params: [String: Any]) throws -> [String: Any] {
+        try Task.checkCancellation()
+        defer { nextID += 1 }
+        return try response(["id": nextID, "method": method, "params": params], id: nextID)
+    }
+    func initializeSession() throws {
+        _ = try response(CodexInventoryProtocol.initialize(id: nextID), id: nextID); nextID += 1
+        try send(["method": "initialized"])
     }
     func list(maximum: Int) throws -> [CodexSavedChat] {
         var pages = try CodexInventoryProtocol.Pages(maximum: maximum)

@@ -23,6 +23,8 @@ enum NoPairingCode: Equatable {
 /// The decisions behind the first-run setup window, kept free of AppKit so
 /// they can be tested.
 enum SetupPlan {
+    static let museNote = "Muse has no download link here. Install it the way you normally get Muse, and it will show up in this list."
+    static let wifiNeedsNewerMacOS = "Wi-Fi pairing needs macOS 15 or later. You can update macOS, or use Tailscale, a free app that links your own devices privately, on this Mac and your phone."
     static func installPlace(bundlePath: String, home: String) -> InstallPlace {
         let path = (bundlePath as NSString).standardizingPath
         if path.contains("/AppTranslocation/") { return .translocated }

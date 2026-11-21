@@ -26,7 +26,11 @@ struct ControllerScreen: View {
     private var fullScreenController: Bool { controllerSize != .dashboard }
     /// The window's size, for controls outside the layout functions.
     @State private var screenSize: CGSize = .zero
+    @AppStorage("threadPaneHidden") private var threadHidden = false
     @State private var showDraftReview = false
+    /// The thread as a sheet, wherever it is not already a pane beside or inside the deck.
+    @State private var showThread = false
+    @State private var threadDetent = PresentationDetent.large
     @FocusState private var draftFocused: Bool
     @State private var showGlassesControls = false
     @State private var chatDialRotation: Double
@@ -95,7 +99,7 @@ struct ControllerScreen: View {
             }
             .onChange(of: geometry.size, initial: true) { _, size in screenSize = size }
             // Keys and dials claim their touches, so the pinch is watched at the window.
-            .background(PinchCatcher(enabled: controllerInFront) { pinched($0, in: geometry.size) })
+            .background(PinchCatcher(enabled: controllerInFront && !heldTalk && !talkGestureActive && !store.isRecording && !store.isFinalizing) { pinched($0, in: geometry.size) })
             .scrollBounceBehavior(.basedOnSize)
             .background(GenesisBackdrop(color: slotColor, theme: theme))
             .foregroundStyle(GenesisPalette.text)
@@ -129,7 +133,10 @@ struct ControllerScreen: View {
         .sheet(isPresented: $showActions, onDismiss: routeRequestedPanel) { ActionBrowser(store:store) }
         .sheet(isPresented: $showNavigation) { MenuNavigationScreen(store:store) }
         .sheet(isPresented: $showDraftReview) { draftReview }
+        .sheet(isPresented: $showThread) { threadSheet }
         .sheet(isPresented: $showGlassesControls) { glassesControls }
+        // A pane or toggle takes the thread over in these layouts; a sheet left open would show it twice.
+        .onChange(of: threadInPlace) { _, inPlace in if inPlace { showThread = false } }
         .sheet(item: Binding(get: { quickMappingIndex.map { MappingSelection(id:$0) } }, set: { quickMappingIndex = $0?.id })) { selection in
             ActionBrowser(store:store,quickKey:selection.id)
         }
@@ -212,12 +219,31 @@ struct ControllerScreen: View {
 
     /// The deck alone needs an iPad window with room for full-size keys.
     private func deckOnlyFits(_ size: CGSize) -> Bool {
-        isPad && min(size.width, size.height) >= 500 && !dynamicTypeSize.isAccessibilitySize
+        guard isPad, min(size.width, size.height) >= 500, !dynamicTypeSize.isAccessibilitySize else { return false }
+        let plate = deckOnlyPlate(CGSize(width: size.width - 16, height: size.height - 16))
+        let keyW = (plate.w - (plate.beside ? plate.displayW + plate.gap : 0) - plate.gap * 3) / 4
+        let keyH = (plate.h - (plate.beside ? 0 : plate.stripH + plate.gap) - plate.gap * 3) / 4
+        return keyW >= 44 && keyH >= 44
+    }
+
+    /// Where the keys and the display land when the deck alone fills a frame of this size.
+    private func deckOnlyPlate(_ frame: CGSize) -> (w: CGFloat, h: CGFloat, gap: CGFloat, beside: Bool, displayW: CGFloat,
+                                                    compact: Bool, stripH: CGFloat, threadFits: Bool) {
+        let fw = max(0, frame.width), fh = max(0, frame.height)
+        let side = min(fw, fh), scale = isPad ? max(1, side / 430) : 1, gap = 8 * scale, pad = side * 0.030
+        let w = max(0, fw - (side * DeckArt.plateSide + pad) * 2)
+        let h = max(0, fh - (side * DeckArt.plateTop + pad) - (side * DeckArt.plateBottom + pad))
+        let beside = fw > fh
+        // Six or seven controls and two pickers share the strip's top row; narrower than that, the controls take their own row.
+        let compact = !beside && w < CGFloat(glassesFeature ? 5 : 4) * 48 + 432
+        let room = max(0, h - gap * 4 - 44 * 4)
+        return (w, h, gap, beside, beside ? min(420, max(250, w * 0.28)) : 0, compact,
+                min(230, max(compact ? 215 : 150, h * 0.17)), beside || room >= (compact ? 300 : 230))
     }
 
     /// No sheet or alert covers the controller.
     private var controllerInFront: Bool {
-        !showSettings && !showGuide && !showArtifacts && !showActions && !showNavigation && !showDraftReview && !showGlassesControls
+        !showSettings && !showGuide && !showArtifacts && !showActions && !showNavigation && !showDraftReview && !showThread && !showGlassesControls
             && quickMappingIndex == nil && mappingIndex == nil && dialArtifactPreview == nil && store.hint == nil && store.lastError == nil
     }
 
@@ -231,19 +257,60 @@ struct ControllerScreen: View {
         }
     }
 
+    private func isWideFullScreen(_ size: CGSize) -> Bool {
+        isPad && size.width >= 930 && size.width > size.height && !dynamicTypeSize.isAccessibilitySize
+    }
+    /// Full-screen landscape and deck only carry the thread themselves.
+    private var threadInPlace: Bool {
+        (controllerSize == .focused && isWideFullScreen(screenSize)) || (controllerSize == .deckOnly && deckOnlyFits(screenSize) && deckOnlyPlate(CGSize(width: screenSize.width - 16, height: screenSize.height - 16)).threadFits)
+    }
+
+    private var threadOpenButton: some View {
+        Button { ControllerSound.shared.keyClick(); threadDetent = .large; showThread = true } label: {
+            Image(systemName: "text.bubble").font(.system(size: 14, weight: .semibold))
+                .frame(width: isPad || fullScreenController ? 44 : 32, height: isPad || fullScreenController ? 44 : 30)
+        }
+        .accessibilityLabel("Open thread").accessibilityIdentifier("thread.open")
+    }
+
+    private var threadSheet: some View {
+        NavigationStack {
+            VStack(spacing: 12) {
+                ThreadPane(store: store, agentName: providerName, accent: slotColor)
+                    .frame(minHeight: 160, maxHeight: .infinity)
+                composer
+                sendDraftButton
+                if let error = store.lastError {
+                    Text(error).font(.callout).foregroundStyle(.red)
+                }
+            }
+            .padding()
+            .navigationTitle(store.selectedChat?.title ?? "Thread").navigationBarTitleDisplayMode(.inline)
+            .toolbar { ToolbarItem(placement: .confirmationAction) {
+                Button("Done") { ControllerSound.shared.keyClick(); showThread = false }
+            } }
+        }.presentationDetents([.medium, .large], selection: $threadDetent).presentationDragIndicator(.visible)
+    }
+
     @ViewBuilder private func focusedLayout(in size: CGSize) -> some View {
-        let wide = isPad && size.width >= 930 && size.width > size.height && !dynamicTypeSize.isAccessibilitySize
-        if wide {
-            let rail: CGFloat = 320
+        if isWideFullScreen(size) {
+            // The square deck leaves some width over; the thread may use it, so the deck never shrinks for it.
+            let deckSide = min(max(300, size.width - 372), max(300, size.height - 32))
+            let rail: CGFloat = threadHidden ? 320 : min(460, max(320, size.width - 52 - deckSide))
             HStack(alignment: .center, spacing: 20) {
                 deck(width: max(300, size.width - rail - 52), height: max(300, size.height - 32))
                 VStack(spacing: 14) {
                     focusedRoute
-                    focusedStatus
+                    focusedStatus(threadToggle: true)
                     recoveryButtons
+                    if !threadHidden {
+                        ThreadPane(store: store, agentName: providerName, accent: slotColor)
+                            .frame(minHeight: 120, maxHeight: .infinity)
+                    }
                     focusedDraft
                     focusedTools
-                }.frame(width: rail)
+                }
+                .frame(width: rail, height: threadHidden ? nil : max(300, size.height - 32))
             }
             .padding(16)
             .frame(maxWidth: .infinity, minHeight: size.height)
@@ -254,7 +321,7 @@ struct ControllerScreen: View {
             let chrome: CGFloat = isPad ? 330 : 300
             VStack(spacing: 10) {
                 focusedRoute
-                focusedStatus
+                focusedStatus()
                 recoveryButtons
                 deck(width: size.width - 16, height: max(300, size.height - chrome))
                 focusedDraft
@@ -337,7 +404,7 @@ struct ControllerScreen: View {
     }
 
     /// One strip for the selected chat and the link to its Mac.
-    private var focusedStatus: some View {
+    private func focusedStatus(threadToggle: Bool = false) -> some View {
         HStack(spacing: 10) {
             Circle().fill(slotColor).frame(width: 9, height: 9).shadow(color: slotColor, radius: 6)
             VStack(alignment: .leading, spacing: 2) {
@@ -352,6 +419,16 @@ struct ControllerScreen: View {
             }
             Spacer(minLength: 0)
             if store.isBusy { ProgressView().controlSize(.mini) }
+            if threadToggle {
+                Button { ControllerSound.shared.keyClick(); threadHidden.toggle() } label: {
+                    Image(systemName: threadHidden ? "text.bubble" : "text.bubble.fill").font(.system(size: 14, weight: .semibold)).frame(width: 44, height: 44)
+                }
+                .foregroundStyle(GenesisPalette.dim)
+                .accessibilityLabel(threadHidden ? "Show thread" : "Hide thread")
+                .accessibilityIdentifier(threadHidden ? "thread.show" : "thread.hide")
+            } else {
+                threadOpenButton.foregroundStyle(GenesisPalette.dim)
+            }
             Button { ControllerSound.shared.keyClick(); Task { await store.refresh() } } label: {
                 Image(systemName: "arrow.clockwise").font(.system(size: 14, weight: .semibold)).frame(width: 44, height: 44)
             }
@@ -383,7 +460,7 @@ struct ControllerScreen: View {
                 .accessibilityLabel("Review draft").accessibilityIdentifier("controller.reviewDraft")
                 sendDraftButton
             }
-            if store.hasUnresolvedSend {
+            if store.hasUnconfirmedSend {
                 Text("Delivery unconfirmed · Open Review draft to check")
                     .font(.caption).foregroundStyle(.orange)
             } else if let receipt = store.lastReceipt {
@@ -405,17 +482,27 @@ struct ControllerScreen: View {
 
     /// What the built-in display shows. `strip` is the short, wide display
     /// under the keys in portrait; otherwise it is the tall one beside them.
-    @ViewBuilder private func deckDisplay(wide strip: Bool) -> some View {
+    @ViewBuilder private func deckDisplay(wide strip: Bool, canThread: Bool = true, compact: Bool = false) -> some View {
         if strip {
             VStack(alignment: .leading, spacing: 10) {
-                HStack(spacing: 8) {
-                    displayChat(lines: 1).frame(maxWidth: .infinity, alignment: .leading)
-                    displayRoute
-                    displayRefresh
-                    displayTools(spread: false)
+                if compact {
+                    HStack(spacing: 8) {
+                        displayChat(lines: 1).frame(maxWidth: .infinity, alignment: .leading)
+                        displayRoute
+                        displayRefresh
+                    }
+                    displayTools(spread: true, canThread: canThread)
+                } else {
+                    HStack(spacing: 8) {
+                        displayChat(lines: 1).frame(maxWidth: .infinity, alignment: .leading)
+                        displayRoute
+                        displayRefresh
+                        displayTools(spread: false, canThread: canThread)
+                    }
                 }
+                if !threadHidden && canThread { displayThread }
                 HStack(alignment: .top, spacing: 12) {
-                    displayDraft(lines: 2)
+                    displayDraft(lines: 2, grow: threadHidden || !canThread)
                     sendDraftButton
                 }
             }
@@ -428,7 +515,11 @@ struct ControllerScreen: View {
                     displayRefresh
                 }
                 DisplayRule()
-                displayDraft(lines: 10)
+                if !threadHidden {
+                    displayThread
+                    DisplayRule()
+                }
+                displayDraft(lines: threadHidden ? 10 : 3, grow: threadHidden)
                 sendDraftButton.frame(maxWidth: .infinity)
                 DisplayRule()
                 displayTools(spread: true)
@@ -454,7 +545,7 @@ struct ControllerScreen: View {
         .font(.system(size: 14, weight: .semibold, design: .rounded))
         .foregroundStyle(DeckDisplayPanel<EmptyView>.text)
         .padding(.horizontal, 10)
-        .frame(maxWidth: .infinity, minHeight: 40)
+        .frame(maxWidth: .infinity, minHeight: 44)
         .background(Color.white.opacity(0.07), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
     }
 
@@ -489,7 +580,14 @@ struct ControllerScreen: View {
         .accessibilityLabel("Refresh connection and chats")
     }
 
-    private func displayDraft(lines: Int) -> some View {
+    /// The open chat's conversation, on the display's dark glass. It takes the height the other rows leave.
+    private var displayThread: some View {
+        ThreadPane(store: store, agentName: providerName, accent: slotColor,
+                   style: .dark(slotColor, text: DeckDisplayPanel<EmptyView>.text, dim: DeckDisplayPanel<EmptyView>.dim))
+            .frame(minHeight: 60, maxHeight: .infinity)
+    }
+
+    private func displayDraft(lines: Int, grow: Bool = true) -> some View {
         Button { ControllerSound.shared.keyClick(); showDraftReview = true } label: {
             VStack(alignment: .leading, spacing: 5) {
                 Text(store.isRecording ? "LISTENING…" : store.isFinalizing ? "FINISHING…" : "DRAFT")
@@ -503,26 +601,36 @@ struct ControllerScreen: View {
                     // A long dictation shows its end, where the words are arriving.
                     .opacity(dictatingDraft ? 0 : 1)
                     .overlay { if dictatingDraft { LiveDraft(text: store.draft, size: 16, color: DeckDisplayPanel<EmptyView>.text) } }
-                if store.hasUnresolvedSend {
+                if store.hasUnconfirmedSend {
                     Text("Delivery unconfirmed · Tap to check").font(.caption).foregroundStyle(.orange)
                 } else if let receipt = store.lastReceipt {
                     Text(receipt.message).font(.caption).foregroundStyle(DeckDisplayPanel<EmptyView>.dim).lineLimit(1)
                 }
             }
-            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+            .frame(maxWidth: .infinity, maxHeight: grow ? .infinity : nil, alignment: .topLeading)
+            .frame(minHeight: grow ? nil : 44, alignment: .topLeading)
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain).disabled(!canChangeLayout)
         .accessibilityLabel("Review draft").accessibilityIdentifier("controller.reviewDraft")
     }
 
-    private func displayTools(spread: Bool) -> some View {
+    private func displayTools(spread: Bool, canThread: Bool = true) -> some View {
         HStack(spacing: spread ? 0 : 4) {
             displayTool("arrow.down.right.and.arrow.up.left", label: "Smaller controller", id: "controller.shrink", spread: spread) { setSize(.focused) }
             displayTool("square.grid.2x2", label: "Actions", id: "controller.actions", spread: spread) { ControllerSound.shared.keyClick(); showActions = true }
             if glassesFeature {
                 DisplayGlassesButton(follow: store.glasses) { ControllerSound.shared.keyClick(); showGlassesControls = true }
                     .frame(maxWidth: spread ? .infinity : nil)
+            }
+            if canThread {
+                displayTool(threadHidden ? "text.bubble" : "text.bubble.fill", label: threadHidden ? "Show thread" : "Hide thread",
+                            id: threadHidden ? "thread.show" : "thread.hide", spread: spread) { ControllerSound.shared.keyClick(); threadHidden.toggle() }
+            } else {
+                // No room for the thread on the display at this window size: it opens as a sheet.
+                displayTool("text.bubble", label: "Open thread", id: "thread.open", spread: spread) {
+                    ControllerSound.shared.keyClick(); threadDetent = .large; showThread = true
+                }
             }
             displayTool("slider.horizontal.3", label: "Settings and Mac pairing", id: "controller.settings", spread: spread) { ControllerSound.shared.keyClick(); showSettings = true }
         }
@@ -730,7 +838,7 @@ struct ControllerScreen: View {
         dialSlot = nil; deferredTap = nil; artifactID = nil; heldTalk = false; talkGestureID = nil; blockedTalkReason = nil
         showArtifacts = false; mappingIndex = nil; resolvingSend = false
         showActions = false; showNavigation = false; quickMappingIndex = nil; store.requestedPanel = nil
-        showDraftReview = false; showGlassesControls = false
+        showDraftReview = false; showThread = false; showGlassesControls = false
     }
     private func routeRequestedPanel() {
         if store.requestedPanel == "artifacts" { showArtifacts = true }
@@ -836,6 +944,7 @@ struct ControllerScreen: View {
             Text(store.connectionMessage).font(.system(size: isPad ? 14 : 11, weight: .medium)).lineLimit(1)
             Spacer()
             if store.isBusy { ProgressView().controlSize(.mini) }
+            threadOpenButton
             Button { ControllerSound.shared.keyClick(); Task { await store.refresh() } } label: { Image(systemName: "arrow.clockwise").frame(width: isPad ? 44 : 32, height: isPad ? 44 : 30) }
                 .accessibilityLabel("Refresh connection and chats")
         }.foregroundStyle(GenesisPalette.dim).padding(.horizontal, 7)
@@ -947,7 +1056,11 @@ struct ControllerScreen: View {
         let plateW = max(0, fit.width - left * 2), plateH = max(0, fit.height - top - bottom)
         let beside = display && fit.width > fit.height
         let displayW = beside ? min(420, max(250, plateW * 0.28)) : 0
-        let displayH = display && !beside ? min(230, max(150, plateH * 0.17)) : 0
+        // The thread needs room: a taller strip, never so tall that a key drops under 44 points.
+        let strip = deckOnlyPlate(fit)
+        let threadH = min(460, max(strip.compact ? 330 : 260, plateH * 0.36)), roomH = max(0, plateH - gap * 4 - 44 * 4)
+        let stripThread = !threadHidden && strip.threadFits
+        let displayH = display && !beside ? (stripThread ? min(threadH, roomH) : strip.stripH) : 0
         let keyW = max(0, (plateW - (beside ? displayW + gap : 0) - gap * 3) / 4)
         let keyH = max(0, (plateH - (displayH > 0 ? displayH + gap : 0) - gap * 3) / 4)
         // The knob in use glows as hard as its key.
@@ -1001,7 +1114,7 @@ struct ControllerScreen: View {
                 }
                 if beside { DeckDisplayPanel(content: deckDisplay(wide: false), color: slotColor).frame(width: displayW, height: plateH) }
               }
-              if displayH > 0 { DeckDisplayPanel(content: deckDisplay(wide: true), color: slotColor).frame(width: plateW, height: displayH) }
+              if displayH > 0 { DeckDisplayPanel(content: deckDisplay(wide: true, canThread: strip.threadFits, compact: strip.compact), color: slotColor).frame(width: plateW, height: displayH) }
             }
             .padding(.top, top).padding(.bottom, bottom)
             .frame(width: fit.width, height: fit.height, alignment: .top)
@@ -1235,7 +1348,7 @@ struct ControllerScreen: View {
                 Text("Chat switching, available menu controls, and artifacts still work.")
                     .font(isPad ? .subheadline : .caption).foregroundStyle(.secondary)
             }
-            if store.hasUnresolvedSend {
+            if store.hasUnconfirmedSend {
                 Text("Delivery is unconfirmed. Your draft is saved and won’t be resent automatically.")
                     .font(isPad ? .subheadline : .caption).foregroundStyle(.orange)
                 HStack {

@@ -39,4 +39,6 @@ xcrun swiftc -parse-as-library "$ROOT/Sources/DeviceRegistry.swift" "$ROOT/tests
 "$ROOT/test-build/device-registry"
 xcrun swiftc -parse-as-library "$ROOT/Sources/WiFiIdentity.swift" "$ROOT/Sources/RemoteHTTP.swift" "$ROOT/Sources/RemoteProtocol.swift" "$ROOT/Sources/RemoteNavigationLease.swift" "$ROOT/Sources/DeviceRegistry.swift" "$ROOT/tests/WiFiPairingTests.swift" -framework SystemConfiguration -o "$ROOT/test-build/wifi-pairing"
 "$ROOT/test-build/wifi-pairing"
+xcrun swiftc -swift-version 5 -parse-as-library "$ROOT/Sources/ThreadReader.swift" "$ROOT/Sources/CodexReadOnly.swift" "$ROOT/tests/ThreadReaderTests.swift" -o "$ROOT/test-build/thread-reader"
+"$ROOT/test-build/thread-reader"
 sh "$ROOT/test-display-session.sh"

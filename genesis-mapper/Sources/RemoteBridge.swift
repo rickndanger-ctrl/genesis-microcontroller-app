@@ -209,11 +209,11 @@ import CoreImage.CIFilterBuiltins
                 }
                 let readiness=isLocked ? "locked":!AXIsProcessTrusted() ? "needsAccessibility":!running || covered ? "closed":"ready"
                 let reason=readiness=="ready" ? "Chats, Send, New side chat and Call are connected. Send briefly brings Muse to the front and uses the clipboard, which is restored afterwards. Chats that share a title are left out.":readiness=="locked" ? "Unlock this Mac to use Muse.":covered ? "Muse\u{2019}s window on this Mac is too narrow for the controller to reach its chats. Open Muse from here to widen it.":readiness=="closed" ? "Open Muse on this Mac.":"Enable Accessibility for Agent Micro Controller."
-                return RemoteProvider(id:provider,name:"Muse",installed:installed,readiness:readiness,capabilities:readiness=="ready" ? RemoteMuse.capabilities:readiness=="closed" && installed ? ["artifacts","launchApp"]:["artifacts"],reason:reason,actions:RemoteMuse.actions)
+                return RemoteProvider(id:provider,name:"Muse",installed:installed,readiness:readiness,capabilities:(readiness=="ready" ? RemoteMuse.capabilities:readiness=="closed" && installed ? ["artifacts","launchApp"]:["artifacts"]).withReadThread(installed:installed,unlocked:!isLocked),reason:reason,actions:RemoteMuse.actions)
             }
             let readiness=isLocked ? "locked":!AXIsProcessTrusted() ? "needsAccessibility":!running ? "closed":"ready"
             let reason=readiness=="ready" ? "Native live voice is not yet available on the phone.":readiness=="locked" ? "Unlock this Mac to use desktop controls.":readiness=="closed" ? "Open Claude on this Mac.":"Enable Accessibility for Agent Micro Controller."
-            return RemoteProvider(id:provider,name:"Claude",installed:installed,readiness:readiness,capabilities:readiness=="ready" ? ["openChat","sendPrompt","stop","artifacts","menuNavigation"] + RemoteActionCatalog.claude.map{$0.action.id}:readiness=="closed" && installed ? ["artifacts","launchApp"]:["artifacts"],reason:reason,actions:RemoteActionCatalog.claude.map(\.action))
+            return RemoteProvider(id:provider,name:"Claude",installed:installed,readiness:readiness,capabilities:(readiness=="ready" ? ["openChat","sendPrompt","stop","artifacts","menuNavigation"] + RemoteActionCatalog.claude.map{$0.action.id}:readiness=="closed" && installed ? ["artifacts","launchApp"]:["artifacts"]).withReadThread(installed:installed,unlocked:!isLocked),reason:reason,actions:RemoteActionCatalog.claude.map(\.action))
         }
         return RemoteHostStatus(hostID:store?.hostID ?? "",hostName:hostName,providers:providers,companionVersion:Self.companionVersion)
     }
@@ -542,18 +542,22 @@ import CoreImage.CIFilterBuiltins
     private func publishRegistry() {devices=registry.devices;legacySecretAccepted=registry.legacySecretAccepted}
     /// Shows a fresh single-use code. Called when the pairing window opens,
     /// after a code is used, and before one would expire.
-    func refreshPairingCode() {pairingCode=pairingCodes.issue(now:Date())}
+    func refreshPairingCode() {pairingCode=pairingCodes.issueForWindow(now:Date())}
+    /// Each window that shows a code calls these. With none open there is no code on screen and none live.
+    func pairingWindowOpened() {pairingCodes.windowOpened();refreshPairingCode()}
+    func pairingWindowClosed() {pairingCodes.windowClosed();if pairingCodes.windowsOpen==0 {pairingCode=nil}}
     func revokeDevice(_ id:String) {if registry.revoke(id) {saveRegistry()}}
     /// Cuts off every phone that paired before per-device secrets. They show
     /// "Pair this Mac" and can be paired again with the QR code.
     func stopAcceptingLegacySecret() {registry.legacySecretAccepted=false;saveRegistry()}
     /// Whether a request carries a secret this Mac accepts. Both checks always
     /// run, so the answer's timing does not say which kind of secret it was.
+    /// The older shared secret counts only for requests made on this Mac.
     private func authorized(_ request:RemoteHTTPRequest)->Bool {
         guard let store else{return false}
         let header=request.headers["authorization"] ?? ""
         let supplied=header.hasPrefix("Bearer ") ? String(header.dropFirst("Bearer ".count)):""
-        let legacy=RemotePolicy.equalToken(supplied,store.token) && registry.legacySecretAccepted
+        let legacy=RemotePolicy.equalToken(supplied,store.token) && LocalCaller.acceptsLegacySecret(accepted:registry.legacySecretAccepted,viaNetwork:request.viaNetwork,headers:request.headers)
         let device=registry.device(for:supplied)
         if let device,registry.seen(device.id,now:Date()) {saveRegistry()}
         return legacy || device != nil
@@ -644,6 +648,12 @@ import CoreImage.CIFilterBuiltins
                 let chats=loadChats(parameter("provider"))
                 return .json(RemoteChatList(chats:chats,leftOut:RemoteLeftOut.titles(claudeLeftOut)))
             }
+            if request.method=="GET",path=="/v1/thread" {
+                let provider=parameter("provider"),chatID=parameter("chatID")
+                guard RemotePolicy.providers.contains(provider) else{return .error(422,"Unknown provider.")}
+                guard !chatID.isEmpty,chatID.utf8.count<=128 else{return .error(422,"Choose a chat first.")}
+                return .json(await readThread(provider:provider,chatID:chatID))
+            }
             if request.method=="GET",path=="/v1/profile" {return .json(try seededProfile(parameter("provider")))}
             if request.method=="PUT",path=="/v1/profile" {
                 let profile=try JSONDecoder().decode(RemoteProfile.self,from:request.body)
@@ -697,6 +707,29 @@ import CoreImage.CIFilterBuiltins
         } catch let error as RemoteDisplayFault {return .error(error.status,error.message)}
         catch let error as RemoteFault {return .error(error.status,error.message)}
         catch {return .error(400,"Invalid request or unavailable artifact.")}
+    }
+    /// Recent messages of one chat, read from the local files of Claude Code or Codex. Read-only.
+    /// The text goes into the response only; nothing here logs or records it.
+    private func readThread(provider:String,chatID:String) async -> ThreadSnapshot {
+        func unavailable(_ message:String)->ThreadSnapshot {.unavailable(provider:provider,chatID:chatID,message)}
+        guard !isLocked else{return unavailable("Unlock this Mac to read this chat.")}
+        switch provider {
+        case "codex":
+            guard let chat=await loadCodexChats().first(where:{$0.id==chatID}) else{return unavailable("This chat is not in Codex\u{2019}s chat list on this Mac. Refresh the chats and try again.")}
+            return await ThreadReader.codex(threadID:chat.id,chatID:chatID)
+        case "claude":
+            guard !ambiguousClaudeIDs.contains(chatID) else{return unavailable(ClaudeThread.sharedTitleMessage)}
+            let savedSlots=(try? seededProfile("claude").slots) ?? []
+            let known=(UserDefaults.standard.stringArray(forKey:"knownSessionTitles") ?? [])+(UserDefaults.standard.stringArray(forKey:"slots") ?? [])
+            // Cached lists only: no Accessibility work belongs in this route, which the phone polls.
+            // The sidebar does not say what kind of chat a title is. ThreadReader.claude reads only a
+            // Claude Code session with exactly this title and refuses when none or several match, or when another
+            // kind of local session shares the title. A cloud-only chat with the same title is not covered.
+            guard let title=RemoteClaudeLookup.savedTarget(id:chatID,candidates:Array(recentChats.values),profileSlots:savedSlots,knownTitles:known)?.title else{return unavailable(ThreadReader.refreshMessage)}
+            return await ThreadReader.claude(title:title,chatID:chatID)
+        default:
+            return unavailable("Reading messages is not available for Muse.")
+        }
     }
     private func clearDisplaySession() {
         displayExpiryTask?.cancel();displayExpiryTask=nil;displaySession.invalidate()
@@ -1108,8 +1141,8 @@ struct RemotePairingView:View {
                 HStack(spacing:10) {
                     Image(systemName:"key")
                     VStack(alignment:.leading,spacing:2) {
-                        Text("Devices paired before version 0.7").font(.callout.weight(.medium))
-                        Text("They share one older secret and cannot be told apart. The Genesis G2 glasses bridge on this Mac uses it too, so keep accepting it if you use the glasses.").font(.caption).foregroundStyle(.secondary)
+                        Text("Older shared secret (this Mac only)").font(.callout.weight(.medium))
+                        Text("An older shared secret is still accepted from programs on this Mac only, such as the Genesis G2 glasses bridge. Phones and tablets that used it over Wi-Fi or Tailscale are refused and need to scan a new code.").font(.caption).foregroundStyle(.secondary)
                     }
                     Spacer()
                     Button("Stop accepting…",role:.destructive){retiringLegacy=true}
@@ -1150,7 +1183,8 @@ struct RemotePairingView:View {
             Text("Claude desktop controls require Claude to be open, an unlocked Mac, and Accessibility. Codex supports saved-chat selection, phone Send, and available Mac menu controls. Stop and native live voice are not connected for Codex; native live voice is also unavailable for Claude. Muse needs to be open: its chats, Send, New side chat and Call are connected, and side chats that share a title are left out.").font(.caption).foregroundStyle(.secondary)
         }.padding(28)}.frame(minWidth:740,minHeight:640).task{bridge.loadActivity()}
             // A code lasts ten minutes; replace it a little before that while the window is open.
-            .task{while !Task.isCancelled {bridge.refreshPairingCode();try? await Task.sleep(nanoseconds:540_000_000_000)}}
+            // Closing the window cancels this task, which retires every live code.
+            .task{bridge.pairingWindowOpened();defer{bridge.pairingWindowClosed()};while !Task.isCancelled {try? await Task.sleep(nanoseconds:540_000_000_000);if !Task.isCancelled {bridge.refreshPairingCode()}}}
             .confirmationDialog("Revoke \(revoking?.name ?? "this device")?",isPresented:Binding(get:{revoking != nil},set:{if !$0 {revoking=nil}}),titleVisibility:.visible) {
                 Button("Revoke",role:.destructive){if let device=revoking {bridge.revokeDevice(device.id)};revoking=nil}
                 Button("Cancel",role:.cancel){revoking=nil}
@@ -1158,6 +1192,6 @@ struct RemotePairingView:View {
             .confirmationDialog("Stop accepting the older shared secret?",isPresented:$retiringLegacy,titleVisibility:.visible) {
                 Button("Stop accepting it",role:.destructive){bridge.stopAcceptingLegacySecret()}
                 Button("Cancel",role:.cancel){}
-            } message:{Text("Every phone and tablet that paired before version 0.7 will stop working until it scans a new code. So will anything on this Mac that reads the secret from its file, such as the Genesis G2 glasses bridge. This cannot be undone.")}
+            } message:{Text("Anything on this Mac that reads the secret from its file, such as the Genesis G2 glasses bridge, will stop working. Phones and tablets already cannot use it over the network. This cannot be undone.")}
     }
 }

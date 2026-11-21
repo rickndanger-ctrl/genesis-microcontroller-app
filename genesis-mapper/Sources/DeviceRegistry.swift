@@ -150,6 +150,8 @@ struct PairingCodes {
 
     private struct Entry { var code: String; var expires: Date }
     private var entries: [Entry] = []
+    /// Windows that are showing a code right now. Codes live only while at least one is open.
+    private(set) var windowsOpen = 0
     private var failures = 0
     private var lockedUntil: Date?
 
@@ -165,6 +167,17 @@ struct PairingCodes {
             entries.remove(at: soonest)
         }
         return code
+    }
+
+    mutating func windowOpened() { windowsOpen += 1 }
+    /// The last window closing takes every live code with it.
+    mutating func windowClosed() {
+        windowsOpen = max(0, windowsOpen - 1)
+        if windowsOpen == 0 { entries.removeAll() }
+    }
+    /// A code for a window that shows one; nil when none is open.
+    mutating func issueForWindow(now: Date) -> String? {
+        windowsOpen > 0 ? issue(now: now) : nil
     }
 
     /// Uses a code. An accepted code cannot be used again.
@@ -225,6 +238,14 @@ enum LocalCaller {
             let name = key.lowercased()
             return relayHeaders.contains(name) || relayPrefixes.contains { name.hasPrefix($0) }
         }
+    }
+}
+
+extension LocalCaller {
+    /// The older shared secret works only for a program on this Mac: the loopback listener, not the
+    /// Wi-Fi one, and no relay header. Anywhere else it is refused like an unknown token.
+    static func acceptsLegacySecret(accepted: Bool, viaNetwork: Bool, headers: [String: String]) -> Bool {
+        accepted && !viaNetwork && isDirect(headers: headers)
     }
 }
 

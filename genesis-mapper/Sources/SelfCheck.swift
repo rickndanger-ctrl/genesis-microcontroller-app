@@ -64,7 +64,7 @@ enum SelfCheck {
         return [
             item("claude", "Session list", claude.sessionRows > 0,
                  ok: "\(count(claude.sessionRows, "session")) found.",
-                 problem: "No sessions found. Show Claude\u{2019}s sidebar."),
+                 problem: "No chats found. Open Claude, sign in if asked, and show its sidebar."),
             single("claude", "Message box", claude.promptFields,
                    ok: "One message box found.",
                    none: "No message box is showing. Open a session in Claude.",

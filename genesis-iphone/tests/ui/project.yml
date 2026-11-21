@@ -44,7 +44,7 @@ targets:
         NSMicrophoneUsageDescription: Dictate a draft for your selected chat. Nothing is sent until you tap Send.
         NSSpeechRecognitionUsageDescription: Turn your speech into an editable chat draft.
         NSCameraUsageDescription: Scan the pairing code shown by Agent Micro Controller on your Mac.
-        NSLocalNetworkUsageDescription: Connect to the Macs you paired on your private network.
+        NSLocalNetworkUsageDescription: Find and talk to your Mac on your Wi-Fi, so it can receive your prompts.
         CFBundleURLTypes:
           - CFBundleURLName: com.richardholguin.genesis.pair
             CFBundleURLSchemes:

@@ -44,6 +44,8 @@ import Foundation
         expect(SetupPlan.noCodeReason(remoteEnabled: true, wifiEnabled: true, wifiSupported: true, hasLocalName: false, hasTailscale: false) == .noLocalName, "No .local name yet")
         expect(SetupPlan.noCodeReason(remoteEnabled: true, wifiEnabled: false, wifiSupported: false, hasLocalName: false, hasTailscale: true) == .starting,
                "With Tailscale there is always a way; the code is just starting")
+        expect(SetupPlan.wifiNeedsNewerMacOS.hasPrefix("Wi-Fi pairing needs macOS 15 or later") && SetupPlan.wifiNeedsNewerMacOS.contains("a free app that links your own devices privately"), "macOS 14 wording says why and explains Tailscale")
+        expect(SetupPlan.museNote.hasPrefix("Muse has no download link here") && !SetupPlan.museNote.contains("http"), "Muse note gives a next step without a made-up link")
         print("Setup plan: \(checks) checks passed")
     }
 }

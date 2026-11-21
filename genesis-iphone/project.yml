@@ -6,8 +6,8 @@ options:
 settings:
   base:
     SWIFT_VERSION: "5.0"
-    CURRENT_PROJECT_VERSION: 42
-    MARKETING_VERSION: 0.7.6
+    CURRENT_PROJECT_VERSION: 46
+    MARKETING_VERSION: 0.7.7
     ENABLE_USER_SCRIPT_SANDBOXING: YES
     COMPRESS_PNG_FILES: NO
 targets:
@@ -47,7 +47,7 @@ targets:
         NSMicrophoneUsageDescription: Dictate a draft for your selected chat. Send submits it; optional glasses Follow can display the draft before sending.
         NSSpeechRecognitionUsageDescription: Turn your speech into an editable chat draft.
         NSCameraUsageDescription: Scan the pairing code shown by Agent Micro Controller on your Mac.
-        NSLocalNetworkUsageDescription: Connect to the Macs you paired on your private network.
+        NSLocalNetworkUsageDescription: Find and talk to your Mac on your Wi-Fi, so it can receive your prompts.
         CFBundleURLTypes:
           - CFBundleURLName: com.richardholguin.genesis.pair
             CFBundleURLSchemes:
