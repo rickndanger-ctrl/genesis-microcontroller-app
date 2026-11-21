@@ -51,7 +51,7 @@ struct ThreadPane: View {
             }
             Spacer(minLength: 0)
             Button { ControllerSound.shared.keyClick(); Task { await store.refreshThread(userInitiated: true) } } label: {
-                Image(systemName: "arrow.clockwise").font(.system(size: 13, weight: .semibold)).frame(width: 40, height: 40)
+                Image(systemName: "arrow.clockwise").font(.system(size: 13, weight: .semibold)).frame(width: 44, height: 44)
             }
             .disabled(store.selectedChat == nil)
             .accessibilityLabel("Refresh thread").accessibilityIdentifier("thread.refresh")

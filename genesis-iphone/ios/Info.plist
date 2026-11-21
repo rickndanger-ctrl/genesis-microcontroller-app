@@ -36,7 +36,7 @@
 	<key>NSCameraUsageDescription</key>
 	<string>Scan the pairing code shown by Agent Micro Controller on your Mac.</string>
 	<key>NSLocalNetworkUsageDescription</key>
-	<string>Connect to the Macs you paired on your private network.</string>
+	<string>Find and talk to your Mac on your Wi-Fi, so it can receive your prompts.</string>
 	<key>NSMicrophoneUsageDescription</key>
 	<string>Dictate a draft for your selected chat. Send submits it; optional glasses Follow can display the draft before sending.</string>
 	<key>NSSpeechRecognitionUsageDescription</key>

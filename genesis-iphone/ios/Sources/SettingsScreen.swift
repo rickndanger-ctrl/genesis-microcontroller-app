@@ -336,6 +336,7 @@ final class ScannerViewController: UIViewController, AVCaptureMetadataOutputObje
     private var preview: AVCaptureVideoPreviewLayer?
     private var done = false
     private let instructionLabel = UILabel()
+    private let settingsButton = UIButton(type: .system)
     private let cameraQueue = DispatchQueue(label: "genesis.qr.camera")
     init(completion: @escaping (String) -> Void) { self.completion = completion; super.init(nibName: nil, bundle: nil) }
     required init?(coder: NSCoder) { fatalError("init(coder:) is unavailable") }
@@ -344,10 +345,20 @@ final class ScannerViewController: UIViewController, AVCaptureMetadataOutputObje
         let label = instructionLabel; label.text = "Scan your Mac’s pairing code"; label.textColor = .white; label.textAlignment = .center
         label.numberOfLines = 0; label.translatesAutoresizingMaskIntoConstraints = false; view.addSubview(label)
         NSLayoutConstraint.activate([label.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor, constant: 24), label.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 24), label.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -24)])
+        settingsButton.setTitle("Open Settings", for: .normal); settingsButton.isHidden = true
+        settingsButton.accessibilityIdentifier = "scanner.openSettings"
+        settingsButton.translatesAutoresizingMaskIntoConstraints = false; view.addSubview(settingsButton)
+        settingsButton.addAction(UIAction { _ in
+            if let url = URL(string: UIApplication.openSettingsURLString) { UIApplication.shared.open(url) }
+        }, for: .touchUpInside)
+        NSLayoutConstraint.activate([settingsButton.topAnchor.constraint(equalTo: label.bottomAnchor, constant: 16), settingsButton.centerXAnchor.constraint(equalTo: view.centerXAnchor)])
         AVCaptureDevice.requestAccess(for: .video) { [weak self] allowed in
             DispatchQueue.main.async {
                 guard let self else { return }
-                guard allowed else { label.text = "Camera access is off. Close this sheet and paste the pairing link instead."; return }
+                guard allowed else {
+                    label.text = "Camera access is off. Allow it in Settings to scan, or paste the pairing link in this app’s settings."
+                    self.settingsButton.isHidden = false; return
+                }
                 self.configure()
             }
         }
@@ -379,7 +390,9 @@ final class ScannerViewController: UIViewController, AVCaptureMetadataOutputObje
     func stop() { done = true; cameraQueue.async { [session] in session.stopRunning() } }
     func metadataOutput(_ output: AVCaptureMetadataOutput, didOutput objects: [AVMetadataObject], from connection: AVCaptureConnection) {
         guard !done, let code = objects.compactMap({ ($0 as? AVMetadataMachineReadableCodeObject)?.stringValue }).first else { return }
-        guard code.hasPrefix("genesiscontroller://pair?") else { return }
+        guard code.hasPrefix("genesiscontroller://pair?") else {
+            instructionLabel.text = "That isn’t a pairing code. Scan the one in the Mac’s setup window."; return
+        }
         stop(); completion(code)
     }
 }

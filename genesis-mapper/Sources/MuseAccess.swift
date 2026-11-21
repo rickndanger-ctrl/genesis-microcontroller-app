@@ -293,12 +293,11 @@ final class MuseAccess {
             let title = value(element, kAXTitleAttribute) as? String ?? ""
             let name = (title.isEmpty ? value(element, kAXDescriptionAttribute) as? String ?? "" : title).replacingOccurrences(of: "\n", with: " / ")
             if listed.contains(role) || subrole.hasPrefix("AXLandmark") {
-                // A field's contents are never reported, only that it exists.
-                // Long labels are sentences an app wrote about the user's own
-                // affairs, not control names. Only their length is reported.
-                let shown = name.count <= 44 ? name : "(label of \(name.count) characters)"
+                // A field's contents are never reported, only that it exists. Window titles, headings
+                // and links carry chat titles, so only their length is reported; see OutlineLabel.
+                let shown = OutlineLabel.shown(role: role, subrole: subrole, name: name)
                 let minimized = role == kAXWindowRole && (value(element, kAXMinimizedAttribute) as? Bool) == true ? " (minimized)" : ""
-                lines.append("\(role.replacingOccurrences(of: "AX", with: ""))\(subrole.isEmpty ? "" : "/" + subrole.replacingOccurrences(of: "AX", with: "")) · \(shown.isEmpty ? "(no label)" : shown)\(minimized)")
+                lines.append("\(role.replacingOccurrences(of: "AX", with: ""))\(subrole.isEmpty ? "" : "/" + subrole.replacingOccurrences(of: "AX", with: "")) · \(shown)\(minimized)")
             }
             if depth < 40, let children = value(element, kAXChildrenAttribute), CFGetTypeID(children) == CFArrayGetTypeID() {
                 for child in (children as? [AXUIElement]) ?? [] { queue.append((child, depth + 1)) }

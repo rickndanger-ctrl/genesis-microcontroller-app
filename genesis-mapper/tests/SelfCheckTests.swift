@@ -86,7 +86,7 @@ import Foundation
         expect(item(sessions, "Session list")?.ok == true && item(sessions, "Session list")?.detail == "1 session found.", "One session reads in the singular")
         expect(item(run(claude(sessions: 7)), "Session list")?.detail == "7 sessions found.", "Several sessions read in the plural with the count")
         let none = item(run(claude(sessions: 0)), "Session list")
-        expect(none?.ok == false && none?.detail == "No sessions found. Show Claude\u{2019}s sidebar.", "No sessions says to show the sidebar")
+        expect(none?.ok == false && none?.detail == "No chats found. Open Claude, sign in if asked, and show its sidebar.", "No sessions says to open Claude, sign in and show the sidebar")
 
         let noBox = item(run(claude(prompts: 0)), "Message box")
         expect(noBox?.ok == false && noBox?.detail == "No message box is showing. Open a session in Claude.", "No message box says to open a session")

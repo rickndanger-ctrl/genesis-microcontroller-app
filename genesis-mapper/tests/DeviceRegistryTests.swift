@@ -19,6 +19,7 @@ import Foundation
         lookup()
         seenRules()
         revokeAndRename()
+        legacyAndWindows()
         storage()
         pairing()
         comparison()
@@ -127,6 +128,38 @@ import Foundation
         expect(registry.rename("id-2", to: "KITCHEN IPAD") && registry.devices[0].name == "KITCHEN IPAD", "A device may change only the case of its own name")
         expect(registry.rename("id-2", to: "   ") && registry.devices[0].name == "iPhone or iPad", "A blank name becomes the default")
         expect(!registry.rename("nobody", to: "Anything"), "Renaming an unknown id reports no change")
+    }
+
+    static func legacyAndWindows() {
+        let local: [String: String] = ["authorization": "Bearer x", "host": "127.0.0.1"]
+        expect(LocalCaller.acceptsLegacySecret(accepted: true, viaNetwork: false, headers: local), "The older secret works for a program on this Mac")
+        expect(!LocalCaller.acceptsLegacySecret(accepted: true, viaNetwork: true, headers: local), "The older secret is refused on the Wi-Fi listener")
+        for header in ["X-Forwarded-For", "Tailscale-User-Login", "Forwarded", "Via", "X-Real-IP", "x-forwarded-proto"] {
+            expect(!LocalCaller.acceptsLegacySecret(accepted: true, viaNetwork: false, headers: local.merging([header: "1"]) { $1 }), "The older secret is refused when \(header) is present")
+        }
+        expect(!LocalCaller.acceptsLegacySecret(accepted: false, viaNetwork: false, headers: local), "Switched off, it is refused everywhere")
+
+        var codes = PairingCodes()
+        expect(codes.issueForWindow(now: t0) == nil && codes.activeCount(now: t0) == 0, "No window, no code")
+        codes.windowOpened()
+        let first = codes.issueForWindow(now: t0)
+        expect(first != nil && codes.activeCount(now: t0) == 1, "An open window gets a code")
+        codes.windowOpened()
+        codes.windowClosed()
+        expect(codes.activeCount(now: t0) == 1 && codes.windowsOpen == 1, "Codes stay while another window shows one")
+        codes.windowClosed()
+        expect(codes.activeCount(now: t0) == 0 && codes.redeem(first!, now: after(1)) == .rejected, "Closing the last window retires every live code")
+        expect(codes.issueForWindow(now: after(2)) == nil, "No replacement is issued once the window is gone")
+        codes.windowClosed()
+        expect(codes.windowsOpen == 0, "Closing more often than opening stays at zero")
+        // The bridge and both windows that show a code are wired to these rules.
+        let sources = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent().appendingPathComponent("Sources")
+        func source(_ name: String) -> String { (try? String(contentsOf: sources.appendingPathComponent(name), encoding: .utf8)) ?? "" }
+        expect(source("RemoteBridge.swift").contains("LocalCaller.acceptsLegacySecret(accepted:registry.legacySecretAccepted,viaNetwork:request.viaNetwork,headers:request.headers)"), "Authorization applies the local-only rule")
+        expect(source("RemoteBridge.swift").contains("bridge.pairingWindowOpened()") && source("SetupView.swift").contains("bridge.pairingWindowOpened()"), "Both windows that show a code register with the bridge")
+        expect(source("RemoteBridge.swift").contains("pairingCodes.issue(now:Date())") && source("RemoteBridge.swift").contains("pairingCodes.issueForWindow(now:Date())"), "The loopback port still issues directly; the windows use the window rule")
+        _ = codes.issue(now: t0, code: "loopback")
+        expect(codes.redeem("loopback", now: after(1)) == .accepted, "A code issued directly (loopback port) still redeems")
     }
 
     static func storage() {

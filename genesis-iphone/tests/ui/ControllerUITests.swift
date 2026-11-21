@@ -265,6 +265,56 @@ final class ControllerUITests: XCTestCase {
     }
 
     @MainActor
+    func testThreadSheetOnPhoneAndPortrait() {
+        continueAfterFailure = false
+        let app = XCUIApplication()
+        app.launchArguments = ["--demo"]
+        XCUIDevice.shared.orientation = .portrait
+        app.launch()
+        XCTAssertTrue(app.buttons["controller.fullscreen"].waitForExistence(timeout: 8))
+        func element(_ id: String) -> XCUIElement { app.descendants(matching: .any).matching(identifier: id).firstMatch }
+        // A short thread, so its first message is not scrolled out of the sheet.
+        app.buttons["C2, OMAC workspace"].tap()
+        let current = NSPredicate(format: "value CONTAINS %@", "Current chat")
+        expectation(for: current, evaluatedWith: app.buttons["C2, OMAC workspace"])
+        waitForExpectations(timeout: 5)
+
+        func openAndCheck(_ where_: String) -> String {
+            let open = app.buttons["thread.open"]
+            XCTAssertTrue(open.waitForExistence(timeout: 3), "\(where_) offers the thread")
+            XCTAssertTrue(open.isHittable)
+            open.tap()
+            let first = element("thread.message.0")
+            XCTAssertTrue(first.waitForExistence(timeout: 3), "\(where_): the sheet shows the first message")
+            XCTAssertTrue(first.isHittable, "\(where_): the first message is on screen")
+            XCTAssertTrue(element("thread.pane").exists)
+            XCTAssertTrue(app.textFields["controller.draft"].exists, "\(where_): the draft field is in the sheet")
+            XCTAssertTrue(app.buttons["controller.sendDraft"].exists, "\(where_): Send is in the sheet")
+            saveFullscreenScreenshot("Thread sheet, \(where_)")
+            let label = first.label
+            app.buttons["Done"].tap()
+            let gone = NSPredicate { _, _ in !element("thread.pane").exists }
+            expectation(for: gone, evaluatedWith: nil)
+            waitForExpectations(timeout: 5)
+            return label
+        }
+        let fromDashboard = openAndCheck("Dashboard")
+
+        app.buttons["controller.fullscreen"].tap()
+        XCTAssertTrue(app.buttons["controller.exitFullscreen"].waitForExistence(timeout: 3))
+        XCTAssertEqual(openAndCheck("Full screen"), fromDashboard)
+
+        app.buttons["C1, Controller app"].tap()
+        expectation(for: current, evaluatedWith: app.buttons["C1, Controller app"])
+        waitForExpectations(timeout: 5)
+        app.buttons["thread.open"].tap()
+        let first = element("thread.message.0")
+        XCTAssertTrue(first.waitForExistence(timeout: 3))
+        XCTAssertNotEqual(first.label, fromDashboard, "Another chat shows its own thread")
+        app.buttons["Done"].tap()
+    }
+
+    @MainActor
     func testDeckOnlyThread() throws {
         guard UIDevice.current.userInterfaceIdiom == .pad else {
             throw XCTSkip("Deck only is an iPad size")
@@ -427,6 +477,11 @@ final class ControllerUITests: XCTestCase {
             XCTAssertGreaterThanOrEqual(control.frame.height, 40, "\(id) is a real touch target")
             XCTAssertTrue(app.frame.insetBy(dx: -1, dy: -1).contains(control.frame), "\(id) stays on screen")
         }
+        for id in ["controller.chooseComputer", "controller.chooseProvider"] {
+            XCTAssertGreaterThanOrEqual(app.buttons[id].frame.height, 44, "\(id) is a full-size touch target")
+        }
+        let refresh = app.buttons["thread.refresh"]
+        if refresh.exists { XCTAssertGreaterThanOrEqual(refresh.frame.height, 44); XCTAssertGreaterThanOrEqual(refresh.frame.width, 44) }
         for id in ["Chat dial", "Artifact dial"] {
             let dial = app.descendants(matching: .any).matching(identifier: id).firstMatch
             XCTAssertTrue(dial.isHittable, "\(id) remains directly usable")
@@ -1151,6 +1206,10 @@ final class ControllerUITests: XCTestCase {
         app.buttons["Settings and Mac pairing"].tap()
         app.buttons["Scan pairing code"].tap()
         XCTAssertTrue(app.navigationBars["Scan pairing code"].waitForExistence(timeout: 5))
+        // With the camera denied, the scanner explains and offers Settings (if this simulator has it allowed, there is nothing to check).
+        if app.staticTexts["Camera access is off. Allow it in Settings to scan, or paste the pairing link in this app’s settings."].waitForExistence(timeout: 3) {
+            XCTAssertTrue(app.buttons["scanner.openSettings"].exists, "A denied camera offers Open Settings")
+        }
         app.buttons["Cancel"].tap()
         if app.buttons["Cancel"].exists { app.buttons["Cancel"].tap() }
         XCTAssertTrue(app.navigationBars["Your controller"].waitForExistence(timeout: 3))

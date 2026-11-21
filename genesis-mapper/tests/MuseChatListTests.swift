@@ -130,6 +130,14 @@ import Foundation
         expect(MuseChatList.frameForFullLayout(window: CGRect(x: 2000, y: 40, width: 620, height: 800), screenMinX: 1440, screenMaxX: 3360)?.minX == 2000, "A second display uses its own edges")
         expect(MuseChatList.frameForFullLayout(window: CGRect(x: 0, y: 0, width: 1100, height: 800), screenMinX: 0, screenMaxX: 1440) == nil, "A wide window is left alone")
         expect(MuseChatList.frameForFullLayout(window: narrow, screenMinX: 0, screenMaxX: 900) == nil, "A screen too narrow to fit the wide window is not attempted")
+        expect(OutlineLabel.shown(role: "AXWindow", subrole: "AXStandardWindow", name: "Trip planning") == "(label of 13 characters)", "A window title is reduced to its length")
+        expect(OutlineLabel.shown(role: "AXHeading", subrole: "", name: "Rent") == "(label of 4 characters)", "A heading is reduced to its length")
+        expect(OutlineLabel.shown(role: "AXLink", subrole: "", name: "Notes") == "(label of 5 characters)", "A link is reduced to its length")
+        expect(OutlineLabel.shown(role: "AXWebArea", subrole: "", name: "Secret page") == "(label of 11 characters)", "A page title is reduced to its length")
+        expect(OutlineLabel.shown(role: "AXGroup", subrole: "AXLandmarkMain", name: "Chat") == "(label of 4 characters)", "A landmark is reduced to its length")
+        expect(OutlineLabel.shown(role: "AXButton", subrole: "", name: "Send") == "Send", "A short control name is kept")
+        expect(OutlineLabel.shown(role: "AXButton", subrole: "", name: String(repeating: "x", count: 50)) == "(label of 50 characters)", "A long label is reduced to its length")
+        expect(OutlineLabel.shown(role: "AXWindow", subrole: "", name: "") == "(no label)", "An empty label says so")
         print("Muse chat list: \(passed) checks passed")
     }
 }

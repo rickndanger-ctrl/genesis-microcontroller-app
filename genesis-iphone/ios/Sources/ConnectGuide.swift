@@ -16,6 +16,7 @@ struct ConnectGuide: View {
 
     var body: some View {
         NavigationStack {
+            ScrollViewReader { proxy in
             ScrollView {
                 VStack(alignment: .leading, spacing: 18) {
                     Text("Your phone becomes a control deck for Claude, Codex and Muse on your Mac. It takes about a minute.")
@@ -67,10 +68,14 @@ struct ConnectGuide: View {
                             }
                         }
                         .padding(14).background(Color.orange.opacity(0.1), in: RoundedRectangle(cornerRadius: 14))
+                        .id("guide.problem")
                     }
 
                 }
                 .padding(20)
+            }
+            // The message lands below the steps, where a short screen would hide it.
+            .onChange(of: problem) { _, now in if now != nil { withAnimation { proxy.scrollTo("guide.problem", anchor: .bottom) } } }
             }
             .navigationTitle("Connect your Mac")
             .toolbar { ToolbarItem(placement: .cancellationAction) { Button("Not now") { ControllerSound.shared.keyClick(); dismiss() }.accessibilityIdentifier("guide.close") } }
