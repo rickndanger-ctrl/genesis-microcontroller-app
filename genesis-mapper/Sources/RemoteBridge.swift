@@ -684,6 +684,15 @@ import CoreImage.CIFilterBuiltins
                 guard !isLocked,AXIsProcessTrusted() else{return .error(423,"Unlock the Mac and enable Accessibility first.")}
                 return .json(["lines":MuseAccess.outline(bundle:bundle)])
             }
+            if request.method=="GET",path=="/v1/diagnostics/muse-history-shape" {
+                // Structure only, never text, and only for a program on this Mac.
+                guard !request.viaNetwork,LocalCaller.isDirect(headers:request.headers) else{return .error(403,"This diagnostic can only be read on the Mac itself.")}
+                guard !isLocked,AXIsProcessTrusted(),muse.app != nil else{return .error(423,"Unlock the Mac, enable Accessibility and open Muse first.")}
+                let muse=self.muse
+                let shape=await Task.detached(priority:.userInitiated){muse.historyShape(deadline:ProcessInfo.processInfo.systemUptime+2.5)}.value
+                guard let shape,JSONSerialization.isValidJSONObject(shape),let data=try? JSONSerialization.data(withJSONObject:shape) else{return .error(409,"Muse is not showing a chat history right now.")}
+                return RemoteHTTPResponse(data:data)
+            }
             if request.method=="GET",path=="/v1/diagnostics/activity" {return .json(RemoteActivity(entries:activity?.recent(100) ?? []))}
             if request.method=="GET",path.hasPrefix("/v1/commands/") {
                 let id=String(path.dropFirst("/v1/commands/".count))
@@ -728,8 +737,21 @@ import CoreImage.CIFilterBuiltins
             guard let title=RemoteClaudeLookup.savedTarget(id:chatID,candidates:Array(recentChats.values),profileSlots:savedSlots,knownTitles:known)?.title else{return unavailable(ThreadReader.refreshMessage)}
             return await ThreadReader.claude(title:title,chatID:chatID)
         default:
-            return unavailable("Reading messages is not available for Muse.")
+            return await museThread(chatID)
         }
+    }
+    /// One Muse read per chat per three seconds: a poll that arrives while one is running or just done shares it.
+    private var museThreads:[String:(at:Date,task:Task<ThreadSnapshot,Never>)]=[:]
+    private func museThread(_ chatID:String) async -> ThreadSnapshot {
+        guard AXIsProcessTrusted() else{return .unavailable(provider:"muse",chatID:chatID,MuseThread.accessibilityMessage)}
+        guard muse.app != nil else{return .unavailable(provider:"muse",chatID:chatID,MuseThread.closedMessage)}
+        if let hit=museThreads[chatID],Date().timeIntervalSince(hit.at)<3 {return await hit.task.value}
+        museThreads=museThreads.filter{Date().timeIntervalSince($0.value.at)<3}
+        // Accessibility reads run off the main actor and stop at their own deadline.
+        let muse=self.muse
+        let task=Task.detached(priority:.userInitiated){ThreadReader.muse(chatID:chatID,read:{muse.threadRead(deadline:$0)},idFor:{RemotePolicy.chatID("muse",$0)})}
+        museThreads[chatID]=(Date(),task)
+        return await task.value
     }
     private func clearDisplaySession() {
         displayExpiryTask?.cancel();displayExpiryTask=nil;displaySession.invalidate()

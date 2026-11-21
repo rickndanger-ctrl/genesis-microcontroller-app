@@ -280,11 +280,94 @@ import Foundation
         expect(["readThread"].withReadThread(installed: true, unlocked: true) == ["readThread"], "never listed twice")
         // The route does no Accessibility work and offers a refresh when a title is not cached.
         let bridgeSource = try String(contentsOfFile: URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent().appendingPathComponent("Sources/RemoteBridge.swift").path, encoding: .utf8)
-        let body = bridgeSource.components(separatedBy: "private func readThread(")[1].components(separatedBy: "private func clearDisplaySession")[0]
+        let body = bridgeSource.components(separatedBy: "private func readThread(")[1].components(separatedBy: "/// One Muse read per chat")[0]
         expect(!body.contains("loadChats(") && !body.contains("AXIsProcessTrusted") && !body.contains("access."), "readThread does no Accessibility work")
         expect(body.contains("ThreadReader.refreshMessage") && ThreadReader.refreshMessage == "Refresh the chats on your phone, then try again.", "uncached title asks for a refresh")
         let providers = bridgeSource.components(separatedBy: "withReadThread(installed:installed,unlocked:!isLocked)").count - 1
         expect(providers == 2 && bridgeSource.contains("RemoteCodexAvailability.capabilities"), "Claude and Muse advertise readThread through the shared gate")
+
+        // Never "ok" with nothing to show.
+        let none = ThreadReader.make(provider: "codex", chatID: "c", turnsNewestFirst: [], limited: false)
+        expect(none.status == "unavailable" && none.message == "This chat has no messages to show yet." && none.turns.isEmpty, "a thread with no visible turns is unavailable")
+        calls = []
+        codex = try CodexThread.read(threadID: thread, call: fake(turnsPerPage: 5, totalTurns: 2, itemsPerTurn: 0))
+        let emptyCodex = ThreadReader.make(provider: "codex", chatID: thread, turnsNewestFirst: codex.turns, limited: codex.limited)
+        expect(codex.turns.isEmpty && emptyCodex.status == "unavailable", "a Codex thread of tool items only is unavailable")
+        let some = ThreadReader.make(provider: "codex", chatID: "c", turnsNewestFirst: [ThreadTurn(role: "user", text: "hi")], limited: false)
+        expect(some.status == "ok" && some.message == nil, "turns still give ok")
+
+        // Muse: only the open chat; roles by where the entry sits, as measured on the live app (history 769 wide).
+        let mark = MuseThread.userMarker, historyWide = 769.0
+        func assistant(_ pieces: [String], buttons: [String] = ["Copy"]) -> MuseEntry {
+            MuseEntry(pieces: pieces.map { MuseText(text: $0) } + buttons.map { MuseText(text: $0, insideControl: true) }, x: 24, width: 721)
+        }
+        func person(_ time: String, _ message: [String]) -> MuseEntry {
+            MuseEntry(pieces: [MuseText(text: time, directChild: true)] + message.map { MuseText(text: $0) }, x: 439, width: 306)
+        }
+        func buttonOnly() -> MuseEntry { MuseEntry(pieces: [MuseText(text: "Copy", insideControl: true)], x: 24, width: 27) }
+        let history = [buttonOnly(), person("Mon", ["First question"]), assistant(["First answer", "second paragraph"]), buttonOnly(),
+                       MuseEntry(texts: []), assistant(["4:05"]), assistant(["Thinking\u{2026}"]), person("9:99", ["A message that is long enough"]),
+                       assistant(["Final reply", "- a list item", "let code = 1"])]
+        var muse = MuseThread.read(entries: history, historyWidth: historyWide)
+        expect(!muse.unsupported && muse.turns == [ThreadTurn(role: "user", text: "First question"), ThreadTurn(role: "assistant", text: "First answer\nsecond paragraph"),
+                        ThreadTurn(role: "user", text: "A message that is long enough"), ThreadTurn(role: "assistant", text: "Final reply\n- a list item\nlet code = 1")],
+               "roles by geometry, order kept, button-only and empty entries dropped, pieces joined by newlines")
+        expect(MuseThread.role(of: assistant(["x"]), marked: false, historyWidth: historyWide) == "assistant" && MuseThread.role(of: person("t", ["x"]), marked: false, historyWidth: historyWide) == "user", "left is assistant, right is user")
+        expect(MuseThread.role(of: MuseEntry(texts: ["x"], x: 200, width: 300), marked: false, historyWidth: historyWide) == nil, "the middle is neither")
+        expect(MuseThread.role(of: MuseEntry(texts: ["x"], x: 130, width: 300), marked: false, historyWidth: historyWide) == nil && MuseThread.role(of: MuseEntry(texts: ["x"], x: 400, width: 200), marked: false, historyWidth: historyWide) == nil, "left of 15% only, and the right edge must be flush")
+        expect(MuseThread.role(of: MuseEntry(texts: ["x"]), marked: false, historyWidth: historyWide) == nil, "no frame, no role")
+        expect(MuseThread.read(entries: [person("Mon", [])], historyWidth: historyWide).turns.isEmpty, "a lone short direct child is metadata, not a message")
+        muse = MuseThread.read(entries: [MuseEntry(pieces: [MuseText(text: "Hi", directChild: true)], x: 439, width: 306), person("Mon", ["Hi"])], historyWidth: historyWide)
+        expect(muse.turns == [ThreadTurn(role: "user", text: "Hi")], "a short message inside a group is kept")
+        // Old labelled shape still reads, with or without a frame.
+        muse = MuseThread.read(entries: [MuseEntry(texts: [mark + "Labelled question"]), MuseEntry(texts: ["Labelled answer"], x: 24, width: 721), MuseEntry(texts: [], labels: ["User message"]), MuseEntry(texts: ["Bare"], labels: ["User message"])], historyWidth: historyWide)
+        expect(muse.turns == [ThreadTurn(role: "user", text: "Labelled question"), ThreadTurn(role: "assistant", text: "Labelled answer"), ThreadTurn(role: "user", text: "Bare")], "the User message marker still marks a user entry and is stripped")
+        // A layout that does not fit is refused, not guessed.
+        let odd = MuseEntry(texts: ["somewhere else"], x: 200, width: 250)
+        muse = MuseThread.read(entries: [assistant(["a"]), odd, odd], historyWidth: historyWide)
+        expect(muse.unsupported && muse.turns.count == 1, "more than a third unplaced is unsupported")
+        muse = MuseThread.read(entries: [assistant(["a"]), assistant(["b"]), odd], historyWidth: historyWide)
+        expect(!muse.unsupported && muse.turns.count == 2, "a third or fewer unplaced is skipped")
+        func idFor(_ title: String) -> String { "muse-" + title }
+        func read(_ title: String, ambiguous: Bool = false, older: Bool = false, entries: [MuseEntry]? = nil) -> (Double) -> MuseThreadRead? {
+            { _ in MuseThreadRead(openTitle: title, ambiguous: ambiguous, entries: entries ?? history, olderEntries: older, historyWidth: historyWide) }
+        }
+        let opened = ThreadReader.muse(chatID: "muse-Trip", read: read("Trip"), idFor: idFor)
+        expect(opened.status == "ok" && opened.provider == "muse" && opened.turns.count == 4 && opened.turns[0].role == "user" && !opened.truncated, "the open chat is read")
+        let otherChat = ThreadReader.muse(chatID: "muse-Trip", read: read("Budget"), idFor: idFor)
+        expect(otherChat.status == "unavailable" && otherChat.message == "Open this chat in Muse on your Mac to see its messages." && otherChat.turns.isEmpty, "a different open chat is never read")
+        let shared = ThreadReader.muse(chatID: "muse-Trip", read: read("Trip", ambiguous: true), idFor: idFor)
+        expect(shared.status == "unavailable" && shared.message == MuseThread.openMessage, "a title shared by two chats is not read")
+        let closed = ThreadReader.muse(chatID: "muse-Trip", read: { _ in nil }, idFor: idFor)
+        expect(closed.status == "unavailable" && closed.message == MuseThread.closedMessage, "no readable Muse screen")
+        let strange = ThreadReader.muse(chatID: "muse-Trip", read: read("Trip", entries: [odd, odd, assistant(["a"])]), idFor: idFor)
+        expect(strange.status == "unavailable" && strange.message == MuseThread.layoutMessage && strange.turns.isEmpty, "an unreadable layout asks for an update")
+        expect(ThreadReader.muse(chatID: "muse-Trip", read: read("Trip", older: true), idFor: idFor).truncated, "older entries mean truncated")
+        let quiet = ThreadReader.muse(chatID: "muse-Trip", read: read("Trip", entries: [buttonOnly(), assistant(["4:05"])]), idFor: idFor)
+        expect(quiet.status == "unavailable" && quiet.message == "This chat has no messages to show yet.", "an open chat with no messages is unavailable")
+        let crowd = (0..<20).map { $0 % 2 == 0 ? person("Mon", ["q\($0)"]) : assistant(["a\($0)"]) }
+        let capped = ThreadReader.muse(chatID: "muse-Trip", read: read("Trip", entries: crowd), idFor: idFor)
+        expect(capped.turns.count == 12 && capped.truncated && capped.turns.first?.text == "q8" && capped.turns.last?.text == "a19", "twelve newest, oldest first, truncated")
+        let wall = ThreadReader.muse(chatID: "muse-Trip", read: read("Trip", entries: [assistant([String(repeating: "x", count: 9_000)])]), idFor: idFor)
+        expect(wall.turns[0].text.count == 8_000 && wall.truncated, "long Muse text is cut and flagged")
+        expect(MuseShape.string(name: "AXValue", text: "4:05")["pattern"] as? String == "9:99" && MuseShape.string(name: "AXValue", text: "Mon")["pattern"] as? String == "aaa", "a short string is shown as a pattern")
+        expect(MuseShape.string(name: "AXValue", text: "Tuesday 12")["pattern"] == nil, "a longer string gets no pattern")
+        let bridgeText = try String(contentsOfFile: URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent().appendingPathComponent("Sources/RemoteBridge.swift").path, encoding: .utf8)
+        let museBody = bridgeText.components(separatedBy: "private func museThread(")[1].components(separatedBy: "private func clearDisplaySession")[0]
+        expect(!museBody.contains("listing(") && !museBody.contains("widenWindow") && !museBody.contains("loadMuseChats") && museBody.contains("Task.detached") && museBody.contains("<3"), "Muse thread read is off the main actor, cached, and does not open panels")
+
+        // The history-shape diagnostic reports structure, never text.
+        let secret = "User message: my private plan for Tuesday"
+        let described = MuseShape.string(name: "AXValue", text: secret)
+        expect(described["length"] as? Int == secret.count && described["startsWithUserMessage"] as? Bool == true && described["labelPrefix"] as? String == "User message:", "a marker is reported by shape")
+        expect(!String(describing: described).contains("private") && described["value"] == nil, "no text leaks from a value")
+        expect(MuseShape.labelPrefix("Note: something") == "Note:" && MuseShape.labelPrefix("A very long sentence: not a label") == nil && MuseShape.labelPrefix("no colon here") == nil, "only a one- or two-word label is reported")
+        expect(MuseShape.string(name: "AXDOMClassList", text: "user-bubble")["value"] as? String == "user-bubble", "a fixed class name is shown")
+        expect(MuseShape.string(name: "AXValue", text: "user-bubble")["value"] == nil && MuseShape.string(name: "AXIdentifier", text: "msg 42 hello")["value"] == nil, "other attributes and non-identifiers are not shown")
+        expect(MuseShape.strings(name: "AXDOMClassList", values: ["assistant", "my secret note"])["values"] as? [String] == ["assistant", "(14 characters)"], "class lists show only fixed names")
+        expect(MuseShape.string(name: "AXValue", text: "4:05")["timestampLike"] as? Bool == true && MuseShape.string(name: "AXTitle", text: "Copy")["controlWord"] as? Bool == true, "timestamps and control words are flagged")
+        let shapeSource = bridgeText.components(separatedBy: "/v1/diagnostics/muse-history-shape")[1].components(separatedBy: "/v1/diagnostics/activity")[0]
+        expect(shapeSource.contains("!request.viaNetwork") && shapeSource.contains("LocalCaller.isDirect") && shapeSource.contains("Task.detached"), "the diagnostic is local-only and off the main actor")
 
         // The response shape.
         let encoder = JSONEncoder(); encoder.outputFormatting = .sortedKeys
