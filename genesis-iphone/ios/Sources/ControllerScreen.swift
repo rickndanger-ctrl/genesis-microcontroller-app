@@ -252,9 +252,6 @@ struct ControllerScreen: View {
                     focusedTools
                 }
                 .frame(width: rail, height: threadHidden ? nil : max(300, size.height - 32))
-                .onAppear { store.setThreadVisible(!threadHidden) }
-                .onChange(of: threadHidden) { _, hidden in store.setThreadVisible(!hidden) }
-                .onDisappear { store.setThreadVisible(false) }
             }
             .padding(16)
             .frame(maxWidth: .infinity, minHeight: size.height)
@@ -402,7 +399,7 @@ struct ControllerScreen: View {
                 .accessibilityLabel("Review draft").accessibilityIdentifier("controller.reviewDraft")
                 sendDraftButton
             }
-            if store.hasUnresolvedSend {
+            if store.hasUnconfirmedSend {
                 Text("Delivery unconfirmed · Open Review draft to check")
                     .font(.caption).foregroundStyle(.orange)
             } else if let receipt = store.lastReceipt {
@@ -433,8 +430,9 @@ struct ControllerScreen: View {
                     displayRefresh
                     displayTools(spread: false)
                 }
+                if !threadHidden { displayThread }
                 HStack(alignment: .top, spacing: 12) {
-                    displayDraft(lines: 2)
+                    displayDraft(lines: 2, grow: threadHidden)
                     sendDraftButton
                 }
             }
@@ -447,7 +445,11 @@ struct ControllerScreen: View {
                     displayRefresh
                 }
                 DisplayRule()
-                displayDraft(lines: 10)
+                if !threadHidden {
+                    displayThread
+                    DisplayRule()
+                }
+                displayDraft(lines: threadHidden ? 10 : 3, grow: threadHidden)
                 sendDraftButton.frame(maxWidth: .infinity)
                 DisplayRule()
                 displayTools(spread: true)
@@ -508,7 +510,14 @@ struct ControllerScreen: View {
         .accessibilityLabel("Refresh connection and chats")
     }
 
-    private func displayDraft(lines: Int) -> some View {
+    /// The open chat's conversation, on the display's dark glass. It takes the height the other rows leave.
+    private var displayThread: some View {
+        ThreadPane(store: store, agentName: providerName, accent: slotColor,
+                   style: .dark(slotColor, text: DeckDisplayPanel<EmptyView>.text, dim: DeckDisplayPanel<EmptyView>.dim))
+            .frame(minHeight: 60, maxHeight: .infinity)
+    }
+
+    private func displayDraft(lines: Int, grow: Bool = true) -> some View {
         Button { ControllerSound.shared.keyClick(); showDraftReview = true } label: {
             VStack(alignment: .leading, spacing: 5) {
                 Text(store.isRecording ? "LISTENING…" : store.isFinalizing ? "FINISHING…" : "DRAFT")
@@ -522,13 +531,14 @@ struct ControllerScreen: View {
                     // A long dictation shows its end, where the words are arriving.
                     .opacity(dictatingDraft ? 0 : 1)
                     .overlay { if dictatingDraft { LiveDraft(text: store.draft, size: 16, color: DeckDisplayPanel<EmptyView>.text) } }
-                if store.hasUnresolvedSend {
+                if store.hasUnconfirmedSend {
                     Text("Delivery unconfirmed · Tap to check").font(.caption).foregroundStyle(.orange)
                 } else if let receipt = store.lastReceipt {
                     Text(receipt.message).font(.caption).foregroundStyle(DeckDisplayPanel<EmptyView>.dim).lineLimit(1)
                 }
             }
-            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+            .frame(maxWidth: .infinity, maxHeight: grow ? .infinity : nil, alignment: .topLeading)
+            .frame(minHeight: grow ? nil : 44, alignment: .topLeading)
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain).disabled(!canChangeLayout)
@@ -543,6 +553,8 @@ struct ControllerScreen: View {
                 DisplayGlassesButton(follow: store.glasses) { ControllerSound.shared.keyClick(); showGlassesControls = true }
                     .frame(maxWidth: spread ? .infinity : nil)
             }
+            displayTool(threadHidden ? "text.bubble" : "text.bubble.fill", label: threadHidden ? "Show thread" : "Hide thread",
+                        id: threadHidden ? "thread.show" : "thread.hide", spread: spread) { ControllerSound.shared.keyClick(); threadHidden.toggle() }
             displayTool("slider.horizontal.3", label: "Settings and Mac pairing", id: "controller.settings", spread: spread) { ControllerSound.shared.keyClick(); showSettings = true }
         }
         .disabled(!canChangeLayout)
@@ -966,7 +978,9 @@ struct ControllerScreen: View {
         let plateW = max(0, fit.width - left * 2), plateH = max(0, fit.height - top - bottom)
         let beside = display && fit.width > fit.height
         let displayW = beside ? min(420, max(250, plateW * 0.28)) : 0
-        let displayH = display && !beside ? min(230, max(150, plateH * 0.17)) : 0
+        // The thread needs room: a taller strip, never so tall that a key drops under 44 points.
+        let threadH = min(460, max(260, plateH * 0.36)), roomH = max(0, plateH - gap * 4 - 44 * 4)
+        let displayH = display && !beside ? (threadHidden ? min(230, max(150, plateH * 0.17)) : min(threadH, max(150, roomH))) : 0
         let keyW = max(0, (plateW - (beside ? displayW + gap : 0) - gap * 3) / 4)
         let keyH = max(0, (plateH - (displayH > 0 ? displayH + gap : 0) - gap * 3) / 4)
         // The knob in use glows as hard as its key.
@@ -1254,7 +1268,7 @@ struct ControllerScreen: View {
                 Text("Chat switching, available menu controls, and artifacts still work.")
                     .font(isPad ? .subheadline : .caption).foregroundStyle(.secondary)
             }
-            if store.hasUnresolvedSend {
+            if store.hasUnconfirmedSend {
                 Text("Delivery is unconfirmed. Your draft is saved and won’t be resent automatically.")
                     .font(isPad ? .subheadline : .caption).foregroundStyle(.orange)
                 HStack {

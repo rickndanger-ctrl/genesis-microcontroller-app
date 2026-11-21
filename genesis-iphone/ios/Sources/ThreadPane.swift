@@ -1,30 +1,54 @@
 import SwiftUI
 
-/// The open chat's conversation, read-only, for the side panel of the iPad's full-screen size.
-/// The text lives in the store's memory only while this pane is on screen.
+/// How the thread is drawn: on a light panel (full screen) or on the deck's dark display.
+struct ThreadStyle {
+    var text: Color, dim: Color
+    var userFill: Color, userStroke: Color, agentFill: Color, agentStroke: Color
+    var panel: Bool
+    static func light(_ accent: Color) -> ThreadStyle {
+        .init(text: GenesisPalette.text, dim: GenesisPalette.dim, userFill: accent.opacity(0.16), userStroke: accent.opacity(0.25),
+              agentFill: Color.white.opacity(0.7), agentStroke: GenesisPalette.hairline, panel: true)
+    }
+    static func dark(_ accent: Color, text: Color, dim: Color) -> ThreadStyle {
+        .init(text: text, dim: dim, userFill: accent.opacity(0.30), userStroke: accent.opacity(0.45),
+              agentFill: Color.white.opacity(0.08), agentStroke: Color.white.opacity(0.10), panel: false)
+    }
+}
+
+/// The open chat's conversation, read-only. The text lives in the store's memory
+/// only while a pane is on screen.
 struct ThreadPane: View {
     @ObservedObject var store: ControllerStore
     let agentName: String
     let accent: Color
+    var style: ThreadStyle? = nil
     @State private var pinned = true
+    @State private var owner = UUID()
+    private var look: ThreadStyle { style ?? .light(accent) }
 
     private var isPad: Bool { UIDevice.current.userInterfaceIdiom == .pad }
 
     var body: some View {
         VStack(spacing: 0) {
             header
-            Divider().opacity(0.5)
+            if look.panel { Divider().opacity(0.5) }
             content
         }
-        .genesisPanel(radius: 16)
+        .modifier(PanelIf(on: look.panel))
+        .onAppear { store.setThreadVisible(true, owner: owner) }
+        .onDisappear { store.setThreadVisible(false, owner: owner) }
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier("thread.pane")
     }
 
     private var header: some View {
         HStack(spacing: 4) {
-            Image(systemName: "text.bubble").font(.system(size: 13, weight: .semibold)).foregroundStyle(accent)
-            Text("Thread").font(.system(size: 14, weight: .semibold, design: .rounded)).lineLimit(1)
+            if look.panel {
+                Image(systemName: "text.bubble").font(.system(size: 13, weight: .semibold)).foregroundStyle(accent)
+                Text("Thread").font(.system(size: 14, weight: .semibold, design: .rounded)).lineLimit(1)
+            } else {
+                Text("THREAD").font(.system(size: 11, weight: .bold, design: .monospaced)).tracking(1.6).foregroundStyle(accent)
+            }
             Spacer(minLength: 0)
             Button { ControllerSound.shared.keyClick(); Task { await store.refreshThread(userInitiated: true) } } label: {
                 Image(systemName: "arrow.clockwise").font(.system(size: 13, weight: .semibold)).frame(width: 40, height: 40)
@@ -32,8 +56,8 @@ struct ThreadPane: View {
             .disabled(store.selectedChat == nil)
             .accessibilityLabel("Refresh thread").accessibilityIdentifier("thread.refresh")
         }
-        .foregroundStyle(GenesisPalette.dim)
-        .padding(.leading, 12).padding(.trailing, 2)
+        .foregroundStyle(look.dim)
+        .padding(.leading, look.panel ? 12 : 0).padding(.trailing, 2)
     }
 
     @ViewBuilder private var content: some View {
@@ -53,7 +77,7 @@ struct ThreadPane: View {
 
     private func notice(_ text: String) -> some View {
         Text(text)
-            .font(.system(size: isPad ? 14 : 13, weight: .medium)).foregroundStyle(GenesisPalette.dim)
+            .font(.system(size: isPad ? 14 : 13, weight: .medium)).foregroundStyle(look.dim)
             .multilineTextAlignment(.center).padding(16)
             .frame(maxWidth: .infinity, maxHeight: .infinity)
             .accessibilityIdentifier("thread.notice")
@@ -65,7 +89,7 @@ struct ThreadPane: View {
                 LazyVStack(spacing: 8) {
                     if truncated {
                         Text("Earlier messages are on your Mac")
-                            .font(.caption).foregroundStyle(GenesisPalette.dim).padding(.vertical, 4)
+                            .font(.caption).foregroundStyle(look.dim).padding(.vertical, 4)
                             .accessibilityIdentifier("thread.truncated")
                     }
                     ForEach(Array(turns.enumerated()), id: \.offset) { index, turn in bubble(turn, index: index) }
@@ -87,17 +111,24 @@ struct ThreadPane: View {
             if mine { Spacer(minLength: 36) }
             Text(turn.text)
                 .font(.system(size: isPad ? 15 : 14))
-                .foregroundStyle(GenesisPalette.text)
+                .foregroundStyle(look.text)
                 .textSelection(.enabled)
                 .padding(.horizontal, 12).padding(.vertical, 8)
                 .background(RoundedRectangle(cornerRadius: 14, style: .continuous)
-                    .fill(mine ? accent.opacity(0.16) : Color.white.opacity(0.7)))
+                    .fill(mine ? look.userFill : look.agentFill))
                 .overlay(RoundedRectangle(cornerRadius: 14, style: .continuous)
-                    .strokeBorder(mine ? accent.opacity(0.25) : GenesisPalette.hairline, lineWidth: 1))
+                    .strokeBorder(mine ? look.userStroke : look.agentStroke, lineWidth: 1))
             if !mine { Spacer(minLength: 36) }
         }
         .accessibilityElement(children: .ignore)
         .accessibilityLabel("\(mine ? "You" : agentName): \(turn.text)")
         .accessibilityIdentifier("thread.message.\(index)")
+    }
+}
+
+private struct PanelIf: ViewModifier {
+    let on: Bool
+    @ViewBuilder func body(content: Content) -> some View {
+        if on { content.genesisPanel(radius: 16) } else { content }
     }
 }
