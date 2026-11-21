@@ -38,6 +38,10 @@ enum ThreadFailure: Error {
     case noSession
     case ambiguous
     case timeout
+    /// Nothing visible within the largest window read.
+    case tooFarBack
+    /// The whole transcript holds no visible message yet.
+    case empty
     /// The transcript carries no record tying it to the signed-in account.
     case unverified
     /// Anything else: an unexpected shape, an unsafe path, a changed identity.
@@ -49,6 +53,8 @@ enum ThreadLimits {
     static let maxTurnCharacters = 8_000
     static let maxCharacters = 24_000
     static let tailBytes = 8 * 1_048_576
+    /// Tail windows tried in turn; a long tool-heavy turn can bury the last visible messages.
+    static let windows = [8, 32, 96].map { $0 * 1_048_576 }
     static let lineBytes = 4 * 1_048_576
     static let seconds = 2.5
 
@@ -257,53 +263,204 @@ enum ClaudeThread {
         return ThreadTurn(role: type, text: text)
     }
 
-    /// Walks the parent chain back from the newest record. Returns visible messages, newest first.
-    static func parse(_ buffer: Data, binding: ClaudeBinding, startsMidFile: Bool, deadline: Double = .infinity) throws -> (turns: [ThreadTurn], limited: Bool) {
-        let bytes = [UInt8](buffer)
-        var begin = 0, end = bytes.count, limited = startsMidFile
-        if startsMidFile {
-            guard let newline = bytes.firstIndex(of: 10) else { throw ThreadFailure.unreadable }
-            begin = newline + 1
-        }
-        if end > 0, bytes[end - 1] != 10 { end = (bytes.lastIndex(of: 10) ?? -1) + 1; limited = true }
-        var nodes = [String: (parent: String?, turn: ThreadTurn?)](), leaf: String?, bridge: [String: Any]?, lines = 0
-        var cursor = begin
-        while cursor < end {
-            let stop = bytes[cursor..<end].firstIndex(of: 10) ?? end
-            let range = cursor..<stop; cursor = stop + 1
-            if range.isEmpty { continue }
-            lines += 1
-            if lines % 256 == 0, ProcessInfo.processInfo.systemUptime > deadline { throw ThreadFailure.timeout }
-            if range.count > ThreadLimits.lineBytes { limited = true; continue }
-            guard let record = try? JSONSerialization.jsonObject(with: Data(bytes[range])) as? [String: Any] else { throw ThreadFailure.unreadable }
-            guard record["sessionId"] as? String == binding.cliSessionID else { continue }
-            let type = record["type"] as? String
-            if type == "bridge-session" { bridge = record; continue }
-            guard let type, ["user", "assistant", "system", "attachment"].contains(type), isBool(record["isSidechain"], false),
-                  isUUID(record["uuid"]), let uuid = record["uuid"] as? String else { continue }
-            let parent = record["parentUuid"] as? String
-            if !(record["parentUuid"] is NSNull), !isUUID(parent) { throw ThreadFailure.unreadable }
-            guard nodes[uuid] == nil else { throw ThreadFailure.unreadable }
-            nodes[uuid] = (parent, visible(record)); leaf = uuid
-        }
-        guard let bridge, bridge["ownerAccountUuid"] as? String == binding.accountID,
-              bridge["ownerOrganizationUuid"] as? String == binding.organizationID else { throw ThreadFailure.unverified }
-        var turns = [ThreadTurn](), seen = Set<String>(), next = leaf
-        while let id = next {
-            guard seen.insert(id).inserted else { throw ThreadFailure.unreadable }
-            guard let node = nodes[id] else { limited = true; break }
-            if let turn = node.turn { turns.append(turn) }
-            next = node.parent
-        }
-        return (turns, limited)
+    /// What a transcript line says at its top level, found without decoding the message inside it.
+    struct LineFields {
+        var type: String?, uuid: String?, sessionId: String?
+        var parent: String?, parentIsNull = false, parentPresent = false
+        var sidechain: Bool?, hasToolUseResult = false
     }
 
-    static func read(title: String, home: String = FileManager.default.homeDirectoryForCurrentUser.path, deadline: Double) throws -> (turns: [ThreadTurn], limited: Bool) {
+    /// Reads the few short top-level fields of one JSON object and skips every other value, so a
+    /// multi-megabyte tool result or screenshot costs a scan, not a decode. Nil when the line is not
+    /// shaped as expected; the caller then decodes it fully and fails closed if that fails too.
+    static func scan(_ base: UnsafePointer<UInt8>, _ count: Int) -> LineFields? {
+        var i = 0
+        func space() { while i < count, base[i] == 0x20 || base[i] == 0x0A || base[i] == 0x0D || base[i] == 0x09 { i += 1 } }
+        /// Index just past the closing quote of the string whose opening quote is at i.
+        func endOfString() -> Int? {
+            var j = i + 1
+            while j < count {
+                guard let hit = memchr(base + j, 0x22, count - j) else { return nil }
+                let quote = base.distance(to: hit.assumingMemoryBound(to: UInt8.self))
+                var slashes = 0, k = quote - 1
+                while k > j - 1, base[k] == 0x5C { slashes += 1; k -= 1 }
+                if slashes % 2 == 0 { return quote + 1 }
+                j = quote + 1
+            }
+            return nil
+        }
+        func skipValue() -> Bool {
+            guard i < count else { return false }
+            switch base[i] {
+            case 0x22: guard let end = endOfString() else { return false }; i = end; return true
+            case 0x7B, 0x5B:
+                var depth = 0
+                while i < count {
+                    switch base[i] {
+                    case 0x22: guard let end = endOfString() else { return false }; i = end; continue
+                    case 0x7B, 0x5B: depth += 1
+                    case 0x7D, 0x5D: depth -= 1; if depth == 0 { i += 1; return true }
+                    default: break
+                    }
+                    i += 1
+                }
+                return false
+            default:
+                while i < count, base[i] != 0x2C, base[i] != 0x7D, base[i] != 0x20, base[i] != 0x0A, base[i] != 0x0D { i += 1 }
+                return true
+            }
+        }
+        var fields = LineFields()
+        space()
+        guard i < count, base[i] == 0x7B else { return nil }
+        i += 1
+        while true {
+            space()
+            guard i < count else { return nil }
+            if base[i] == 0x7D { return fields }
+            guard base[i] == 0x22, let keyEnd = endOfString() else { return nil }
+            let key = UnsafeBufferPointer(start: base + i + 1, count: keyEnd - i - 2)
+            i = keyEnd; space()
+            guard i < count, base[i] == 0x3A else { return nil }
+            i += 1; space()
+            guard i < count else { return nil }
+            let name = String(decoding: key, as: UTF8.self)
+            let isString = base[i] == 0x22
+            switch name {
+            case "type", "uuid", "sessionId", "parentUuid", "isSidechain", "toolUseResult":
+                if name == "toolUseResult" { fields.hasToolUseResult = true; guard skipValue() else { return nil } }
+                else if isString {
+                    let start = i
+                    guard let end = endOfString() else { return nil }
+                    let raw = UnsafeBufferPointer(start: base + start + 1, count: end - start - 2)
+                    // An escaped identifier is not one we can trust without a real decode.
+                    if raw.contains(0x5C) { return nil }
+                    let text = String(decoding: raw, as: UTF8.self)
+                    i = end
+                    switch name {
+                    case "type": fields.type = text
+                    case "uuid": fields.uuid = text
+                    case "sessionId": fields.sessionId = text
+                    case "parentUuid": fields.parent = text; fields.parentPresent = true
+                    default: return nil
+                    }
+                } else {
+                    let start = i
+                    guard skipValue() else { return nil }
+                    let literal = String(decoding: UnsafeBufferPointer(start: base + start, count: i - start), as: UTF8.self)
+                    switch name {
+                    case "isSidechain": fields.sidechain = literal == "false" ? false : literal == "true" ? true : nil
+                    case "parentUuid": fields.parentPresent = true; fields.parentIsNull = literal == "null"
+                    default: break
+                    }
+                }
+            default:
+                guard skipValue() else { return nil }
+            }
+            space()
+            guard i < count else { return nil }
+            if base[i] == 0x2C { i += 1; continue }
+            if base[i] == 0x7D { return fields }
+            return nil
+        }
+    }
+
+    /// Walks the parent chain back from the newest record. Returns visible messages, newest first.
+    /// `reachedEdge` means a parent was missing from the buffer, so older messages exist beyond it.
+    static func parse(_ buffer: Data, binding: ClaudeBinding, startsMidFile: Bool, deadline: Double = .infinity) throws -> (turns: [ThreadTurn], limited: Bool, reachedEdge: Bool) {
+        try buffer.withUnsafeBytes { raw -> (turns: [ThreadTurn], limited: Bool, reachedEdge: Bool) in
+            guard let base = raw.bindMemory(to: UInt8.self).baseAddress else { return ([], startsMidFile, false) }
+            var begin = 0, end = raw.count, limited = false
+            if startsMidFile {
+                guard let newline = memchr(base, 10, end) else { throw ThreadFailure.unreadable }
+                begin = base.distance(to: newline.assumingMemoryBound(to: UInt8.self)) + 1
+            }
+            if end > 0, base[end - 1] != 10 {
+                var last = end - 1
+                while last >= 0, base[last] != 10 { last -= 1 }
+                end = last + 1; limited = true
+            }
+            var nodes = [String: (parent: String?, turn: ThreadTurn?)](), leaf: String?, bridge: [String: Any]?, lines = 0
+            var cursor = begin
+            while cursor < end {
+                let stop = memchr(base + cursor, 10, end - cursor).map { base.distance(to: $0.assumingMemoryBound(to: UInt8.self)) } ?? end
+                let length = stop - cursor, start = cursor
+                cursor = stop + 1
+                if length == 0 { continue }
+                lines += 1
+                if lines % 64 == 0, ProcessInfo.processInfo.systemUptime > deadline { throw ThreadFailure.timeout }
+                // Decode a line fully only when it could be a visible message or the ownership record.
+                func decode() throws -> [String: Any] {
+                    guard length <= ThreadLimits.lineBytes,
+                          let object = try? JSONSerialization.jsonObject(with: Data(bytes: base + start, count: length)) as? [String: Any] else { throw ThreadFailure.unreadable }
+                    return object
+                }
+                var fields = scan(base + start, length)
+                var record: [String: Any]?
+                if fields == nil {
+                    record = try decode()
+                    fields = LineFields(type: record?["type"] as? String, uuid: record?["uuid"] as? String, sessionId: record?["sessionId"] as? String,
+                                        parent: record?["parentUuid"] as? String, parentIsNull: record?["parentUuid"] is NSNull,
+                                        parentPresent: record?["parentUuid"] != nil, sidechain: (record?["isSidechain"] as? NSNumber).flatMap { CFGetTypeID($0) == CFBooleanGetTypeID() ? $0.boolValue : nil },
+                                        hasToolUseResult: record?["toolUseResult"] != nil)
+                }
+                guard let fields, fields.sessionId == binding.cliSessionID else { continue }
+                if fields.type == "bridge-session" { if let record { bridge = record } else { bridge = try decode() }; continue }
+                guard let type = fields.type, ["user", "assistant", "system", "attachment"].contains(type), fields.sidechain == false,
+                      isUUID(fields.uuid), let uuid = fields.uuid else { continue }
+                if !fields.parentIsNull, !isUUID(fields.parent) { throw ThreadFailure.unreadable }
+                guard nodes[uuid] == nil else { throw ThreadFailure.unreadable }
+                var turn: ThreadTurn?
+                // A tool result is never a visible message, so its payload is never decoded.
+                if (type == "user" || type == "assistant"), !fields.hasToolUseResult {
+                    if length > ThreadLimits.lineBytes { limited = true }
+                    else { let full = try record ?? decode(); turn = visible(full) }
+                }
+                nodes[uuid] = (fields.parentIsNull ? nil : fields.parent, turn); leaf = uuid
+            }
+            guard let bridge, bridge["ownerAccountUuid"] as? String == binding.accountID,
+                  bridge["ownerOrganizationUuid"] as? String == binding.organizationID else { throw ThreadFailure.unverified }
+            var turns = [ThreadTurn](), seen = Set<String>(), next = leaf, reachedEdge = false
+            while let id = next {
+                guard seen.insert(id).inserted else { throw ThreadFailure.unreadable }
+                guard let node = nodes[id] else { limited = true; reachedEdge = true; break }
+                if let turn = node.turn { turns.append(turn) }
+                next = node.parent
+            }
+            return (turns, limited, reachedEdge)
+        }
+    }
+
+    /// Reads a window at the end of the transcript, widening it while the newest visible messages are not in it.
+    static func read(title: String, home: String = FileManager.default.homeDirectoryForCurrentUser.path, deadline: Double,
+                     windows: [Int] = ThreadLimits.windows, now: () -> Double = { ProcessInfo.processInfo.systemUptime }) throws -> (turns: [ThreadTurn], limited: Bool) {
         let found = try binding(title: title, home: home)
-        let tail = try tail(found, home: home, maximum: ThreadLimits.tailBytes)
-        let result = try parse(tail.data, binding: found, startsMidFile: tail.startsMidFile, deadline: deadline)
+        var best: (turns: [ThreadTurn], limited: Bool)?
+        var wholeFile = false
+        for (index, size) in windows.enumerated() {
+            let started = now()
+            let tail = try tail(found, home: home, maximum: size)
+            wholeFile = !tail.startsMidFile
+            let last = index + 1 >= windows.count
+            var widen = false
+            do {
+                let parsed = try parse(tail.data, binding: found, startsMidFile: tail.startsMidFile, deadline: deadline)
+                best = (parsed.turns, parsed.limited)
+                widen = tail.startsMidFile && (parsed.turns.count < 6 || (parsed.reachedEdge && parsed.turns.count < ThreadLimits.maxTurns))
+            } catch ThreadFailure.unverified where tail.startsMidFile && !last {
+                widen = true     // the ownership record may sit before this window
+            } catch ThreadFailure.timeout where best != nil {
+                best?.limited = true; break
+            }
+            guard widen, !last else { break }
+            // Reading and parsing cost about the same per byte as the last window did.
+            let predicted = (now() - started) / Double(size) * Double(windows[index + 1])
+            guard now() + predicted < deadline else { break }
+        }
+        guard var result = best else { throw ThreadFailure.unverified }
         // The title must still name the same single session once the file has been read.
         guard try binding(title: title, home: home).transcript == found.transcript else { throw ThreadFailure.unreadable }
+        if result.turns.isEmpty { throw wholeFile ? ThreadFailure.empty : ThreadFailure.tooFarBack }
         return result
     }
 }
@@ -428,6 +585,7 @@ extension Array where Element == String {
 }
 
 enum ThreadReader {
+    static let tooFarBackMessage = "This chat\u{2019}s recent messages are too far back to read right now. Try again after its next reply."
     static let refreshMessage = "Refresh the chats on your phone, then try again."
     static let codexUnavailable = "Codex could not provide this chat\u{2019}s messages right now. Open Codex on this Mac and try again."
     static let claudeUnavailable = "This Claude chat could not be read safely from its transcript right now."
@@ -455,6 +613,8 @@ enum ThreadReader {
                 case .noSession: return ClaudeThread.noSessionMessage
                 case .ambiguous: return ClaudeThread.sharedTitleMessage
                 case .timeout: return "Reading this Claude chat took too long. Try again."
+                case .tooFarBack: return tooFarBackMessage
+                case .empty: return "This chat has no messages to show yet."
                 case .unverified: return "This Claude chat\u{2019}s transcript has no record tying it to your account, so it is not shown."
                 case .unreadable: return claudeUnavailable
                 }
