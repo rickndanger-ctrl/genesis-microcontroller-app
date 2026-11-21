@@ -177,6 +177,55 @@ import Foundation
         let tail = try ClaudeThread.tail(binding, home: home.path, maximum: 300)
         expect(tail.data.count == 300 && tail.startsMidFile, "tail is limited to the requested bytes")
 
+        // Long tool-heavy turns bury the last visible messages: the window widens, in time, and never answers empty.
+        let mebi = 1_048_576
+        func toolLine(_ n: Int, parent: Int, bytes: Int) -> String {
+            "{\"parentUuid\":\"\(uuid(parent))\",\"isSidechain\":false,\"sessionId\":\"\(session)\",\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":[{\"type\":\"tool_result\",\"content\":\""
+                + String(repeating: "A", count: bytes) + "\\\" } ] ,\\\\\"}]},\"uuid\":\"\(uuid(n))\",\"toolUseResult\":{\"stdout\":\"x\"}}\n"
+        }
+        /// Two visible messages, then `mebis` MiB of tool results chained from them, then a small ownership record.
+        func buried(mebis: Int, toolBytes: Int = mebi) {
+            let url = home.appendingPathComponent(transcriptPath)
+            fm.createFile(atPath: url.path, contents: Data((bridge + record(1, parent: nil, type: "user", content: "buried question")
+                + record(2, parent: 1, type: "assistant", content: text("buried answer"))).utf8))
+            let handle = try! FileHandle(forWritingTo: url)
+            handle.seekToEndOfFile()
+            var parent = 2
+            for n in 0..<max(1, mebis * mebi / toolBytes) { handle.write(Data(toolLine(100 + n, parent: parent, bytes: toolBytes).utf8)); parent = 100 + n }
+            handle.write(Data(bridge.utf8)); handle.closeFile()
+        }
+        let roomy = ProcessInfo.processInfo.systemUptime + 600
+        buried(mebis: 10)
+        var wide = try ClaudeThread.read(title: "Plan the trip", home: home.path, deadline: roomy)
+        expect(wide.turns.map(\.text) == ["buried answer", "buried question"] && !wide.limited, "messages 10 MiB back are found, and nothing older exists")
+        buried(mebis: 40)
+        wide = try ClaudeThread.read(title: "Plan the trip", home: home.path, deadline: roomy)
+        expect(wide.turns.count == 2, "messages 40 MiB back are found")
+        buried(mebis: 6, toolBytes: 5 * mebi)
+        wide = try ClaudeThread.read(title: "Plan the trip", home: home.path, deadline: roomy)
+        expect(wide.turns.count == 2, "a tool result over the line limit does not break the chain")
+        buried(mebis: 100)
+        fails("nothing visible within 96 MiB", .tooFarBack) { _ = try ClaudeThread.read(title: "Plan the trip", home: home.path, deadline: roomy) }
+        expect(ThreadReader.tooFarBackMessage == "This chat\u{2019}s recent messages are too far back to read right now. Try again after its next reply.", "too-far-back wording")
+        // Time: a wider read is not started when it would not fit.
+        buried(mebis: 10)
+        var clock = 0.0
+        fails("no time to widen", .tooFarBack) { _ = try ClaudeThread.read(title: "Plan the trip", home: home.path, deadline: 1, now: { clock += 0.4; return clock }) }
+        // Smaller windows widen in steps, and the whole-file answer is not marked as cut.
+        buried(mebis: 3)
+        wide = try ClaudeThread.read(title: "Plan the trip", home: home.path, deadline: roomy, windows: [1 * mebi, 2 * mebi, 8 * mebi])
+        expect(wide.turns.count == 2, "custom windows widen in steps")
+        write(transcriptPath, bridge + line(["type": "summary", "sessionId": session]))
+        fails("a transcript with no messages", .empty) { _ = try ClaudeThread.read(title: "Plan the trip", home: home.path, deadline: roomy) }
+        write(transcriptPath, file)
+        let smallRead = try ClaudeThread.read(title: "Plan the trip", home: home.path, deadline: roomy)
+        expect(smallRead.turns.count == 4 && !smallRead.limited, "a small transcript reads whole, as before")
+        // Strings holding quotes, braces and backslashes do not confuse the field scan.
+        let tricky = bridge + record(1, parent: nil, type: "user", content: "say \"hi\" } ] , \\ done") + record(2, parent: 1, type: "assistant", content: text("ok {\"a\":[1]}"))
+        parsed = try ClaudeThread.parse(Data(tricky.utf8), binding: binding, startsMidFile: false)
+        expect(parsed.turns.map(\.text) == ["ok {\"a\":[1]}", "say \"hi\" } ] , \\ done"] && !parsed.reachedEdge, "scan survives quotes, braces and backslashes")
+        expect(ClaudeThread.scan(Array("{\"type\":".utf8), 9) == nil, "a cut-off line is not scanned")
+
         // Codex.
         func entry(_ turn: String, _ item: [String: Any]) -> [String: Any] { ["turnId": turn, "item": item] }
         func agent(_ id: String, _ value: String, phase: String? = nil) -> [String: Any] {
