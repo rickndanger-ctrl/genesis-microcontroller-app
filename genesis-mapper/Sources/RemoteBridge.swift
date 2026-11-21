@@ -209,11 +209,11 @@ import CoreImage.CIFilterBuiltins
                 }
                 let readiness=isLocked ? "locked":!AXIsProcessTrusted() ? "needsAccessibility":!running || covered ? "closed":"ready"
                 let reason=readiness=="ready" ? "Chats, Send, New side chat and Call are connected. Send briefly brings Muse to the front and uses the clipboard, which is restored afterwards. Chats that share a title are left out.":readiness=="locked" ? "Unlock this Mac to use Muse.":covered ? "Muse\u{2019}s window on this Mac is too narrow for the controller to reach its chats. Open Muse from here to widen it.":readiness=="closed" ? "Open Muse on this Mac.":"Enable Accessibility for Agent Micro Controller."
-                return RemoteProvider(id:provider,name:"Muse",installed:installed,readiness:readiness,capabilities:readiness=="ready" ? RemoteMuse.capabilities:readiness=="closed" && installed ? ["artifacts","launchApp"]:["artifacts"],reason:reason,actions:RemoteMuse.actions)
+                return RemoteProvider(id:provider,name:"Muse",installed:installed,readiness:readiness,capabilities:(readiness=="ready" ? RemoteMuse.capabilities:readiness=="closed" && installed ? ["artifacts","launchApp"]:["artifacts"]).withReadThread(installed:installed,unlocked:!isLocked),reason:reason,actions:RemoteMuse.actions)
             }
             let readiness=isLocked ? "locked":!AXIsProcessTrusted() ? "needsAccessibility":!running ? "closed":"ready"
             let reason=readiness=="ready" ? "Native live voice is not yet available on the phone.":readiness=="locked" ? "Unlock this Mac to use desktop controls.":readiness=="closed" ? "Open Claude on this Mac.":"Enable Accessibility for Agent Micro Controller."
-            return RemoteProvider(id:provider,name:"Claude",installed:installed,readiness:readiness,capabilities:readiness=="ready" ? ["openChat","sendPrompt","stop","artifacts","menuNavigation"] + RemoteActionCatalog.claude.map{$0.action.id}:readiness=="closed" && installed ? ["artifacts","launchApp"]:["artifacts"],reason:reason,actions:RemoteActionCatalog.claude.map(\.action))
+            return RemoteProvider(id:provider,name:"Claude",installed:installed,readiness:readiness,capabilities:(readiness=="ready" ? ["openChat","sendPrompt","stop","artifacts","menuNavigation"] + RemoteActionCatalog.claude.map{$0.action.id}:readiness=="closed" && installed ? ["artifacts","launchApp"]:["artifacts"]).withReadThread(installed:installed,unlocked:!isLocked),reason:reason,actions:RemoteActionCatalog.claude.map(\.action))
         }
         return RemoteHostStatus(hostID:store?.hostID ?? "",hostName:hostName,providers:providers,companionVersion:Self.companionVersion)
     }
@@ -644,6 +644,12 @@ import CoreImage.CIFilterBuiltins
                 let chats=loadChats(parameter("provider"))
                 return .json(RemoteChatList(chats:chats,leftOut:RemoteLeftOut.titles(claudeLeftOut)))
             }
+            if request.method=="GET",path=="/v1/thread" {
+                let provider=parameter("provider"),chatID=parameter("chatID")
+                guard RemotePolicy.providers.contains(provider) else{return .error(422,"Unknown provider.")}
+                guard !chatID.isEmpty,chatID.utf8.count<=128 else{return .error(422,"Choose a chat first.")}
+                return .json(await readThread(provider:provider,chatID:chatID))
+            }
             if request.method=="GET",path=="/v1/profile" {return .json(try seededProfile(parameter("provider")))}
             if request.method=="PUT",path=="/v1/profile" {
                 let profile=try JSONDecoder().decode(RemoteProfile.self,from:request.body)
@@ -697,6 +703,29 @@ import CoreImage.CIFilterBuiltins
         } catch let error as RemoteDisplayFault {return .error(error.status,error.message)}
         catch let error as RemoteFault {return .error(error.status,error.message)}
         catch {return .error(400,"Invalid request or unavailable artifact.")}
+    }
+    /// Recent messages of one chat, read from the local files of Claude Code or Codex. Read-only.
+    /// The text goes into the response only; nothing here logs or records it.
+    private func readThread(provider:String,chatID:String) async -> ThreadSnapshot {
+        func unavailable(_ message:String)->ThreadSnapshot {.unavailable(provider:provider,chatID:chatID,message)}
+        guard !isLocked else{return unavailable("Unlock this Mac to read this chat.")}
+        switch provider {
+        case "codex":
+            guard let chat=await loadCodexChats().first(where:{$0.id==chatID}) else{return unavailable("This chat is not in Codex\u{2019}s chat list on this Mac. Refresh the chats and try again.")}
+            return await ThreadReader.codex(threadID:chat.id,chatID:chatID)
+        case "claude":
+            guard !ambiguousClaudeIDs.contains(chatID) else{return unavailable(ClaudeThread.sharedTitleMessage)}
+            let savedSlots=(try? seededProfile("claude").slots) ?? []
+            let known=(UserDefaults.standard.stringArray(forKey:"knownSessionTitles") ?? [])+(UserDefaults.standard.stringArray(forKey:"slots") ?? [])
+            // Cached lists only: no Accessibility work belongs in this route, which the phone polls.
+            // The sidebar does not say what kind of chat a title is. ThreadReader.claude reads only a
+            // Claude Code session with exactly this title and refuses when none or several match, or when another
+            // kind of local session shares the title. A cloud-only chat with the same title is not covered.
+            guard let title=RemoteClaudeLookup.savedTarget(id:chatID,candidates:Array(recentChats.values),profileSlots:savedSlots,knownTitles:known)?.title else{return unavailable(ThreadReader.refreshMessage)}
+            return await ThreadReader.claude(title:title,chatID:chatID)
+        default:
+            return unavailable("Reading messages is not available for Muse.")
+        }
     }
     private func clearDisplaySession() {
         displayExpiryTask?.cancel();displayExpiryTask=nil;displaySession.invalidate()

@@ -1,0 +1,477 @@
+import Foundation
+import Darwin
+
+// Read-only. Nothing here writes to Claude's or Codex's files or sends to either app.
+// Conversation text goes only into the returned value: never into a log or an error.
+
+struct ThreadTurn: Encodable, Equatable {
+    let role: String
+    let text: String
+}
+
+struct ThreadSnapshot: Encodable {
+    let provider: String
+    let chatID: String
+    let status: String
+    let message: String?
+    let turns: [ThreadTurn]
+    let truncated: Bool
+
+    static func ok(provider: String, chatID: String, turns: [ThreadTurn], truncated: Bool) -> ThreadSnapshot {
+        ThreadSnapshot(provider: provider, chatID: chatID, status: "ok", message: nil, turns: turns, truncated: truncated)
+    }
+    static func unavailable(provider: String, chatID: String, _ message: String) -> ThreadSnapshot {
+        ThreadSnapshot(provider: provider, chatID: chatID, status: "unavailable", message: message, turns: [], truncated: false)
+    }
+    private enum CodingKeys: String, CodingKey { case provider, chatID, status, message, turns, truncated }
+    func encode(to encoder: Encoder) throws {
+        var box = encoder.container(keyedBy: CodingKeys.self)
+        try box.encode(provider, forKey: .provider); try box.encode(chatID, forKey: .chatID)
+        try box.encode(status, forKey: .status)
+        if let message { try box.encode(message, forKey: .message) } else { try box.encodeNil(forKey: .message) }
+        try box.encode(turns, forKey: .turns); try box.encode(truncated, forKey: .truncated)
+    }
+}
+
+enum ThreadFailure: Error {
+    /// No Claude Code session with this exact title has a transcript here.
+    case noSession
+    case ambiguous
+    case timeout
+    /// The transcript carries no record tying it to the signed-in account.
+    case unverified
+    /// Anything else: an unexpected shape, an unsafe path, a changed identity.
+    case unreadable
+}
+
+enum ThreadLimits {
+    static let maxTurns = 12
+    static let maxTurnCharacters = 8_000
+    static let maxCharacters = 24_000
+    static let tailBytes = 8 * 1_048_576
+    static let lineBytes = 4 * 1_048_576
+    static let seconds = 2.5
+
+    /// Newest first in, newest first out. The newest turns win when the budget runs out.
+    static func bound(_ newestFirst: [ThreadTurn], limited: Bool) -> (turns: [ThreadTurn], truncated: Bool) {
+        var kept = [ThreadTurn](), remaining = maxCharacters, truncated = limited
+        for turn in newestFirst {
+            guard kept.count < maxTurns, remaining > 0 else { truncated = true; break }
+            let allowed = min(maxTurnCharacters, remaining)
+            let text = turn.text.count > allowed ? String(turn.text.prefix(allowed)) : turn.text
+            if text.count < turn.text.count { truncated = true }
+            remaining -= text.count
+            kept.append(ThreadTurn(role: turn.role, text: text))
+        }
+        return (kept.reversed(), truncated)
+    }
+    static func clean(_ raw: String, keepingLineBreaks: Bool = true) -> String {
+        String(String.UnicodeScalarView(raw.unicodeScalars.filter {
+            !CharacterSet.controlCharacters.contains($0) || ($0 == "\n" || $0 == "\t" || ($0 == "\r" && keepingLineBreaks))
+        })).trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+}
+
+// MARK: Claude
+
+struct ClaudeBinding {
+    let accountID: String
+    let organizationID: String
+    let cliSessionID: String
+    let transcript: String
+}
+
+enum ClaudeThread {
+    static let noSessionMessage = "Only Claude Code chats with a transcript on this Mac can be shown."
+
+    private static func isUUID(_ value: Any?) -> Bool {
+        guard let value = value as? String, value.utf8.count == 36 else { return false }
+        return value.range(of: "^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$", options: .regularExpression) != nil
+    }
+    private static func isBool(_ value: Any?, _ expected: Bool) -> Bool {
+        guard let number = value as? NSNumber, CFGetTypeID(number) == CFBooleanGetTypeID() else { return false }
+        return number.boolValue == expected
+    }
+
+    /// Every component under home must be a real directory or file owned by this user; no symlinks.
+    private static func checked(home: String, path: String, directory: Bool) throws -> stat {
+        guard path.hasPrefix(home + "/") else { throw ThreadFailure.unreadable }
+        var cursor = home, info = stat()
+        let parts = path.dropFirst(home.count + 1).split(separator: "/", omittingEmptySubsequences: false)
+        guard !parts.isEmpty, !parts.contains(where: { $0.isEmpty || $0 == "." || $0 == ".." }) else { throw ThreadFailure.unreadable }
+        for (index, part) in parts.enumerated() {
+            cursor += "/" + part
+            guard lstat(cursor, &info) == 0, info.st_mode & S_IFMT != S_IFLNK, info.st_uid == geteuid() else { throw ThreadFailure.unreadable }
+            if index < parts.count - 1, info.st_mode & S_IFMT != S_IFDIR { throw ThreadFailure.unreadable }
+        }
+        let kind = info.st_mode & S_IFMT
+        guard directory ? kind == S_IFDIR : kind == S_IFREG else { throw ThreadFailure.unreadable }
+        return info
+    }
+    private static func descriptor(_ path: String, expecting before: stat) throws -> Int32 {
+        let fd = open(path, O_RDONLY | O_NOFOLLOW)
+        guard fd >= 0 else { throw ThreadFailure.unreadable }
+        var info = stat()
+        guard fstat(fd, &info) == 0, info.st_dev == before.st_dev, info.st_ino == before.st_ino else { close(fd); throw ThreadFailure.unreadable }
+        return fd
+    }
+    private static func pread(_ fd: Int32, count: Int, at offset: Int) throws -> Data {
+        var data = Data(count: count), done = 0
+        while done < count {
+            let got = data.withUnsafeMutableBytes { Darwin.pread(fd, $0.baseAddress!.advanced(by: done), count - done, off_t(offset + done)) }
+            if got < 0, errno == EINTR { continue }
+            guard got > 0 else { throw ThreadFailure.unreadable }
+            done += got
+        }
+        return data
+    }
+    private static func json(home: String, path: String, budget: inout Int) throws -> [String: Any] {
+        let before = try checked(home: home, path: path, directory: false)
+        guard before.st_size > 0, before.st_size <= 2 * 1_048_576 else { throw ThreadFailure.unreadable }
+        budget -= Int(before.st_size)
+        guard budget >= 0 else { throw ThreadFailure.unreadable }
+        let fd = try descriptor(path, expecting: before)
+        defer { close(fd) }
+        let data = try pread(fd, count: Int(before.st_size), at: 0)
+        guard let value = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { throw ThreadFailure.unreadable }
+        return value
+    }
+
+    /// Finds the one active Claude Code session whose title matches exactly.
+    static func binding(title: String, home rawHome: String) throws -> ClaudeBinding {
+        guard !title.isEmpty, title.count <= 2000, !title.contains("\0") else { throw ThreadFailure.unreadable }
+        guard let resolved = realpath(rawHome, nil) else { throw ThreadFailure.unreadable }
+        let home = String(cString: resolved); free(resolved)
+        var homeInfo = stat()
+        guard stat(home, &homeInfo) == 0, homeInfo.st_uid == geteuid() else { throw ThreadFailure.unreadable }
+        let app = home + "/Library/Application Support/Claude"
+        var budget = 16 * 1_048_576
+        let desktop = try json(home: home, path: app + "/config.json", budget: &budget)
+        let cli = try json(home: home, path: home + "/.claude.json", budget: &budget)
+        guard let account = cli["oauthAccount"] as? [String: Any], isUUID(account["accountUuid"]), isUUID(account["organizationUuid"]),
+              let accountID = account["accountUuid"] as? String, let organizationID = account["organizationUuid"] as? String,
+              desktop["lastKnownAccountUuid"] as? String == accountID else { throw ThreadFailure.unreadable }
+        let directory = "\(app)/claude-code-sessions/\(accountID)/\(organizationID)"
+        _ = try checked(home: home, path: directory, directory: true)
+        let names = ((try? FileManager.default.contentsOfDirectory(atPath: directory)) ?? [])
+            .filter { $0.range(of: "^local_[a-f0-9-]+\\.json$", options: .regularExpression) != nil }
+        guard names.count <= 512 else { throw ThreadFailure.unreadable }
+        var matches = [(record: [String: Any], name: String)]()
+        for name in names.sorted() {
+            let filenameID = String(name.dropFirst(6).dropLast(5))
+            guard isUUID(filenameID) else { continue }
+            let record = try json(home: home, path: directory + "/" + name, budget: &budget)
+            if record["title"] as? String != title || isBool(record["isArchived"], true) { continue }
+            // A missing archive flag cannot establish an active Desktop session.
+            guard isBool(record["isArchived"], false), record["sessionId"] as? String == "local_" + filenameID else { throw ThreadFailure.noSession }
+            guard isUUID(record["cliSessionId"]), let cwd = record["cwd"] as? String, cwd.hasPrefix("/"), !cwd.contains("\0"),
+                  cwd.count <= 4096, URL(fileURLWithPath: cwd).standardized.path == cwd else { throw ThreadFailure.noSession }
+            matches.append((record, name))
+        }
+        guard matches.count == 1 else { throw matches.isEmpty ? ThreadFailure.noSession : ThreadFailure.ambiguous }
+        try rejectSharedTitle(title, app: app, home: home, budget: &budget)
+        let record = matches[0].record
+        // Claude Code encodes the folder per UTF-16 unit, so one emoji becomes two dashes.
+        let project = String(String.UnicodeScalarView((record["cwd"] as! String).utf16.map { unit -> Unicode.Scalar in
+            let ascii = unit < 128 ? Unicode.Scalar(UInt8(unit)) : nil
+            if let ascii, CharacterSet.alphanumerics.contains(ascii) { return ascii }
+            return "-"
+        }))
+        let session = record["cliSessionId"] as! String
+        let transcript = "\(home)/.claude/projects/\(project)/\(session).jsonl"
+        // The exact indexed UUID path or nothing. Never search by title or take the newest file.
+        guard (try? checked(home: home, path: transcript, directory: false)) != nil else { throw ThreadFailure.noSession }
+        return ClaudeBinding(accountID: accountID, organizationID: organizationID, cliSessionID: session, transcript: transcript)
+    }
+
+    static let sharedTitleMessage = "Two chats on this Mac share this title, so its messages can\u{2019}t be shown. Rename one, then refresh."
+
+    /// Another kind of session (local-agent-mode-sessions/<account>/<org>/local_*.json, with "title" and
+    /// "isArchived") may carry the same title as the Code session; the sidebar cannot say which one a row is.
+    /// A missing archive flag counts as unarchived here. An unreadable file in that store fails closed.
+    /// Not covered: a chat that exists only in the cloud and shares a title with a Code session.
+    private static func rejectSharedTitle(_ title: String, app: String, home: String, budget: inout Int) throws {
+        let store = app + "/local-agent-mode-sessions"
+        guard FileManager.default.fileExists(atPath: store) else { return }
+        _ = try checked(home: home, path: store, directory: true)
+        var files = [String]()
+        for account in (try? FileManager.default.contentsOfDirectory(atPath: store)) ?? [] {
+            let accountPath = store + "/" + account
+            var info = stat()
+            guard lstat(accountPath, &info) == 0, info.st_mode & S_IFMT == S_IFDIR else { continue }
+            for organization in (try? FileManager.default.contentsOfDirectory(atPath: accountPath)) ?? [] {
+                let organizationPath = accountPath + "/" + organization
+                guard lstat(organizationPath, &info) == 0, info.st_mode & S_IFMT == S_IFDIR else { continue }
+                files += ((try? FileManager.default.contentsOfDirectory(atPath: organizationPath)) ?? [])
+                    .filter { $0.range(of: "^local_[a-f0-9-]+\\.json$", options: .regularExpression) != nil }
+                    .map { organizationPath + "/" + $0 }
+            }
+        }
+        guard files.count <= 512 else { throw ThreadFailure.unreadable }
+        for file in files {
+            let record = try json(home: home, path: file, budget: &budget)
+            if record["title"] as? String == title, !isBool(record["isArchived"], true) { throw ThreadFailure.ambiguous }
+        }
+    }
+
+    static func tail(_ binding: ClaudeBinding, home rawHome: String, maximum: Int) throws -> (data: Data, startsMidFile: Bool) {
+        guard let resolved = realpath(rawHome, nil) else { throw ThreadFailure.unreadable }
+        let home = String(cString: resolved); free(resolved)
+        let before = try checked(home: home, path: binding.transcript, directory: false)
+        let fd = try descriptor(binding.transcript, expecting: before)
+        defer { close(fd) }
+        var info = stat()
+        guard fstat(fd, &info) == 0 else { throw ThreadFailure.unreadable }
+        let size = Int(info.st_size), start = max(0, size - maximum)
+        let data = try pread(fd, count: size - start, at: start)
+        var after = stat()
+        guard fstat(fd, &after) == 0, after.st_size >= info.st_size else { throw ThreadFailure.unreadable }
+        return (data, start > 0)
+    }
+
+    private static func scaffolding(_ text: String) -> Bool {
+        ["<system-reminder>", "<task-notification>", "<local-command-caveat>", "<local-command-stdout>", "<local-command-stderr>",
+         "<command-message>", "<command-name>", "<ide_opened_file>", "<ide_selection>",
+         "This session is being continued from a previous conversation that ran out of context.",
+         "Caveat: The messages below were generated by the user while running local commands."].contains { text.hasPrefix($0) }
+    }
+    /// Visible user and assistant text only: no tool calls or results, thinking, sidechains, meta or wrappers.
+    static func visible(_ record: [String: Any]) -> ThreadTurn? {
+        guard let type = record["type"] as? String, type == "user" || type == "assistant",
+              isBool(record["isSidechain"], false), !isBool(record["isMeta"], true), !isBool(record["isCompactSummary"], true),
+              !isBool(record["isVisibleInTranscriptOnly"], true), !isBool(record["hidden"], true), record["visibility"] as? String != "hidden",
+              record["toolUseResult"] == nil, record["sourceToolAssistantUUID"] == nil,
+              let message = record["message"] as? [String: Any], message["role"] as? String == type else { return nil }
+        var text: String
+        if let string = message["content"] as? String, type == "user" { text = string }
+        else if let blocks = message["content"] as? [Any] {
+            let objects = blocks.compactMap { $0 as? [String: Any] }
+            if type == "user", objects.contains(where: { ["tool_result", "tool_use"].contains($0["type"] as? String ?? "") }) { return nil }
+            text = objects.filter { block in
+                guard block["type"] as? String == "text", let value = block["text"] as? String, !isBool(block["hidden"], true), block["visibility"] as? String != "hidden" else { return false }
+                return type != "user" || !scaffolding(ThreadLimits.clean(value))
+            }.compactMap { $0["text"] as? String }.joined(separator: "\n")
+        } else { return nil }
+        text = ThreadLimits.clean(text)
+        if text.isEmpty || (type == "user" && scaffolding(text)) { return nil }
+        return ThreadTurn(role: type, text: text)
+    }
+
+    /// Walks the parent chain back from the newest record. Returns visible messages, newest first.
+    static func parse(_ buffer: Data, binding: ClaudeBinding, startsMidFile: Bool, deadline: Double = .infinity) throws -> (turns: [ThreadTurn], limited: Bool) {
+        let bytes = [UInt8](buffer)
+        var begin = 0, end = bytes.count, limited = startsMidFile
+        if startsMidFile {
+            guard let newline = bytes.firstIndex(of: 10) else { throw ThreadFailure.unreadable }
+            begin = newline + 1
+        }
+        if end > 0, bytes[end - 1] != 10 { end = (bytes.lastIndex(of: 10) ?? -1) + 1; limited = true }
+        var nodes = [String: (parent: String?, turn: ThreadTurn?)](), leaf: String?, bridge: [String: Any]?, lines = 0
+        var cursor = begin
+        while cursor < end {
+            let stop = bytes[cursor..<end].firstIndex(of: 10) ?? end
+            let range = cursor..<stop; cursor = stop + 1
+            if range.isEmpty { continue }
+            lines += 1
+            if lines % 256 == 0, ProcessInfo.processInfo.systemUptime > deadline { throw ThreadFailure.timeout }
+            if range.count > ThreadLimits.lineBytes { limited = true; continue }
+            guard let record = try? JSONSerialization.jsonObject(with: Data(bytes[range])) as? [String: Any] else { throw ThreadFailure.unreadable }
+            guard record["sessionId"] as? String == binding.cliSessionID else { continue }
+            let type = record["type"] as? String
+            if type == "bridge-session" { bridge = record; continue }
+            guard let type, ["user", "assistant", "system", "attachment"].contains(type), isBool(record["isSidechain"], false),
+                  isUUID(record["uuid"]), let uuid = record["uuid"] as? String else { continue }
+            let parent = record["parentUuid"] as? String
+            if !(record["parentUuid"] is NSNull), !isUUID(parent) { throw ThreadFailure.unreadable }
+            guard nodes[uuid] == nil else { throw ThreadFailure.unreadable }
+            nodes[uuid] = (parent, visible(record)); leaf = uuid
+        }
+        guard let bridge, bridge["ownerAccountUuid"] as? String == binding.accountID,
+              bridge["ownerOrganizationUuid"] as? String == binding.organizationID else { throw ThreadFailure.unverified }
+        var turns = [ThreadTurn](), seen = Set<String>(), next = leaf
+        while let id = next {
+            guard seen.insert(id).inserted else { throw ThreadFailure.unreadable }
+            guard let node = nodes[id] else { limited = true; break }
+            if let turn = node.turn { turns.append(turn) }
+            next = node.parent
+        }
+        return (turns, limited)
+    }
+
+    static func read(title: String, home: String = FileManager.default.homeDirectoryForCurrentUser.path, deadline: Double) throws -> (turns: [ThreadTurn], limited: Bool) {
+        let found = try binding(title: title, home: home)
+        let tail = try tail(found, home: home, maximum: ThreadLimits.tailBytes)
+        let result = try parse(tail.data, binding: found, startsMidFile: tail.startsMidFile, deadline: deadline)
+        // The title must still name the same single session once the file has been read.
+        guard try binding(title: title, home: home).transcript == found.transcript else { throw ThreadFailure.unreadable }
+        return result
+    }
+}
+
+// MARK: Codex
+
+enum CodexThread {
+    typealias Call = (String, [String: Any]) throws -> [String: Any]
+    static let turnPage = 5, itemPage = 100, requestLimit = 24
+
+    private static func identifier(_ raw: Any?) throws -> String {
+        guard let id = raw as? String, !id.isEmpty, id.utf8.count <= 256,
+              !id.unicodeScalars.contains(where: CharacterSet.controlCharacters.contains) else { throw ThreadFailure.unreadable }
+        return id
+    }
+    private static func rows(_ result: [String: Any], maximum: Int) throws -> [[String: Any]] {
+        guard let rows = result["data"] as? [[String: Any]], rows.count <= maximum else { throw ThreadFailure.unreadable }
+        return rows
+    }
+    private static func cursor(_ result: [String: Any], seen: inout Set<String>) throws -> String? {
+        guard let value = result["nextCursor"], !(value is NSNull) else { return nil }
+        guard let cursor = value as? String, !cursor.isEmpty, cursor.utf8.count <= 4096, seen.insert(cursor).inserted else { throw ThreadFailure.unreadable }
+        return cursor
+    }
+    /// Codex wraps some user input in transport text that the person never typed.
+    static func userText(_ raw: String) -> String? {
+        var text = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        if text.hasPrefix("# AGENTS.md instructions") || text.hasPrefix("<environment_context>") || text.hasPrefix("<permissions instructions>") { return nil }
+        if text.hasPrefix("<realtime_delegation>") {
+            guard !text.contains("<source>transcript_tail_flush</source>"), let start = text.range(of: "<input>"),
+                  let end = text.range(of: "</input>", range: start.upperBound..<text.endIndex) else { return nil }
+            text = String(text[start.upperBound..<end.lowerBound])
+        } else if text.hasPrefix("<send_user_message_question_reply>") {
+            guard let start = text.range(of: ">"), let end = text.range(of: "</send_user_message_question_reply>"),
+                  let data = String(text[start.upperBound..<end.lowerBound]).data(using: .utf8),
+                  let replies = try? JSONSerialization.jsonObject(with: data) as? [[String: Any]] else { return nil }
+            text = replies.compactMap { $0["answer"] as? String }.joined(separator: "\n")
+        } else if text.hasPrefix("# Files mentioned by the user:") {
+            guard let request = text.range(of: "## My request:") else { return nil }
+            text = String(text[request.upperBound...])
+            text = text.replacingOccurrences(of: "(?s)<image\\b[^>]*>.*?</image>", with: "", options: .regularExpression)
+            text = text.replacingOccurrences(of: "<image\\b[^>]*>", with: "", options: .regularExpression)
+        }
+        text = ThreadLimits.clean(text, keepingLineBreaks: false)
+        return text.isEmpty ? nil : text
+    }
+    static func message(_ entry: [String: Any], turnID: String) throws -> (id: String, turn: ThreadTurn)? {
+        guard try identifier(entry["turnId"]) == turnID else { throw ThreadFailure.unreadable }
+        guard let item = entry["item"] as? [String: Any], let type = item["type"] as? String else { throw ThreadFailure.unreadable }
+        guard type == "userMessage" || type == "agentMessage" else { return nil }
+        let role = type == "userMessage" ? "user" : "assistant"
+        if let claimed = item["role"], !(claimed is NSNull), claimed as? String != role { return nil }
+        if item["hidden"] as? Bool == true || item["visibility"] as? String == "hidden" { return nil }
+        if let moderation = item["moderation"] as? [String: Any], moderation["moderated"] as? Bool == true { return nil }
+        let id = try identifier(item["id"])
+        if type == "agentMessage" {
+            if ["analysis", "reasoning", "hidden"].contains(item["phase"] as? String ?? "") { return nil }
+            guard let raw = item["text"] as? String else { throw ThreadFailure.unreadable }
+            let text = ThreadLimits.clean(raw, keepingLineBreaks: false)
+            return text.isEmpty ? nil : (id, ThreadTurn(role: role, text: text))
+        }
+        // Current Codex uses content; some versions use input. Never fall back to other fields.
+        guard let parts = (item["content"] ?? item["input"]) as? [[String: Any]] else { return nil }
+        let text = parts.compactMap { part -> String? in
+            guard part["type"] as? String == "text", let value = part["text"] as? String else { return nil }
+            if let owner = part["role"] as? String, owner != "user" { return nil }
+            return userText(value)
+        }.joined(separator: "\n")
+        return text.isEmpty ? nil : (id, ThreadTurn(role: role, text: text))
+    }
+
+    /// Messages newest first. Reads by exact thread UUID only; the caller has already matched it to the chat list.
+    static func read(threadID: String, call: Call) throws -> (turns: [ThreadTurn], limited: Bool) {
+        guard threadID.utf8.count == 36, let uuid = UUID(uuidString: threadID), uuid.uuidString.lowercased() == threadID else { throw ThreadFailure.unreadable }
+        var requests = 1
+        let metadata = try call("thread/read", ["threadId": threadID, "includeTurns": false])
+        guard let thread = metadata["thread"] as? [String: Any], (thread["id"] as? String)?.lowercased() == threadID else { throw ThreadFailure.unreadable }
+        var messages = [ThreadTurn](), itemIDs = Set<String>(), turnIDs = Set<String>(), turnCursors = Set<String>(), turnCursor: String?
+        var limited = false
+        pages: while true {
+            var params: [String: Any] = ["threadId": threadID, "limit": turnPage, "sortDirection": "desc", "itemsView": "notLoaded"]
+            if let turnCursor { params["cursor"] = turnCursor }
+            requests += 1
+            let response = try call("thread/turns/list", params)
+            let turns = try rows(response, maximum: turnPage)
+            let moreTurnsAfterPage = response["nextCursor"] != nil && !(response["nextCursor"] is NSNull)
+            for (index, turn) in turns.enumerated() {
+                let turnID = try identifier(turn["id"])
+                guard turnIDs.insert(turnID).inserted else { continue }
+                var itemCursor: String?, itemCursors = Set<String>()
+                repeat {
+                    guard requests < requestLimit else { limited = true; break pages }
+                    var itemParams: [String: Any] = ["threadId": threadID, "turnId": turnID, "limit": itemPage, "sortDirection": "desc"]
+                    if let itemCursor { itemParams["cursor"] = itemCursor }
+                    requests += 1
+                    let result = try call("thread/items/list", itemParams)
+                    for entry in try rows(result, maximum: itemPage) {
+                        if let value = try message(entry, turnID: turnID), itemIDs.insert(turnID + ":" + value.id).inserted { messages.append(value.turn) }
+                    }
+                    itemCursor = try cursor(result, seen: &itemCursors)
+                    if messages.count >= ThreadLimits.maxTurns {
+                        limited = itemCursor != nil || index < turns.count - 1 || moreTurnsAfterPage
+                        break pages
+                    }
+                } while itemCursor != nil
+            }
+            turnCursor = try cursor(response, seen: &turnCursors)
+            if turnCursor == nil { break }
+        }
+        return (messages, limited)
+    }
+}
+
+// MARK: Entry points
+
+extension Array where Element == String {
+    /// The thread route reads files and needs neither the app running nor Accessibility;
+    /// it answers for every provider, so the phone must not mistake a gap for an old companion.
+    func withReadThread(installed: Bool, unlocked: Bool) -> [String] {
+        installed && unlocked && !contains("readThread") ? self + ["readThread"] : self
+    }
+}
+
+enum ThreadReader {
+    static let refreshMessage = "Refresh the chats on your phone, then try again."
+    static let codexUnavailable = "Codex could not provide this chat\u{2019}s messages right now. Open Codex on this Mac and try again."
+    static let claudeUnavailable = "This Claude chat could not be read safely from its transcript right now."
+
+    private static func finish(provider: String, chatID: String, _ read: () throws -> (turns: [ThreadTurn], limited: Bool), failure: (ThreadFailure) -> String) -> ThreadSnapshot {
+        do {
+            let result = try read()
+            let bounded = ThreadLimits.bound(result.turns, limited: result.limited)
+            return .ok(provider: provider, chatID: chatID, turns: bounded.turns, truncated: bounded.truncated)
+        } catch let error as ThreadFailure {
+            return .unavailable(provider: provider, chatID: chatID, failure(error))
+        } catch CodexInventoryError.timeout {
+            return .unavailable(provider: provider, chatID: chatID, failure(.timeout))
+        } catch {
+            // Other errors can carry paths or text; only a fixed sentence leaves here.
+            return .unavailable(provider: provider, chatID: chatID, failure(.unreadable))
+        }
+    }
+
+    static func claude(title: String, chatID: String) async -> ThreadSnapshot {
+        await Task.detached(priority: .userInitiated) {
+            let deadline = ProcessInfo.processInfo.systemUptime + ThreadLimits.seconds
+            return finish(provider: "claude", chatID: chatID, { try ClaudeThread.read(title: title, deadline: deadline) }, failure: {
+                switch $0 {
+                case .noSession: return ClaudeThread.noSessionMessage
+                case .ambiguous: return ClaudeThread.sharedTitleMessage
+                case .timeout: return "Reading this Claude chat took too long. Try again."
+                case .unverified: return "This Claude chat\u{2019}s transcript has no record tying it to your account, so it is not shown."
+                case .unreadable: return claudeUnavailable
+                }
+            })
+        }.value
+    }
+
+    static func codex(threadID: String, chatID: String) async -> ThreadSnapshot {
+        let task = Task.detached(priority: .userInitiated) { () -> ThreadSnapshot in
+            finish(provider: "codex", chatID: chatID, {
+                let socket = try CodexMetadataSocket(path: try CodexReadOnly.socketPath(), timeout: ThreadLimits.seconds)
+                try socket.initializeSession()
+                return try CodexThread.read(threadID: threadID, call: socket.call)
+            }, failure: { $0 == .timeout ? "Codex took too long to answer. Try again." : codexUnavailable })
+        }
+        return await withTaskCancellationHandler(operation: { await task.value }, onCancel: { task.cancel() })
+    }
+}
+
+extension ThreadFailure: Equatable {}

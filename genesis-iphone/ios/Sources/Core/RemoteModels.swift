@@ -476,3 +476,25 @@ struct DraftLedger: Codable {
         if receipt.isAcceptedSend || receipt.status == "failed" { pendingSends.removeValue(forKey: route.storageKey) }
     }
 }
+
+/// One message of a chat's conversation, as the Mac reads it. Shown, never stored.
+struct ThreadTurn: Decodable, Equatable {
+    let role: String
+    let text: String
+    var isUser: Bool { role == "user" }
+}
+struct ThreadResponse: Decodable {
+    let provider: String
+    let chatID: String
+    let status: String
+    let message: String?
+    let turns: [ThreadTurn]?
+    let truncated: Bool?
+}
+enum ThreadState: Equatable {
+    case idle, loading
+    case loaded([ThreadTurn], truncated: Bool)
+    case unavailable(String)
+    case needsUpdate
+    case failed(String)
+}

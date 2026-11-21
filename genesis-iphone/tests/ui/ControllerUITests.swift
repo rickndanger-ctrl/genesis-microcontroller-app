@@ -199,6 +199,72 @@ final class ControllerUITests: XCTestCase {
     }
 
     @MainActor
+    func testFullscreenIPadThreadPane() throws {
+        guard UIDevice.current.userInterfaceIdiom == .pad else {
+            throw XCTSkip("The thread pane is part of the iPad landscape layout")
+        }
+        continueAfterFailure = false
+        let app = XCUIApplication()
+        app.launchArguments = ["--demo"]
+        XCUIDevice.shared.orientation = .landscapeLeft
+        app.launch()
+        XCTAssertTrue(app.buttons["controller.fullscreen"].waitForExistence(timeout: 8))
+        waitForObservedOrientation(app, landscape: true)
+        app.buttons["controller.fullscreen"].tap()
+        XCTAssertTrue(app.buttons["controller.exitFullscreen"].waitForExistence(timeout: 3))
+        func element(_ id: String) -> XCUIElement { app.descendants(matching: .any).matching(identifier: id).firstMatch }
+        // The hidden choice is remembered across launches; start from shown.
+        if app.buttons["thread.show"].exists { app.buttons["thread.show"].tap() }
+
+        let pane = element("thread.pane")
+        XCTAssertTrue(pane.waitForExistence(timeout: 3), "The thread pane is in the full-screen rail")
+        let first = element("thread.message.0")
+        XCTAssertTrue(first.waitForExistence(timeout: 3), "The open chat shows its first message")
+        XCTAssertTrue(first.isHittable, "The first message is on screen")
+        XCTAssertTrue(app.frame.contains(pane.frame), "The pane stays inside the window")
+        XCTAssertTrue(first.label.hasPrefix("You: "), "A message names who said it")
+        let before = first.label
+        assertFullscreenGeometry(app)
+        saveFullscreenScreenshot("Thread pane shown")
+
+        app.buttons["C2, OMAC workspace"].tap()
+        let changed = NSPredicate { _, _ in element("thread.message.0").label != before }
+        expectation(for: changed, evaluatedWith: nil)
+        waitForExpectations(timeout: 5)
+        XCTAssertTrue(app.buttons["thread.refresh"].isHittable)
+        app.buttons["thread.refresh"].tap()
+        XCTAssertTrue(element("thread.message.0").waitForExistence(timeout: 3), "Refresh keeps the shown messages")
+
+        XCTAssertTrue(app.buttons["thread.hide"].isHittable, "One toggle in the status strip hides the pane")
+        XCTAssertEqual(app.buttons["thread.hide"].label, "Hide thread")
+        app.buttons["thread.hide"].tap()
+        XCTAssertTrue(app.buttons["thread.show"].waitForExistence(timeout: 3))
+        XCTAssertEqual(app.buttons["thread.show"].label, "Show thread")
+        XCTAssertTrue(app.buttons["thread.show"].isHittable)
+        XCTAssertFalse(pane.exists, "A hidden thread leaves only its one-line button")
+        assertFullscreenGeometry(app)
+        saveFullscreenScreenshot("Thread pane hidden")
+
+        app.buttons["thread.show"].tap()
+        XCTAssertTrue(element("thread.pane").waitForExistence(timeout: 3))
+        XCTAssertTrue(element("thread.message.0").waitForExistence(timeout: 3))
+        assertFullscreenGeometry(app)
+
+        XCUIDevice.shared.orientation = .portrait
+        waitForObservedOrientation(app, landscape: false)
+        XCTAssertTrue(app.buttons["controller.exitFullscreen"].exists)
+        XCTAssertFalse(element("thread.pane").exists, "Portrait does not show the pane in this stage")
+        XCTAssertFalse(app.buttons["thread.hide"].exists || app.buttons["thread.show"].exists, "Portrait has no thread toggle")
+        assertFullscreenGeometry(app)
+
+        XCUIDevice.shared.orientation = .landscapeLeft
+        waitForObservedOrientation(app, landscape: true)
+        XCTAssertTrue(element("thread.pane").waitForExistence(timeout: 3), "The pane returns in landscape")
+        XCTAssertTrue(element("thread.message.0").waitForExistence(timeout: 3))
+        assertFullscreenGeometry(app)
+    }
+
+    @MainActor
     func testDeckOnlySizeStepsRotatesAndPinches() throws {
         guard UIDevice.current.userInterfaceIdiom == .pad else {
             throw XCTSkip("Deck only is an iPad size")

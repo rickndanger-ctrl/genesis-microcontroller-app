@@ -26,6 +26,7 @@ struct ControllerScreen: View {
     private var fullScreenController: Bool { controllerSize != .dashboard }
     /// The window's size, for controls outside the layout functions.
     @State private var screenSize: CGSize = .zero
+    @AppStorage("threadPaneHidden") private var threadHidden = false
     @State private var showDraftReview = false
     @FocusState private var draftFocused: Bool
     @State private var showGlassesControls = false
@@ -234,16 +235,26 @@ struct ControllerScreen: View {
     @ViewBuilder private func focusedLayout(in size: CGSize) -> some View {
         let wide = isPad && size.width >= 930 && size.width > size.height && !dynamicTypeSize.isAccessibilitySize
         if wide {
-            let rail: CGFloat = 320
+            // The square deck leaves some width over; the thread may use it, so the deck never shrinks for it.
+            let deckSide = min(max(300, size.width - 372), max(300, size.height - 32))
+            let rail: CGFloat = threadHidden ? 320 : min(460, max(320, size.width - 52 - deckSide))
             HStack(alignment: .center, spacing: 20) {
                 deck(width: max(300, size.width - rail - 52), height: max(300, size.height - 32))
                 VStack(spacing: 14) {
                     focusedRoute
-                    focusedStatus
+                    focusedStatus(threadToggle: true)
                     recoveryButtons
+                    if !threadHidden {
+                        ThreadPane(store: store, agentName: providerName, accent: slotColor)
+                            .frame(minHeight: 120, maxHeight: .infinity)
+                    }
                     focusedDraft
                     focusedTools
-                }.frame(width: rail)
+                }
+                .frame(width: rail, height: threadHidden ? nil : max(300, size.height - 32))
+                .onAppear { store.setThreadVisible(!threadHidden) }
+                .onChange(of: threadHidden) { _, hidden in store.setThreadVisible(!hidden) }
+                .onDisappear { store.setThreadVisible(false) }
             }
             .padding(16)
             .frame(maxWidth: .infinity, minHeight: size.height)
@@ -254,7 +265,7 @@ struct ControllerScreen: View {
             let chrome: CGFloat = isPad ? 330 : 300
             VStack(spacing: 10) {
                 focusedRoute
-                focusedStatus
+                focusedStatus()
                 recoveryButtons
                 deck(width: size.width - 16, height: max(300, size.height - chrome))
                 focusedDraft
@@ -337,7 +348,7 @@ struct ControllerScreen: View {
     }
 
     /// One strip for the selected chat and the link to its Mac.
-    private var focusedStatus: some View {
+    private func focusedStatus(threadToggle: Bool = false) -> some View {
         HStack(spacing: 10) {
             Circle().fill(slotColor).frame(width: 9, height: 9).shadow(color: slotColor, radius: 6)
             VStack(alignment: .leading, spacing: 2) {
@@ -352,6 +363,14 @@ struct ControllerScreen: View {
             }
             Spacer(minLength: 0)
             if store.isBusy { ProgressView().controlSize(.mini) }
+            if threadToggle {
+                Button { ControllerSound.shared.keyClick(); threadHidden.toggle() } label: {
+                    Image(systemName: threadHidden ? "text.bubble" : "text.bubble.fill").font(.system(size: 14, weight: .semibold)).frame(width: 44, height: 44)
+                }
+                .foregroundStyle(GenesisPalette.dim)
+                .accessibilityLabel(threadHidden ? "Show thread" : "Hide thread")
+                .accessibilityIdentifier(threadHidden ? "thread.show" : "thread.hide")
+            }
             Button { ControllerSound.shared.keyClick(); Task { await store.refresh() } } label: {
                 Image(systemName: "arrow.clockwise").font(.system(size: 14, weight: .semibold)).frame(width: 44, height: 44)
             }
