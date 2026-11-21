@@ -264,33 +264,37 @@ struct DeckChassis: View {
     let glow: Color
     var scale: CGFloat = 1
     var theme: DeckTheme = .mono
+    /// Width the body's rim and corners are drawn for; the rest stretches.
+    /// A deck wider than tall passes its height so the rim keeps its weight.
+    var unit: CGFloat? = nil
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
         GeometryReader { geometry in
             let size = geometry.size
+            let unit = unit ?? size.width
             ZStack {
                 if !theme.colors.isEmpty {
                     // Light spilling out from under the body, turning slowly.
                     ThemeDrift(theme: theme)
                         .frame(width: size.width * 1.5, height: size.width * 1.5)
-                        .mask(RoundedRectangle(cornerRadius: size.width * 0.11, style: .continuous)
+                        .mask(RoundedRectangle(cornerRadius: unit * 0.11, style: .continuous)
                             .frame(width: size.width * 1.02, height: size.height * 1.02))
                         .blur(radius: 22 * scale)
                         .opacity(0.62)
                         .frame(width: size.width, height: size.height)
                 }
-                SlicedSprite(sprite: DeckArt.shell, unit: size.width, size: size)
+                SlicedSprite(sprite: DeckArt.shell, unit: unit, size: size)
                     .shadow(color: glow.opacity(0.28), radius: 26 * scale, y: 10 * scale)
                     .shadow(color: .black.opacity(0.24), radius: 16 * scale, y: 14 * scale)
                     .animation(reduceMotion ? nil : .easeInOut(duration: 0.4), value: glow)
                 if !theme.colors.isEmpty {
                     // The same light seen through the plate, under the keys. The keys
                     // are drawn above it with their own shadows, so they still sit proud.
-                    let side = size.width * DeckArt.plateSide, top = size.width * DeckArt.plateTop, bottom = size.width * DeckArt.plateBottom
+                    let side = unit * DeckArt.plateSide, top = unit * DeckArt.plateTop, bottom = unit * DeckArt.plateBottom
                     ThemeDrift(theme: theme)
                         .frame(width: size.width * 1.5, height: size.width * 1.5)
-                        .mask(RoundedRectangle(cornerRadius: size.width * 0.035, style: .continuous)
+                        .mask(RoundedRectangle(cornerRadius: unit * 0.035, style: .continuous)
                             .frame(width: max(0, size.width - side * 2), height: max(0, size.height - top - bottom))
                             .offset(y: (top - bottom) / 2))
                         .blur(radius: 14 * scale)

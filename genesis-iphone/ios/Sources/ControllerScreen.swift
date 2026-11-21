@@ -21,7 +21,11 @@ struct ControllerScreen: View {
     @State private var artifactID: String?
     @State private var dialArtifactPreview: ArtifactRecord?
     @State private var resolvingSend = false
-    @State private var fullScreenController: Bool
+    /// Dashboard, full screen with a side panel, or (iPad) the deck alone.
+    @State private var controllerSize: ControllerSize
+    private var fullScreenController: Bool { controllerSize != .dashboard }
+    /// The window's size, for controls outside the layout functions.
+    @State private var screenSize: CGSize = .zero
     @State private var showDraftReview = false
     @FocusState private var draftFocused: Bool
     @State private var showGlassesControls = false
@@ -33,6 +37,7 @@ struct ControllerScreen: View {
     @Environment(\.dynamicTypeSize) private var dynamicTypeSize
 
     static let fullScreenKey = "controllerFullScreen"
+    static let sizeKey = "controllerSize"
     /// Off hides every glasses control. See `GlassesFeature`.
     @AppStorage private var glassesFeature: Bool
 
@@ -48,7 +53,7 @@ struct ControllerScreen: View {
         _glassesFeature = AppStorage(wrappedValue: false, GlassesFeature.storageKey(demo: store.isDemo))
         // The demo always opens on the dashboard so previews and UI tests
         // start from one known layout.
-        _fullScreenController = State(initialValue: !store.isDemo && UserDefaults.standard.bool(forKey: Self.fullScreenKey))
+        _controllerSize = State(initialValue: store.isDemo ? .dashboard : Self.savedSize())
         _chatDialRotation = State(initialValue: Double(store.selectedSlotIndex ?? 0) * 60)
     }
 
@@ -82,9 +87,15 @@ struct ControllerScreen: View {
     var body: some View {
         GeometryReader { geometry in
             ScrollView {
-                if fullScreenController { focusedLayout(in: geometry.size) }
-                else { controllerLayout(in: geometry.size) }
+                Group {
+                    if controllerSize == .deckOnly && deckOnlyFits(geometry.size) { deckOnlyLayout(in: geometry.size) }
+                    else if fullScreenController { focusedLayout(in: geometry.size) }
+                    else { controllerLayout(in: geometry.size) }
+                }
             }
+            .onChange(of: geometry.size, initial: true) { _, size in screenSize = size }
+            // Keys and dials claim their touches, so the pinch is watched at the window.
+            .background(PinchCatcher(enabled: controllerInFront) { pinched($0, in: geometry.size) })
             .scrollBounceBehavior(.basedOnSize)
             .background(GenesisBackdrop(color: slotColor, theme: theme))
             .foregroundStyle(GenesisPalette.text)
@@ -177,11 +188,47 @@ struct ControllerScreen: View {
         withAnimation(animated && !reduceMotion ? .spring(response: 0.32, dampingFraction: 0.72) : nil) { chatDialRotation += shortest }
     }
 
-    private func setFullScreen(_ enabled: Bool) {
-        guard canChangeLayout else { return }
+    private func setFullScreen(_ enabled: Bool) { setSize(enabled ? .focused : .dashboard) }
+
+    private func setSize(_ size: ControllerSize, pinching: Bool = false) {
+        // A pinch's fingers may land on a dial, which the pinch then cancels;
+        // only talking holds the size still.
+        let allowed = pinching ? !heldTalk && !talkGestureActive && !store.isRecording && !store.isFinalizing : canChangeLayout
+        guard allowed, size != controllerSize else { return }
         ControllerSound.shared.keyClick()
-        fullScreenController = enabled
-        if !store.isDemo { UserDefaults.standard.set(enabled, forKey: Self.fullScreenKey) }
+        controllerSize = size
+        guard !store.isDemo else { return }
+        UserDefaults.standard.set(size.rawValue, forKey: Self.sizeKey)
+        UserDefaults.standard.set(size != .dashboard, forKey: Self.fullScreenKey)
+    }
+
+    /// The size last chosen. Installs from before the deck-only size kept a yes/no.
+    private static func savedSize() -> ControllerSize {
+        let defaults = UserDefaults.standard
+        let saved = (defaults.object(forKey: sizeKey) as? Int).flatMap(ControllerSize.init(rawValue:))
+            ?? (defaults.bool(forKey: fullScreenKey) ? .focused : .dashboard)
+        return saved == .deckOnly && UIDevice.current.userInterfaceIdiom != .pad ? .focused : saved
+    }
+
+    /// The deck alone needs an iPad window with room for full-size keys.
+    private func deckOnlyFits(_ size: CGSize) -> Bool {
+        isPad && min(size.width, size.height) >= 500 && !dynamicTypeSize.isAccessibilitySize
+    }
+
+    /// No sheet or alert covers the controller.
+    private var controllerInFront: Bool {
+        !showSettings && !showGuide && !showArtifacts && !showActions && !showNavigation && !showDraftReview && !showGlassesControls
+            && quickMappingIndex == nil && mappingIndex == nil && dialArtifactPreview == nil && store.hint == nil && store.lastError == nil
+    }
+
+    /// Pinching out steps up a size and pinching in steps back down.
+    private func pinched(_ magnification: CGFloat, in size: CGSize) {
+        guard controllerInFront else { return }
+        if magnification > 1.2 {
+            setSize(controllerSize == .dashboard ? .focused : deckOnlyFits(size) ? .deckOnly : controllerSize, pinching: true)
+        } else if magnification < 0.83 {
+            setSize(controllerSize == .deckOnly ? .focused : .dashboard, pinching: true)
+        }
     }
 
     @ViewBuilder private func focusedLayout(in size: CGSize) -> some View {
@@ -228,33 +275,50 @@ struct ControllerScreen: View {
             .accessibilityLabel("Exit full screen")
             .accessibilityIdentifier("controller.exitFullscreen")
             .disabled(!canChangeLayout)
-            Menu {
-                ForEach(store.hosts) { host in
-                    Button { ControllerSound.shared.keyClick(); store.selectHost(host.id) } label: {
-                        Label(host.name, systemImage: host.id == store.selectedHostID ? "checkmark" : "desktopcomputer")
-                    }
+            if deckOnlyFits(screenSize) {
+                Button { setSize(.deckOnly) } label: {
+                    Image(systemName: "arrow.up.left.and.arrow.down.right")
+                        .frame(width: 44, height: 44)
+                        .genesisPanel(radius: 14)
                 }
-                Button("Pair a Mac", systemImage: "plus") { ControllerSound.shared.keyClick(); showSettings = true }
-            } label: {
-                routeLabel(selectedComputerName, icon: "macmini")
+                .accessibilityLabel("Deck only")
+                .accessibilityHint("Makes the controller fill the screen.")
+                .accessibilityIdentifier("controller.deckOnly")
+                .disabled(!canChangeLayout)
             }
-            .accessibilityLabel("Choose computer").accessibilityValue(selectedComputerName)
-            .accessibilityIdentifier("controller.chooseComputer")
-            Menu {
-                ForEach([ProviderID.codex, .claude, .muse], id: \.rawValue) { provider in
-                    Button {
-                        ControllerSound.shared.keyClick(); store.selectProvider(provider)
-                    } label: {
-                        Label(provider == .codex ? "Codex" : provider.rawValue.capitalized,
-                              systemImage: provider == store.selectedProvider ? "checkmark" : "bubble.left")
-                    }
-                }
-            } label: { routeLabel(providerName, icon: providerIcon(store.selectedProvider)) }
-            .accessibilityLabel("Choose provider").accessibilityValue(providerName)
-            .accessibilityIdentifier("controller.chooseProvider")
+            computerMenu { routeLabel(selectedComputerName, icon: "macmini") }
+            providerMenu { routeLabel(providerName, icon: providerIcon(store.selectedProvider)) }
         }
         .font(.system(size: 14, weight: .semibold, design: .rounded))
         .foregroundStyle(GenesisPalette.text)
+    }
+
+    private func computerMenu<Label: View>(@ViewBuilder label: () -> Label) -> some View {
+        Menu {
+            ForEach(store.hosts) { host in
+                Button { ControllerSound.shared.keyClick(); store.selectHost(host.id) } label: {
+                    SwiftUI.Label(host.name, systemImage: host.id == store.selectedHostID ? "checkmark" : "desktopcomputer")
+                }
+            }
+            Button("Pair a Mac", systemImage: "plus") { ControllerSound.shared.keyClick(); showSettings = true }
+        } label: { label() }
+        .accessibilityLabel("Choose computer").accessibilityValue(selectedComputerName)
+        .accessibilityIdentifier("controller.chooseComputer")
+    }
+
+    private func providerMenu<Label: View>(@ViewBuilder label: () -> Label) -> some View {
+        Menu {
+            ForEach([ProviderID.codex, .claude, .muse], id: \.rawValue) { provider in
+                Button {
+                    ControllerSound.shared.keyClick(); store.selectProvider(provider)
+                } label: {
+                    SwiftUI.Label(provider == .codex ? "Codex" : provider.rawValue.capitalized,
+                                  systemImage: provider == store.selectedProvider ? "checkmark" : "bubble.left")
+                }
+            }
+        } label: { label() }
+        .accessibilityLabel("Choose provider").accessibilityValue(providerName)
+        .accessibilityIdentifier("controller.chooseProvider")
     }
 
     private func providerIcon(_ provider: ProviderID) -> String {
@@ -328,6 +392,151 @@ struct ControllerScreen: View {
         }
         .padding(.horizontal, 14).padding(.vertical, 10)
         .genesisPanel(radius: 20)
+    }
+
+    // MARK: Deck only
+
+    /// The deck alone, filling the window, with the draft and routing on its built-in display.
+    private func deckOnlyLayout(in size: CGSize) -> some View {
+        deck(width: size.width - 16, height: size.height - 16, display: true)
+            .padding(8)
+            .frame(maxWidth: .infinity, minHeight: size.height)
+    }
+
+    /// What the built-in display shows. `strip` is the short, wide display
+    /// under the keys in portrait; otherwise it is the tall one beside them.
+    @ViewBuilder private func deckDisplay(wide strip: Bool) -> some View {
+        if strip {
+            VStack(alignment: .leading, spacing: 10) {
+                HStack(spacing: 8) {
+                    displayChat(lines: 1).frame(maxWidth: .infinity, alignment: .leading)
+                    displayRoute
+                    displayRefresh
+                    displayTools(spread: false)
+                }
+                HStack(alignment: .top, spacing: 12) {
+                    displayDraft(lines: 2)
+                    sendDraftButton
+                }
+            }
+            .padding(12)
+        } else {
+            VStack(alignment: .leading, spacing: 12) {
+                HStack(spacing: 6) { displayRoute }
+                HStack(alignment: .top, spacing: 6) {
+                    displayChat(lines: 2).frame(maxWidth: .infinity, alignment: .leading)
+                    displayRefresh
+                }
+                DisplayRule()
+                displayDraft(lines: 10)
+                sendDraftButton.frame(maxWidth: .infinity)
+                DisplayRule()
+                displayTools(spread: true)
+            }
+            .padding(14)
+        }
+    }
+
+    private var displayRoute: some View {
+        Group {
+            computerMenu { displayChip(selectedComputerName, icon: "macmini") }
+            providerMenu { displayChip(providerName, icon: providerIcon(store.selectedProvider)) }
+        }
+        .disabled(!canChangeLayout)
+    }
+
+    private func displayChip(_ title: String, icon: String) -> some View {
+        HStack(spacing: 5) {
+            Image(systemName: icon).font(.system(size: 12, weight: .semibold)).foregroundStyle(slotColor)
+            Text(title).lineLimit(1)
+            Image(systemName: "chevron.down").font(.system(size: 9, weight: .bold)).foregroundStyle(DeckDisplayPanel<EmptyView>.dim)
+        }
+        .font(.system(size: 14, weight: .semibold, design: .rounded))
+        .foregroundStyle(DeckDisplayPanel<EmptyView>.text)
+        .padding(.horizontal, 10)
+        .frame(maxWidth: .infinity, minHeight: 40)
+        .background(Color.white.opacity(0.07), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+    }
+
+    private func displayChat(lines: Int) -> some View {
+        HStack(alignment: .top, spacing: 8) {
+            Circle().fill(slotColor).frame(width: 8, height: 8).shadow(color: slotColor, radius: 5).padding(.top, 7)
+            VStack(alignment: .leading, spacing: 3) {
+                Text(store.selectedChat?.title ?? "Choose a chat")
+                    .font(.system(size: 17, weight: .semibold, design: .rounded))
+                    .foregroundStyle(DeckDisplayPanel<EmptyView>.text)
+                    .lineLimit(lines)
+                    .accessibilityIdentifier("controller.currentChat")
+                HStack(spacing: 5) {
+                    Circle().fill(store.providerInfo?.readiness == "ready" ? Color.green : Color.orange).frame(width: 5, height: 5)
+                    Text(store.connectionMessage).lineLimit(lines)
+                }
+                .font(.system(size: 12, weight: .medium))
+                .foregroundStyle(DeckDisplayPanel<EmptyView>.dim)
+            }
+        }
+    }
+
+    private var displayRefresh: some View {
+        Button { ControllerSound.shared.keyClick(); Task { await store.refresh() } } label: {
+            Group {
+                if store.isBusy { ProgressView().controlSize(.small) }
+                else { Image(systemName: "arrow.clockwise").font(.system(size: 15, weight: .semibold)) }
+            }
+            .frame(width: 44, height: 44)
+        }
+        .foregroundStyle(DeckDisplayPanel<EmptyView>.dim)
+        .accessibilityLabel("Refresh connection and chats")
+    }
+
+    private func displayDraft(lines: Int) -> some View {
+        Button { ControllerSound.shared.keyClick(); showDraftReview = true } label: {
+            VStack(alignment: .leading, spacing: 5) {
+                Text(store.isRecording ? "LISTENING…" : store.isFinalizing ? "FINISHING…" : "DRAFT")
+                    .font(.system(size: 11, weight: .bold, design: .monospaced)).tracking(1.6)
+                    .foregroundStyle(slotColor)
+                Text(store.draft.isEmpty ? "Hold Talk, then release to review." : store.draft)
+                    .font(.system(size: 16))
+                    .lineLimit(lines)
+                    .foregroundStyle(store.draft.isEmpty ? DeckDisplayPanel<EmptyView>.dim : DeckDisplayPanel<EmptyView>.text)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    // A long dictation shows its end, where the words are arriving.
+                    .opacity(dictatingDraft ? 0 : 1)
+                    .overlay { if dictatingDraft { LiveDraft(text: store.draft, size: 16, color: DeckDisplayPanel<EmptyView>.text) } }
+                if store.hasUnresolvedSend {
+                    Text("Delivery unconfirmed · Tap to check").font(.caption).foregroundStyle(.orange)
+                } else if let receipt = store.lastReceipt {
+                    Text(receipt.message).font(.caption).foregroundStyle(DeckDisplayPanel<EmptyView>.dim).lineLimit(1)
+                }
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain).disabled(!canChangeLayout)
+        .accessibilityLabel("Review draft").accessibilityIdentifier("controller.reviewDraft")
+    }
+
+    private func displayTools(spread: Bool) -> some View {
+        HStack(spacing: spread ? 0 : 4) {
+            displayTool("arrow.down.right.and.arrow.up.left", label: "Smaller controller", id: "controller.shrink", spread: spread) { setSize(.focused) }
+            displayTool("square.grid.2x2", label: "Actions", id: "controller.actions", spread: spread) { ControllerSound.shared.keyClick(); showActions = true }
+            if glassesFeature {
+                DisplayGlassesButton(follow: store.glasses) { ControllerSound.shared.keyClick(); showGlassesControls = true }
+                    .frame(maxWidth: spread ? .infinity : nil)
+            }
+            displayTool("slider.horizontal.3", label: "Settings and Mac pairing", id: "controller.settings", spread: spread) { ControllerSound.shared.keyClick(); showSettings = true }
+        }
+        .disabled(!canChangeLayout)
+    }
+
+    private func displayTool(_ icon: String, label: String, id: String, spread: Bool, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Image(systemName: icon).font(.system(size: 16, weight: .semibold)).frame(width: 44, height: 44)
+                .background(Color.white.opacity(0.07), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+        }
+        .foregroundStyle(DeckDisplayPanel<EmptyView>.text)
+        .frame(maxWidth: spread ? .infinity : nil)
+        .accessibilityLabel(label).accessibilityIdentifier(id)
     }
 
     private var sendDraftButton: some View {
@@ -721,26 +930,33 @@ struct ControllerScreen: View {
         return CGSize(width: height, height: height)
     }
 
-    private func deck(width: CGFloat, height: CGFloat) -> some View {
-        let fit = deckFit(width: width, height: height)
+    /// Draws the deck. With `display`, it fills the whole frame and carries
+    /// the built-in display: beside the keys when wide, under them when tall.
+    private func deck(width: CGFloat, height: CGFloat, display: Bool = false) -> some View {
+        let fit = display ? CGSize(width: max(0, width), height: max(0, height)) : deckFit(width: width, height: height)
         let side = min(fit.width, fit.height)
         let scale = isPad ? max(1, side / 430) : 1
         let gap: CGFloat = 8 * scale
         // Keys sit on the rendered plate, inside the rim. The rim's size is
-        // fixed by the render's scale, which follows the deck's width.
-        let pad = fit.width * 0.030
-        let left = fit.width * DeckArt.plateSide + pad
-        let top = fit.width * DeckArt.plateTop + pad
-        let bottom = fit.width * DeckArt.plateBottom + pad
-        let wall = fit.width * DeckArt.frontWall
-        let keyW = max(0, (fit.width - left * 2 - gap * 3) / 4)
-        let keyH = max(0, (fit.height - top - bottom - gap * 3) / 4)
+        // fixed by the render's scale, which follows the deck's shorter side.
+        let pad = side * 0.030
+        let left = side * DeckArt.plateSide + pad
+        let top = side * DeckArt.plateTop + pad
+        let bottom = side * DeckArt.plateBottom + pad
+        let wall = side * DeckArt.frontWall
+        let plateW = max(0, fit.width - left * 2), plateH = max(0, fit.height - top - bottom)
+        let beside = display && fit.width > fit.height
+        let displayW = beside ? min(420, max(250, plateW * 0.28)) : 0
+        let displayH = display && !beside ? min(230, max(150, plateH * 0.17)) : 0
+        let keyW = max(0, (plateW - (beside ? displayW + gap : 0) - gap * 3) / 4)
+        let keyH = max(0, (plateH - (displayH > 0 ? displayH + gap : 0) - gap * 3) / 4)
         // The knob in use glows as hard as its key.
         let chatDialLevel = store.selectedSlotIndex == nil ? 0.30 : browsedSlot == store.selectedSlotIndex ? 1.0 : 0.62
         let browsingUnopened = dialSlot != nil && dialSlot != store.selectedSlotIndex
         return ZStack {
-            DeckChassis(glow: slotColor, scale: scale, theme: theme)
-            VStack(spacing: 0) {
+            DeckChassis(glow: slotColor, scale: scale, theme: theme, unit: side)
+            VStack(spacing: gap) {
+              HStack(alignment: .top, spacing: gap) {
                 VStack(spacing: gap) {
                     HStack(spacing: gap) {
                         DialControl(silver: true, caption: "CHATS", color: theme.accent(store.activity(slot: browsedSlot), 0), level: chatDialLevel, ringSelection: browsedSlot,
@@ -783,6 +999,9 @@ struct ControllerScreen: View {
                         actionKey("Map", icon: "slider.horizontal.3", width: keyW, height: keyH, scale: scale, enabled: true) { mappingIndex = browsedSlot }
                     }
                 }
+                if beside { DeckDisplayPanel(content: deckDisplay(wide: false), color: slotColor).frame(width: displayW, height: plateH) }
+              }
+              if displayH > 0 { DeckDisplayPanel(content: deckDisplay(wide: true), color: slotColor).frame(width: plateW, height: displayH) }
             }
             .padding(.top, top).padding(.bottom, bottom)
             .frame(width: fit.width, height: fit.height, alignment: .top)
@@ -1040,9 +1259,10 @@ struct ControllerScreen: View {
 private struct LiveDraft: View {
     let text: String
     let size: CGFloat
+    var color: Color = GenesisPalette.text
     var body: some View {
         ScrollView(.vertical) {
-            Text(text).font(.system(size: size)).foregroundStyle(GenesisPalette.text)
+            Text(text).font(.system(size: size)).foregroundStyle(color)
                 .frame(maxWidth: .infinity, alignment: .leading)
         }
         // Follow the end as it grows, but sit at the top while the text is
@@ -1201,3 +1421,97 @@ struct DialControl: View {
 
 /// Whether the connect guide has opened by itself since the app launched.
 @MainActor enum GuideLaunch { static var offered = false }
+
+/// The controller's three sizes. Deck only is iPad-only.
+enum ControllerSize: Int {
+    case dashboard = 0, focused = 1, deckOnly = 2
+}
+
+/// The built-in display: dark glass set into the plate, lit at its edge by the deck's color.
+private struct DeckDisplayPanel<Content: View>: View {
+    static var text: Color { Color(white: 0.94) }
+    static var dim: Color { Color(white: 0.62) }
+    let content: Content
+    let color: Color
+
+    var body: some View {
+        content
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+            .background {
+                RoundedRectangle(cornerRadius: 18, style: .continuous)
+                    .fill(LinearGradient(colors: [Color(red: 0.04, green: 0.05, blue: 0.07), Color(red: 0.08, green: 0.09, blue: 0.12)],
+                                         startPoint: .top, endPoint: .bottom))
+                    .overlay {
+                        // Recessed: a shadow along the inside of the top edge.
+                        RoundedRectangle(cornerRadius: 18, style: .continuous)
+                            .strokeBorder(Color.black.opacity(0.7), lineWidth: 4).blur(radius: 3)
+                            .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
+                    }
+            }
+            .overlay {
+                RoundedRectangle(cornerRadius: 18, style: .continuous).strokeBorder(color.opacity(0.5), lineWidth: 1.5)
+            }
+            .shadow(color: color.opacity(0.22), radius: 12)
+            .environment(\.colorScheme, .dark)
+    }
+}
+
+private struct DisplayRule: View {
+    var body: some View { Rectangle().fill(Color.white.opacity(0.10)).frame(height: 1) }
+}
+
+private struct DisplayGlassesButton: View {
+    @ObservedObject var follow: GlassesFollowController
+    let open: () -> Void
+    var body: some View {
+        Button(action: open) {
+            Image(systemName: "eyeglasses").font(.system(size: 16, weight: .semibold)).frame(width: 44, height: 44)
+                .background((follow.acknowledged ? Color.green.opacity(0.28) : Color.white.opacity(0.07)),
+                            in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+        }
+        .foregroundStyle(follow.acknowledged ? Color.green : Color(white: 0.94))
+        .accessibilityLabel("Glasses")
+        .accessibilityValue(follow.acknowledged ? "Synced" : follow.connecting ? "Connecting" : follow.enabled ? "Waiting" : "Off")
+        .accessibilityIdentifier("controller.glasses")
+    }
+}
+
+/// Reports a finished two-finger pinch anywhere in the window. A pinch that
+/// is recognized cancels the touches under it, so it never presses a key.
+private struct PinchCatcher: UIViewRepresentable {
+    /// Off while a sheet is up, so it never takes touches from what is in front.
+    let enabled: Bool
+    let ended: (CGFloat) -> Void
+
+    func makeUIView(context: Context) -> CatcherView { CatcherView() }
+    func updateUIView(_ view: CatcherView, context: Context) { view.ended = ended; view.watching = enabled }
+
+    final class CatcherView: UIView, UIGestureRecognizerDelegate {
+        var ended: ((CGFloat) -> Void)?
+        var watching = true { didSet { pinch.isEnabled = watching } }
+        private lazy var pinch: UIPinchGestureRecognizer = {
+            let pinch = UIPinchGestureRecognizer(target: self, action: #selector(handle(_:)))
+            pinch.delegate = self
+            return pinch
+        }()
+
+        override init(frame: CGRect) {
+            super.init(frame: frame)
+            isUserInteractionEnabled = false
+        }
+        required init?(coder: NSCoder) { fatalError("not used") }
+
+        override func willMove(toWindow newWindow: UIWindow?) {
+            super.willMove(toWindow: newWindow)
+            window?.removeGestureRecognizer(pinch)
+            newWindow?.addGestureRecognizer(pinch)
+        }
+
+        @objc private func handle(_ pinch: UIPinchGestureRecognizer) {
+            if pinch.state == .ended { ended?(pinch.scale) }
+        }
+
+        func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer,
+                               shouldRecognizeSimultaneouslyWith other: UIGestureRecognizer) -> Bool { true }
+    }
+}
