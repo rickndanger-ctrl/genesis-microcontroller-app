@@ -584,7 +584,145 @@ extension Array where Element == String {
     }
 }
 
+/// A piece of static text inside a history entry, and where it sat.
+struct MuseText: Equatable {
+    var text: String
+    /// Inside a button, pop-up or other control: a label, never message text.
+    var insideControl = false
+    /// A direct child of the entry's root.
+    var directChild = false
+}
+
+/// One entry of Muse's message history: its text, the labels found inside it, and where its root sat
+/// in the history container (x and width, in points from the container's left edge).
+struct MuseEntry: Equatable {
+    var pieces: [MuseText]
+    var labels: [String]
+    var x: Double?
+    var width: Double?
+    init(pieces: [MuseText], labels: [String] = [], x: Double? = nil, width: Double? = nil) {
+        self.pieces = pieces; self.labels = labels; self.x = x; self.width = width
+    }
+    init(texts: [String], labels: [String] = [], x: Double? = nil, width: Double? = nil) {
+        self.init(pieces: texts.map { MuseText(text: $0) }, labels: labels, x: x, width: width)
+    }
+}
+
+/// What one read of Muse's screen found.
+struct MuseThreadRead {
+    let openTitle: String
+    /// Another chat in the open panel carries the same title, so the open one cannot be told apart.
+    let ambiguous: Bool
+    let entries: [MuseEntry]
+    /// The history held more entries than were read.
+    let olderEntries: Bool
+    /// Width of the history container, the reference for each entry's position.
+    var historyWidth: Double = 0
+}
+
+/// What the history-shape diagnostic may say about an attribute: never its text.
+enum MuseShape {
+    /// Attributes whose short fixed values describe the UI, not the user's words.
+    static let fixedValueAttributes: Set<String> = ["AXRole", "AXSubrole", "AXRoleDescription", "AXIdentifier", "AXDOMIdentifier", "AXARIACurrent",
+                                                    "AXARIALive", "AXARIARelevant", "AXARIABusy", "AXDOMClassList"]
+    /// A fixed UI identifier is letters and separators only, so it cannot be a sentence, a date or an id.
+    static func isFixedIdentifier(_ text: String) -> Bool {
+        !text.isEmpty && text.count <= 40 && text.range(of: "^[A-Za-z][A-Za-z_.:-]*$", options: .regularExpression) != nil
+    }
+    /// The first words that end with a colon, when they are at most two: a UI label such as "User message:".
+    static func labelPrefix(_ text: String) -> String? {
+        let words = text.split(separator: " ", maxSplits: 2, omittingEmptySubsequences: true).prefix(2).map(String.init)
+        for count in 1...max(1, words.count) where count <= words.count {
+            let candidate = words.prefix(count).joined(separator: " ")
+            if candidate.hasSuffix(":"), candidate.count <= 24 { return candidate }
+        }
+        return nil
+    }
+    static func string(name: String, text: String) -> [String: Any] {
+        var info: [String: Any] = ["name": name, "length": text.count, "startsWithUserMessage": text.hasPrefix("User message"),
+                                   "timestampLike": MuseThread.isTimestamp(text), "controlWord": MuseThread.chrome.contains(text)]
+        if let prefix = labelPrefix(text) { info["labelPrefix"] = prefix }
+        // A very short string is shaped, not shown: letters become a, digits 9, the rest stays.
+        if text.count <= 8 { info["pattern"] = String(text.map { $0.isLetter ? "a" : $0.isWholeNumber ? "9" : $0 }) }
+        if fixedValueAttributes.contains(name), isFixedIdentifier(text) { info["value"] = text }
+        return info
+    }
+    static func strings(name: String, values: [String]) -> [String: Any] {
+        ["name": name, "count": values.count, "values": values.map { isFixedIdentifier($0) && fixedValueAttributes.contains(name) ? $0 : "(\($0.count) characters)" }]
+    }
+}
+
+enum MuseThread {
+    static let openMessage = "Open this chat in Muse on your Mac to see its messages."
+    static let closedMessage = "Muse is not showing a chat right now. Open Muse on this Mac."
+    static let accessibilityMessage = "Enable Accessibility for Agent Micro Controller."
+    /// Muse labels what a person sent with this prefix; an entry drawn bare carries no marker.
+    static let userMarker = "User message: "
+    /// Controls and notes that sit among the entries and are not messages.
+    static let chrome: Set<String> = ["Copy", "Copied", "Retry", "Share", "Like", "Dislike", "Thinking", "Thinking\u{2026}", "Show more", "Show less", "Today", "Yesterday"]
+
+    static func isTimestamp(_ text: String) -> Bool {
+        text.range(of: "^\\d{1,2}:\\d{2}(\\s?[AaPp][Mm])?$", options: .regularExpression) != nil
+    }
+    static let layoutMessage = "Muse\u{2019}s layout isn\u{2019}t one this version can read. Update Agent Micro Controller on your Mac."
+    /// Muse lays an assistant reply against the left edge and a person's message against the right.
+    static func role(of entry: MuseEntry, marked: Bool, historyWidth: Double) -> String? {
+        if marked { return "user" }
+        guard let x = entry.x, let width = entry.width, historyWidth > 0 else { return nil }
+        if x < historyWidth * 0.15 { return "assistant" }
+        if x > historyWidth * 0.30, abs(historyWidth - (x + width)) <= historyWidth * 0.06 { return "user" }
+        return nil
+    }
+    /// Oldest first. Entries with no message text are dropped; text inside controls is never message text.
+    /// An entry that sits on neither side is skipped, and when more than a third of the entries that hold
+    /// text are like that the layout is not one this reader knows, so nothing is returned.
+    static func read(entries: [MuseEntry], historyWidth: Double) -> (turns: [ThreadTurn], unsupported: Bool) {
+        var turns: [ThreadTurn] = [], withText = 0, unplaced = 0
+        func usable(_ raw: String) -> String? {
+            let text = ThreadLimits.clean(raw.hasPrefix(userMarker) ? String(raw.dropFirst(userMarker.count)) : raw)
+            return text.isEmpty || text == "User message" || chrome.contains(text) || isTimestamp(text) ? nil : text
+        }
+        for entry in entries {
+            let pieces = entry.pieces.filter { !$0.insideControl }
+            let marked = (pieces.map(\.text) + entry.labels).contains { $0.hasPrefix(userMarker) || $0 == "User message" }
+            let role = role(of: entry, marked: marked, historyWidth: historyWidth)
+            // Short text directly under a person's entry root sits before the message and is metadata (a time or label).
+            let kept = pieces.compactMap { piece -> String? in
+                guard let text = usable(piece.text) else { return nil }
+                return role == "user" && piece.directChild && text.count <= 8 ? nil : text
+            }
+            guard !kept.isEmpty else { continue }
+            withText += 1
+            guard let role else { unplaced += 1; continue }
+            turns.append(ThreadTurn(role: role, text: kept.joined(separator: "\n")))
+        }
+        return (turns, withText > 0 && unplaced * 3 > withText)
+    }
+    /// True only when the chat Muse shows is the one asked for, and no other chat shares its title.
+    static func isRequestedChat(read: MuseThreadRead, chatID: String, idFor: (String) -> String) -> Bool {
+        !read.ambiguous && idFor(read.openTitle) == chatID
+    }
+}
+
 enum ThreadReader {
+    static let emptyMessage = "This chat has no messages to show yet."
+
+    /// The one place a snapshot with turns is made: a thread with nothing visible is unavailable, never "ok".
+    static func make(provider: String, chatID: String, turnsNewestFirst: [ThreadTurn], limited: Bool) -> ThreadSnapshot {
+        let bounded = ThreadLimits.bound(turnsNewestFirst, limited: limited)
+        guard !bounded.turns.isEmpty else { return .unavailable(provider: provider, chatID: chatID, emptyMessage) }
+        return .ok(provider: provider, chatID: chatID, turns: bounded.turns, truncated: bounded.truncated)
+    }
+
+    /// Muse's text comes from the screen, so only the chat that is open can be read.
+    static func muse(chatID: String, read: (Double) -> MuseThreadRead?, idFor: (String) -> String) -> ThreadSnapshot {
+        let deadline = ProcessInfo.processInfo.systemUptime + ThreadLimits.seconds
+        guard let seen = read(deadline) else { return .unavailable(provider: "muse", chatID: chatID, MuseThread.closedMessage) }
+        guard MuseThread.isRequestedChat(read: seen, chatID: chatID, idFor: idFor) else { return .unavailable(provider: "muse", chatID: chatID, MuseThread.openMessage) }
+        let built = MuseThread.read(entries: seen.entries, historyWidth: seen.historyWidth)
+        if built.unsupported { return .unavailable(provider: "muse", chatID: chatID, MuseThread.layoutMessage) }
+        return make(provider: "muse", chatID: chatID, turnsNewestFirst: built.turns.reversed(), limited: seen.olderEntries)
+    }
     static let tooFarBackMessage = "This chat\u{2019}s recent messages are too far back to read right now. Try again after its next reply."
     static let refreshMessage = "Refresh the chats on your phone, then try again."
     static let codexUnavailable = "Codex could not provide this chat\u{2019}s messages right now. Open Codex on this Mac and try again."
@@ -593,8 +731,7 @@ enum ThreadReader {
     private static func finish(provider: String, chatID: String, _ read: () throws -> (turns: [ThreadTurn], limited: Bool), failure: (ThreadFailure) -> String) -> ThreadSnapshot {
         do {
             let result = try read()
-            let bounded = ThreadLimits.bound(result.turns, limited: result.limited)
-            return .ok(provider: provider, chatID: chatID, turns: bounded.turns, truncated: bounded.truncated)
+            return make(provider: provider, chatID: chatID, turnsNewestFirst: result.turns, limited: result.limited)
         } catch let error as ThreadFailure {
             return .unavailable(provider: provider, chatID: chatID, failure(error))
         } catch CodexInventoryError.timeout {
@@ -614,7 +751,7 @@ enum ThreadReader {
                 case .ambiguous: return ClaudeThread.sharedTitleMessage
                 case .timeout: return "Reading this Claude chat took too long. Try again."
                 case .tooFarBack: return tooFarBackMessage
-                case .empty: return "This chat has no messages to show yet."
+                case .empty: return emptyMessage
                 case .unverified: return "This Claude chat\u{2019}s transcript has no record tying it to your account, so it is not shown."
                 case .unreadable: return claudeUnavailable
                 }

@@ -88,7 +88,7 @@ final class MuseAccess {
 
     /// One pass over Muse's window. The message history is noted but never
     /// walked here; only `recentHistory` reads it, and only its newest entries.
-    private func snapshot() -> Snapshot? {
+    private func snapshot(deadline: Double = .infinity) -> Snapshot? {
         guard AXIsProcessTrusted(), let app else { return nil }
         let root = AXUIElementCreateApplication(app.processIdentifier)
         AXUIElementSetMessagingTimeout(root, 0.4)
@@ -96,6 +96,8 @@ final class MuseAccess {
         result.children = { [unowned self] in self.children($0) }
         var queue: [(element: AXUIElement, inPanel: Bool, underHeading: Bool)] = [(root, false, false)], index = 0
         while index < queue.count && index < 6000 {
+            // A read that runs out of time is no read: the caller must not act on part of a window.
+            if index % 32 == 0, ProcessInfo.processInfo.systemUptime > deadline { return nil }
             let (element, inPanel, underHeading) = queue[index]; index += 1
             let role = string(element, kAXRoleAttribute)
             if role == kAXMenuBarRole { continue }
@@ -253,6 +255,83 @@ final class MuseAccess {
         }
         for entry in children(history).suffix(24) { collect(entry, depth: 0) }
         return texts
+    }
+
+    /// The open chat and the newest entries of its message history, for the thread view.
+    /// Reading only: no click, key, scroll, focus change or panel toggle. Meant to run off the main
+    /// thread. Nil when Muse has no recognisable chat screen or the read ran out of time. The chat is
+    /// read before and after the history, and a change in between discards the read.
+    func threadRead(deadline: Double, entryLimit: Int = 30) -> MuseThreadRead? {
+        guard let first = snapshot(deadline: deadline), first.isRecognisable, let title = first.current, let history = first.history else { return nil }
+        let ambiguous = first.panelOpen && MuseChatList.chats(first.rows.map(\.row)).ambiguous.contains(title)
+        let container = frame(history)
+        let all = children(history), newest = all.suffix(entryLimit)
+        var entries: [MuseEntry] = []
+        for entry in newest {
+            var pieces: [MuseText] = [], labels: [String] = []
+            let controls: Set<String> = [kAXButtonRole, kAXPopUpButtonRole, kAXMenuButtonRole, kAXCheckBoxRole, kAXRadioButtonRole, kAXMenuItemRole, kAXMenuRole]
+            func collect(_ element: AXUIElement, depth: Int, inControl: Bool) {
+                let role = string(element, kAXRoleAttribute)
+                if role == kAXStaticTextRole {
+                    let text = string(element, kAXValueAttribute)
+                    if !text.isEmpty { pieces.append(MuseText(text: text, insideControl: inControl, directChild: depth == 1)) }
+                }
+                let name = label(element)
+                if !name.isEmpty, !inControl { labels.append(name) }
+                guard depth < 8 else { return }
+                for child in children(element) { collect(child, depth: depth + 1, inControl: inControl || controls.contains(role)) }
+            }
+            if ProcessInfo.processInfo.systemUptime > deadline { return nil }
+            collect(entry, depth: 0, inControl: false)
+            let box = frame(entry)
+            entries.append(MuseEntry(pieces: pieces, labels: labels, x: box.flatMap { b in container.map { Double(b.minX - $0.minX) } }, width: box.map { Double($0.width) }))
+        }
+        guard let again = snapshot(deadline: deadline), again.current == title else { return nil }
+        return MuseThreadRead(openTitle: title, ambiguous: ambiguous, entries: entries, olderEntries: all.count > newest.count, historyWidth: Double(container?.width ?? 0))
+    }
+
+    /// Structure of the newest history entries with no text content, for working out where Muse
+    /// puts the author of a message. Read-only; meant to run off the main thread.
+    func historyShape(deadline: Double, entryLimit: Int = 30, depthLimit: Int = 8, nodeLimit: Int = 900) -> [String: Any]? {
+        guard let seen = snapshot(deadline: deadline), let history = seen.history else { return nil }
+        let container = frame(history)
+        var budget = nodeLimit
+        func describe(_ element: AXUIElement, depth: Int) -> [String: Any] {
+            budget -= 1
+            var node: [String: Any] = ["role": string(element, kAXRoleAttribute), "subrole": string(element, kAXSubroleAttribute),
+                                       "roleDescription": string(element, kAXRoleDescriptionAttribute)]
+            let identifier = string(element, "AXIdentifier") + string(element, "AXDOMIdentifier")
+            node["hasIdentifier"] = !identifier.isEmpty
+            if MuseShape.isFixedIdentifier(identifier) { node["identifier"] = identifier }
+            if let box = frame(element), let container {
+                node["x"] = Int((box.minX - container.minX).rounded()); node["width"] = Int(box.width.rounded())
+            }
+            var names: CFArray?
+            var strings: [[String: Any]] = [], others: [String] = []
+            if AXUIElementCopyAttributeNames(element, &names) == .success, let list = names as? [String] {
+                for name in list.sorted() where !["AXChildren", "AXParent", "AXWindow", "AXTopLevelUIElement", "AXPosition", "AXSize", "AXFrame"].contains(name) {
+                    guard let any = value(element, name) else { continue }
+                    if let text = any as? String { if !text.isEmpty { strings.append(MuseShape.string(name: name, text: text)) } }
+                    else if let list = any as? [String] { strings.append(MuseShape.strings(name: name, values: list)) }
+                    else if let number = any as? NSNumber { others.append(CFGetTypeID(number) == CFBooleanGetTypeID() ? "\(name)=\(number.boolValue)" : "\(name)=number") }
+                    else if CFGetTypeID(any) != AXUIElementGetTypeID(), !(any is [Any]) { others.append("\(name)=other") }
+                }
+            }
+            node["stringAttributes"] = strings; node["otherAttributes"] = others
+            let kids = children(element)
+            node["childCount"] = kids.count
+            if depth < depthLimit {
+                var described: [[String: Any]] = []
+                for child in kids where budget > 0 && ProcessInfo.processInfo.systemUptime < deadline { described.append(describe(child, depth: depth + 1)) }
+                node["children"] = described
+            }
+            return node
+        }
+        let all = children(history)
+        var entries: [[String: Any]] = []
+        for entry in all.suffix(entryLimit) where budget > 0 && ProcessInfo.processInfo.systemUptime < deadline { entries.append(describe(entry, depth: 0)) }
+        return ["historyEntries": all.count, "entriesDescribed": entries.count, "historyWidth": Int(container?.width.rounded() ?? 0),
+                "truncatedByBudget": budget <= 0, "entries": entries]
     }
 
     /// What a self-check needs to know about Muse's window. Counting the chats
