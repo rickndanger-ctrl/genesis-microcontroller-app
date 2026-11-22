@@ -156,7 +156,7 @@ enum RemoteCodexAvailability {
     static func capabilities(installed:Bool,running:Bool,unlocked:Bool,accessibility:Bool,inventoryAvailable:Bool,launchIDs:[String],nativeIDs:[String],queueAvailable:Bool=false)->[String] {
         var result=["artifacts"]
         guard installed,unlocked else{return result}
-        if inventoryAvailable {result.append("openChat");result.append("readThread");if queueAvailable {result.append("sendPrompt")}}
+        if inventoryAvailable {result.append("openChat");result.append("readThread");result.append("chatActivity");if queueAvailable {result.append("sendPrompt")}}
         result.append(contentsOf:launchIDs)
         if running,accessibility {result.append(contentsOf:nativeIDs);result.append("menuNavigation")}
         var seen=Set<String>()

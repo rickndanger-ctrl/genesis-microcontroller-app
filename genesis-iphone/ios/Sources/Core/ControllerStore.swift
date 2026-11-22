@@ -375,16 +375,26 @@ final class ControllerStore: ObservableObject {
     }
     /// A light is only shown while the Mac is answering and its app is ready.
     /// Offline, locked or closed, the last colors would be a guess, so the keys go dark.
-    /// Codex is left out: its saved-chat list says nothing about what a chat is
-    /// doing, and a white "idle" light on a working chat would be a false claim.
-    var lightsAreLive: Bool { isDemo || (status != nil && providerInfo?.readiness == "ready" && selectedProvider != .codex) }
+    /// Codex is left out unless this Mac's companion says it reports Codex chat
+    /// activity ("chatActivity"). An older companion lists every Codex chat as
+    /// saved, and a white "idle" light on a working chat would be a false claim.
+    var lightsAreLive: Bool {
+        isDemo || (status != nil && providerInfo?.readiness == "ready"
+                   && (selectedProvider != .codex || providerInfo?.supports("chatActivity") == true))
+    }
     /// Between full refreshes, re-reads only what the chats are doing, so a
     /// light is a few seconds old at most. Claude only: reading its sidebar
     /// changes nothing on the Mac, whereas listing Muse's chats opens its chat
-    /// panel, and Codex's saved-chat list carries no live state.
+    /// panel. Codex too, but only from a companion that reports Codex activity:
+    /// its chat list is a read of Codex's local chat service, cached on the Mac
+    /// for five seconds, and touches no window.
     func refreshLights() async {
-        guard !isDemo, !isBusy, !isRecording, !isFinalizing, refreshGeneration != gate.generation,
-              selectedProvider == .claude, lightsAreLive, providerInfo?.supports("openChat") == true else { return }
+        guard !isDemo, !isBusy, !isRecording, !isFinalizing, refreshGeneration != gate.generation, lightsAreLive else { return }
+        switch selectedProvider {
+        case .claude: guard providerInfo?.supports("openChat") == true else { return }
+        case .codex: guard providerInfo?.supports("chatActivity") == true else { return }
+        case .muse: return
+        }
         let generation = gate.generation, provider = selectedProvider
         guard let (host, token) = try? connection() else { return }
         // A failure here is left to the next status poll, which reports a lost connection.
@@ -813,7 +823,8 @@ final class ControllerStore: ObservableObject {
     /// chats and this one is not among them. Nil when it is there, or when the
     /// list is not fresh enough to say. Used to explain a failed open.
     func missingChatMessage(_ slot: SlotMapping) -> String? {
-        guard !isDemo, lightsAreLive, !chats.isEmpty, !chats.contains(where: { $0.id == slot.targetID }) else { return nil }
+        // Not for Codex: its list is capped, and lights going live must not change when this hint appears.
+        guard !isDemo, lightsAreLive, selectedProvider != .codex, !chats.isEmpty, !chats.contains(where: { $0.id == slot.targetID }) else { return nil }
         if leftOutChatTitles.contains(slot.title) {
             return "More than one \(selectedProvider.name) chat is titled “\(slot.title)”, so this key can’t tell them apart. Rename one on the Mac, or hold the key to choose another chat."
         }

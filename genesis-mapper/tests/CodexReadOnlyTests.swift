@@ -38,6 +38,15 @@ import CryptoKit
         rejects("binary messages rejected") { _ = try CodexInventoryProtocol.serverFrame(Data([0x82, 0])) }
         rejects("oversized frame rejected before allocation") { _ = try CodexInventoryProtocol.serverFrame(Data([0x81, 127, 0, 0, 0, 0, 0, 0x40, 0, 0])) }
         rejects("fragmented ping rejected") { _ = try CodexInventoryProtocol.serverFrame(Data([9, 0])) }
+        // Reading one chat's messages raises the limit; the chat list keeps the small one.
+        let bigHeader = Data([0x81, 127, 0, 0, 0, 0, 0, 0x40, 0, 0])
+        expect(try CodexInventoryProtocol.serverFrame(bigHeader, frameLimit: 64 * 1_048_576) == nil, "large frame waits under a raised limit")
+        rejects("raised limit still enforced") { _ = try CodexInventoryProtocol.serverFrame(Data([0x81, 127, 0, 0, 0, 0, 0x10, 0, 0, 0]), frameLimit: 64 * 1_048_576) }
+        let large = bigHeader + Data(repeating: 0x61, count: 0x400000)
+        expect(try CodexInventoryProtocol.serverFrame(large, frameLimit: 64 * 1_048_576)?.0.payload.count == 0x400000, "large frame decodes under a raised limit")
+        let sliced = (Data([0, 0, 0]) + frame + Data([7])).dropFirst(3)
+        let fromSlice = try CodexInventoryProtocol.serverFrame(sliced)!
+        expect(fromSlice.0.payload == Data("hello".utf8) && fromSlice.1 == frame.count, "frame decodes from a sliced buffer")
         let mask: [UInt8] = [1, 2, 3, 4], payload = Data("request".utf8)
         let masked = Array(try CodexInventoryProtocol.clientFrame(payload, mask: mask))
         expect(masked[0] == 0x81 && masked[1] == 0x87 && Array(masked[2..<6]) == mask, "client masking header")
