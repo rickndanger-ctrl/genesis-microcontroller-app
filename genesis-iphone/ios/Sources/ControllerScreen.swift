@@ -1041,6 +1041,9 @@ struct ControllerScreen: View {
 
     /// Draws the deck. With `display`, it fills the whole frame and carries
     /// the built-in display: beside the keys when wide, under them when tall.
+    /// The built-in display is passed as `AnyView`. Spelled out, its type nests so deep that
+    /// instantiating the deck overflowed the main thread's stack at launch on a real iPhone;
+    /// simulators have a larger stack and did not show it.
     private func deck(width: CGFloat, height: CGFloat, display: Bool = false) -> some View {
         let fit = display ? CGSize(width: max(0, width), height: max(0, height)) : deckFit(width: width, height: height)
         let side = min(fit.width, fit.height)
@@ -1112,9 +1115,9 @@ struct ControllerScreen: View {
                         actionKey("Map", icon: "slider.horizontal.3", width: keyW, height: keyH, scale: scale, enabled: true) { mappingIndex = browsedSlot }
                     }
                 }
-                if beside { DeckDisplayPanel(content: deckDisplay(wide: false), color: slotColor).frame(width: displayW, height: plateH) }
+                if beside { DeckDisplayPanel(content: AnyView(deckDisplay(wide: false)), color: slotColor).frame(width: displayW, height: plateH) }
               }
-              if displayH > 0 { DeckDisplayPanel(content: deckDisplay(wide: true, canThread: strip.threadFits, compact: strip.compact), color: slotColor).frame(width: plateW, height: displayH) }
+              if displayH > 0 { DeckDisplayPanel(content: AnyView(deckDisplay(wide: true, canThread: strip.threadFits, compact: strip.compact)), color: slotColor).frame(width: plateW, height: displayH) }
             }
             .padding(.top, top).padding(.bottom, bottom)
             .frame(width: fit.width, height: fit.height, alignment: .top)
