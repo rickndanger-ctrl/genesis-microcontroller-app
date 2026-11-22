@@ -1,10 +1,16 @@
 import Foundation
 
 enum ProviderID: String, Codable, CaseIterable, Identifiable {
-    case codex, claude, muse
+    case codex, claude, muse, gemini
     var id: String { rawValue }
-    var name: String { switch self { case .codex: return "Codex"; case .claude: return "Claude"; case .muse: return "Muse" } }
-    var slotPrefix: String { switch self { case .codex: return "A"; case .claude: return "C"; case .muse: return "M" } }
+    var name: String { switch self { case .codex: return "Codex"; case .claude: return "Claude"; case .muse: return "Muse"; case .gemini: return "Gemini" } }
+    var slotPrefix: String { switch self { case .codex: return "A"; case .claude: return "C"; case .muse: return "M"; case .gemini: return "G" } }
+    /// Shown while the connected Mac can show Gemini chats but cannot send to them (a stage-1 companion).
+    /// View-only is a property of that Mac's `gemini` provider, not of Gemini: see `ProviderInfo.isGeminiViewOnly`.
+    static let viewOnlyNotice = "Gemini is view-only for now. Sending comes in a later update."
+    static let geminiStopNotice = "Gemini can’t be stopped from the controller. Stop it in Gemini on the Mac."
+    /// The capability a Mac advertises when Gemini is installed and its chat list is readable.
+    static let geminiCapability = "gemini"
 }
 
 struct RemoteHost: Codable, Identifiable, Equatable {
@@ -43,6 +49,9 @@ struct ProviderInfo: Codable, Equatable, Identifiable {
     var actions: [RemoteAction]? = nil
     func supports(_ action: String) -> Bool {
         guard capabilities.contains(action) else { return false }
+        // Gemini offers reading chats, their activity and their threads, and sending to a chat by its ID. Whatever else a Mac lists
+        // (stop, new chat, artifacts, menus) is not offered. `openChat` is allowed to be listed, but the app never sends it.
+        if id == ProviderID.gemini.rawValue { return [ProviderID.geminiCapability, "chatActivity", "sendPrompt", "openChat", "readThread"].contains(action) && installed && readiness == "ready" }
         if action == "artifacts" { return true } // Registered exports do not require an interactive desktop.
         if action == "launchApp" { return installed && readiness == "closed" } // Only offered while the app is shut.
         // The Mac offers this only while the app's background service cannot be reached.
@@ -54,6 +63,9 @@ struct ProviderInfo: Codable, Equatable, Identifiable {
     }
     // Capture is owned by the phone. Allow a local draft for an existing Codex
     // chat without claiming that the Mac can receive it or start native voice.
+    /// A Mac whose Gemini can be read but not sent to. Absent Gemini, or a Gemini that does not list `sendPrompt`.
+    /// Only a ready Gemini can be judged: a locked Mac or an unreadable chat list advertises nothing, and that is "not ready", not "view-only".
+    var isGeminiViewOnly: Bool { id == ProviderID.gemini.rawValue && readiness == "ready" && !capabilities.contains("sendPrompt") }
     var supportsPhoneDictation: Bool { supports("sendPrompt") || (id == "codex" && supports("openChat")) }
     func supportsControllerAction(_ action: RemoteAction) -> Bool {
         action.id == "dictate" ? supportsPhoneDictation : supports(action.capability)
@@ -181,6 +193,10 @@ struct DictationControlPresentation: Equatable {
     var icon: String
     static func make(provider: ProviderID, info: ProviderInfo?, paired: Bool, hasChat: Bool,
                      busy: Bool, recording: Bool, finalizing: Bool) -> DictationControlPresentation {
+        if provider == .gemini, info?.isGeminiViewOnly == true {
+            return .init(label:"VIEW ONLY",accessibilityLabel:"Hold to Talk is unavailable. \(ProviderID.viewOnlyNotice)",summary:nil,
+                         explanation:ProviderID.viewOnlyNotice,icon:"mic.slash")
+        }
         if recording { return .init(label:"RELEASE TO REVIEW",accessibilityLabel:"Stop dictation",summary:nil,explanation:nil,icon:"waveform") }
         if finalizing { return blocked("FINISHING…", "Finishing your recording.", "Your recording is being turned into text. Wait a moment before recording again.") }
         if !paired { return blocked("PAIR YOUR MAC", "Pair a Mac to use dictation.", "Open controller settings and pair this Mac before using dictation.") }
@@ -226,6 +242,10 @@ struct HostStatus: Codable, Equatable {
     var providers: [ProviderInfo]
     /// Absent from companions older than 0.6.0. See `CompanionSupport`.
     var companionVersion: String? = nil
+    /// This Mac says it can show Gemini chats. Older companions, and Macs without Gemini, never do.
+    /// Gemini is on this Mac, even if it cannot be read just now (the Mac is locked, or is still checking).
+    var hasGemini: Bool { advertisesGemini || providers.contains { $0.id == ProviderID.gemini.rawValue && $0.installed } }
+    var advertisesGemini: Bool { providers.contains { $0.capabilities.contains(ProviderID.geminiCapability) } }
 }
 struct ChatRecord: Codable, Identifiable, Equatable {
     var id: String

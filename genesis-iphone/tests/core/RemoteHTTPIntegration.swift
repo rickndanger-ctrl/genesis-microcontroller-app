@@ -58,6 +58,18 @@ final class HTTPFixture: @unchecked Sendable {
     }
     func dropAction(_ action: String, value: Bool) { lock.lock(); if value { droppedActions.insert(action) } else { droppedActions.remove(action) }; lock.unlock() }
     private var chatState = "Idle"
+    private var geminiSecondChat = false
+    private var threadReplies: [String: (status: String, message: String?, turns: [[String: String]])] = [:]
+    /// A second Gemini chat in the list, so a test can switch between two.
+    let secondGeminiChatID = UUID().uuidString.lowercased()
+    func setSecondGeminiChat(_ value: Bool) { lock.lock(); geminiSecondChat = value; lock.unlock() }
+    /// What `/v1/thread` answers for a chat. A chat with no entry gets a 404, as an older companion would.
+    func setThread(_ chatID: String, status: String = "ok", message: String? = nil, turns: [(String, String)] = []) {
+        lock.lock(); threadReplies[chatID] = (status, message, turns.map { ["role": $0.0, "text": $0.1] }); lock.unlock()
+    }
+    func threadRequests() -> [URLComponents] {
+        received.compactMap { $0.0.hasPrefix("GET /v1/thread") ? URLComponents(string: "http://localhost" + ($0.0.split(separator: " ").dropFirst().first.map(String.init) ?? "")) : nil }
+    }
     /// What the Mac says the fixture's chat is doing.
     func setChatState(_ state: String) { lock.lock(); chatState = state; lock.unlock() }
     private var leftOutTitles: [String] = []
@@ -156,7 +168,7 @@ final class HTTPFixture: @unchecked Sendable {
         if path == "/v1/profile" {
             let edited = (try? JSONSerialization.jsonObject(with: body)) as? [String:Any]
             let provider = firstLine.hasPrefix("PUT ") ? edited?["provider"] as? String ?? queryProvider : queryProvider
-            let chatID = provider == "codex" ? codexChatID : "chat-\(name)"
+            let chatID = ["codex","gemini"].contains(provider) ? codexChatID : "chat-\(name)"
             let slots = (0..<6).map { ["index":$0,"kind":$0 == 0 ? "chat":"empty","title":$0 == 0 ? "Fixture chat":"Assign","targetID":$0 == 0 ? chatID:""] as [String: Any] }
             lock.lock()
             var profile = savedProfiles[provider] ?? ["provider":provider,"revision":1,"slots":slots]
@@ -168,12 +180,24 @@ final class HTTPFixture: @unchecked Sendable {
             respond(connection, code: 200, json: profile, holdPath: firstLine.hasPrefix("GET ") ? path : nil); return
         }
         if path == "/v1/chats" {
-            let id = queryProvider == "codex" ? codexChatID : "chat-\(name)"
+            let id = ["codex","gemini"].contains(queryProvider) ? codexChatID : "chat-\(name)"
             lock.lock(); let shared = leftOutTitles; lock.unlock()
             lock.lock(); let reported = chatState; lock.unlock()
-            var listing: [String: Any] = ["chats":[["id":id,"title":queryProvider == "codex" ? "Existing Codex thread":"Fixture chat","state":reported]]]
+            lock.lock(); let second = geminiSecondChat; lock.unlock()
+            var rows: [[String: Any]] = [["id":id,"title":queryProvider == "codex" ? "Existing Codex thread":"Fixture chat","state":reported]]
+            if second, queryProvider == "gemini" { rows.append(["id":secondGeminiChatID,"title":"Second chat","state":reported]) }
+            var listing: [String: Any] = ["chats":rows]
             if !shared.isEmpty { listing["leftOut"] = shared }
             respond(connection, code: 200, json: listing, holdPath: path); return
+        }
+        if path == "/v1/thread" {
+            let query = URLComponents(string:"http://localhost" + target)?.queryItems ?? []
+            let asked = query.first(where:{$0.name == "chatID"})?.value ?? ""
+            lock.lock(); let planned = threadReplies[asked]; lock.unlock()
+            guard let planned else { respond(connection, code: 404, json: ["error":"Not found"]); return }
+            var reply: [String: Any] = ["provider":queryProvider,"chatID":asked,"status":planned.status,"turns":planned.turns.map { $0 as [String: Any] },"truncated":false]
+            if let message = planned.message { reply["message"] = message }
+            respond(connection, code: 200, json: reply, holdPath: path); return
         }
         if path == "/v1/artifacts" { respond(connection, code: 200, json: ["artifacts":[]], holdPath: path); return }
         if path == "/v1/navigation" {
@@ -1442,6 +1466,7 @@ final class FixtureCredentials: ControllerCredentialVault {
         expect(!normalWithPreviewFlag.glasses.enabled && !normalWithPreviewFlag.isDemo, "--demo-follow alone cannot activate a fixture in the real app")
         try await duplicateSlotRegression()
         try await chatReadinessRegression()
+        try await geminiViewOnlyRegression()
         print("Remote HTTP + ControllerStore: \(count) integration checks passed")
     }
 
@@ -1495,6 +1520,154 @@ final class FixtureCredentials: ControllerCredentialVault {
         expect(store.lastError == "Pair this Mac to see its available chats.", "Unpaired chat tap asks for pairing")
         expect(!mac.received.contains(where: { $0.0.hasPrefix("POST /v1/commands ") }) && speech.starts == 0,
                "Readiness checks and switching never send commands or start dictation")
+    }
+
+    /// Gemini is shown only when the Mac advertises it, can be read and selected, and never sends the Mac a command.
+    @MainActor static func geminiViewOnlyRegression() async throws {
+        let temporary = FileManager.default.temporaryDirectory.appendingPathComponent("genesis-gemini-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: temporary) }
+        let mac = HTTPFixture(name:"gemini-mac"); try await mac.start(); defer { mac.stop() }
+        let vault = FixtureCredentials(); try vault.save(mac.token, for:mac.name)
+        let claude = ProviderInfo(id:"claude",name:"Claude",installed:true,readiness:"ready",capabilities:["openChat","sendPrompt","stop","artifacts"],reason:nil)
+        // A Mac that does not advertise Gemini: the choice is not offered, and a saved Gemini selection falls back.
+        mac.setProviders([claude])
+        var settings = LocalControllerSettings()
+        settings.hosts = [mac.host]; settings.selectedHostID = mac.name; settings.selectedProvider = .gemini
+        let persistence = ControllerPersistence(directory:temporary)
+        try persistence.save(settings)
+        let store = ControllerStore(client:RemoteClient(),credentials:vault,persistence:persistence,speech:FixtureDictation())
+        expect(store.selectedProvider == .gemini && store.availableProviders.contains(.gemini), "A saved Gemini choice stays on screen until the Mac has answered")
+        await store.refresh()
+        expect(store.selectedProvider == .claude && store.availableProviders == [.codex, .claude, .muse],
+               "A saved Gemini choice meeting a Mac without Gemini falls back, and Gemini is not offered")
+        for _ in 0..<100 { if store.status != nil { break }; try? await Task.sleep(nanoseconds:5_000_000) }
+        // A Mac that advertises it.
+        mac.setProviders([claude, .init(id:"gemini",name:"Gemini",installed:true,readiness:"ready",capabilities:["gemini","chatActivity"],reason:nil)])
+        for _ in 0..<100 { await store.refresh(); if store.availableProviders.contains(.gemini) { break }; try? await Task.sleep(nanoseconds:10_000_000) }
+        expect(store.availableProviders == [.codex, .claude, .muse, .gemini], "Gemini is offered when the Mac advertises it")
+        store.selectProvider(.gemini)
+        for _ in 0..<100 { await store.refresh(); if !store.chats.isEmpty { break }; try? await Task.sleep(nanoseconds:10_000_000) }
+        let chat = ChatRecord(id:mac.codexChatID,title:"Fixture chat",state:"Working")
+        expect(store.chats.first?.id == chat.id && store.canMapChats && store.lightsAreLive, "Gemini chats are listed and light up")
+        store.setThreadVisible(true, owner: UUID())
+        await store.selectChat(chat)
+        await store.refreshThread(userInitiated: true)
+        store.draft = "Never sent."
+        let ran = await store.runAction("sendPrompt")
+        let stopped = await store.runAction("stop"), made = await store.runAction("newChat"), talked = await store.runAction("dictate")
+        await store.sendDraft()
+        expect(store.selectedChat?.id == chat.id, "Choosing a Gemini chat selects it")
+        expect(store.isViewOnly && !ran && !stopped && !made && !talked && !store.canSend && !store.canDictate && store.availableActions.isEmpty, "A stage-1 Gemini offers nothing to send, stop, create or dictate")
+        expect(store.connectionMessage == "Gemini is view-only for now. Sending comes in a later update.", "The status line says Gemini is view-only")
+        expect(store.thread == .unavailable("Gemini threads aren’t available yet."), "The thread pane says threads are not available")
+        let sent = mac.received.map(\.0)
+        expect(!sent.contains { $0.hasPrefix("POST /v1/commands") } && !sent.contains { $0.contains("/v1/thread") } && mac.sendCount == 0,
+               "Nothing is sent to a stage-1 Mac for Gemini, and its thread is not requested")
+
+        // A stage-2 Mac: Gemini lists sendPrompt (and, optionally, openChat). Sending works like Codex; nothing else does.
+        let sendable = ProviderInfo(id:"gemini",name:"Gemini",installed:true,readiness:"ready",capabilities:["gemini","chatActivity","sendPrompt","openChat"],reason:nil)
+        mac.setProviders([claude, sendable])
+        for _ in 0..<100 { await store.refresh(); if !store.isViewOnly { break }; try? await Task.sleep(nanoseconds:10_000_000) }
+        expect(!store.isViewOnly && store.selectedProvider == .gemini && store.connectionMessage != ProviderID.viewOnlyNotice,
+               "View-only follows the Mac: a Gemini that lists sendPrompt is not view-only, and the status line is the normal one")
+        await store.selectChat(chat)
+        expect(store.selectedChat?.id == chat.id && !mac.received.contains { $0.0.hasPrefix("POST /v1/commands") },
+               "Selecting a Gemini chat sends no openChat, even when the Mac lists it")
+        store.draft = "  "
+        expect(!store.canSend, "An empty draft cannot be sent")
+        store.draft = "Reviewed Gemini prompt."
+        expect(store.canSend && store.canDictate, "A draft can be sent and dictated on a stage-2 Mac")
+        let stoppedNow = await store.runAction("stop"), madeNow = await store.runAction("newChat"), voiced = await store.runAction("nativeVoice"), shelf = await store.runAction("artifacts")
+        expect(!stoppedNow && !madeNow && !voiced && !shelf, "Stop, New chat, Mac voice and Artifacts stay unavailable for Gemini")
+        expect(store.actionUnavailableReason("stop") == ProviderID.geminiStopNotice && store.hint(forAction: "stop").message == ProviderID.geminiStopNotice,
+               "Stop explains why it is unavailable")
+        expect(!mac.received.contains { $0.0.hasPrefix("POST /v1/commands") }, "Unavailable Gemini actions send nothing")
+        let delivered = await store.runAction("sendPrompt")
+        let posts = mac.received.compactMap { $0.0.hasPrefix("POST /v1/commands") ? try? JSONDecoder().decode(RemoteCommand.self, from: $0.2) : nil }
+        expect(delivered && posts.count == 1 && mac.sendCount == 1 && posts[0].action == "sendPrompt" && posts[0].provider == "gemini" &&
+               posts[0].chatID == mac.codexChatID && posts[0].text == "Reviewed Gemini prompt.",
+               "A stage-2 Send is exactly one sendPrompt command for gemini with the chat's UUID")
+        expect(store.draft.isEmpty && !store.hasUnresolvedSend, "A confirmed Gemini Send clears the draft and the pending ledger")
+        expect(!mac.received.contains { $0.0.contains("/v1/thread") } && store.thread == .unavailable("Gemini threads aren’t available yet."),
+               "Gemini's thread is still not requested without readThread")
+        // The same double-send protection as every other provider: an unconfirmed Send blocks the next one.
+        mac.setUncertain(true); mac.setReceiptMissing(true)
+        store.draft = "Second prompt."
+        _ = await store.runAction("sendPrompt")
+        expect(store.hasUnresolvedSend && mac.sendCount == 2, "An uncertain Gemini Send stays pending")
+        store.draft = "Third prompt."
+        _ = await store.runAction("sendPrompt")
+        expect(mac.sendCount == 2 && !store.canSend, "A pending Gemini Send blocks another until it is resolved")
+        let all = mac.received.compactMap { $0.0.hasPrefix("POST /v1/commands") ? try? JSONDecoder().decode(RemoteCommand.self, from: $0.2) : nil }
+        expect(!all.contains { $0.action != "sendPrompt" }, "No openChat, stop or newChat is ever posted for Gemini")
+        try await geminiThreadRegression()
+    }
+
+    /// A Mac whose gemini provider lists readThread: the thread pane reads `/v1/thread` like any other provider.
+    @MainActor static func geminiThreadRegression() async throws {
+        let temporary = FileManager.default.temporaryDirectory.appendingPathComponent("genesis-gemini-thread-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: temporary) }
+        let mac = HTTPFixture(name:"gemini-thread-mac"); try await mac.start(); defer { mac.stop() }
+        let vault = FixtureCredentials(); try vault.save(mac.token, for:mac.name)
+        let claude = ProviderInfo(id:"claude",name:"Claude",installed:true,readiness:"ready",capabilities:["openChat","sendPrompt","stop","artifacts"],reason:nil)
+        let reader = ProviderInfo(id:"gemini",name:"Gemini",installed:true,readiness:"ready",capabilities:["gemini","chatActivity","sendPrompt","readThread"],reason:nil)
+        let first = mac.codexChatID, second = mac.secondGeminiChatID
+        mac.setSecondGeminiChat(true)
+        mac.setThread(first, turns: [("user", "First question"), ("assistant", "First answer")])
+        mac.setThread(second, turns: [("user", "Second question")])
+        mac.setProviders([claude, reader])
+        var settings = LocalControllerSettings()
+        settings.hosts = [mac.host]; settings.selectedHostID = mac.name; settings.selectedProvider = .gemini
+        let persistence = ControllerPersistence(directory:temporary)
+        try persistence.save(settings)
+        let store = ControllerStore(client:RemoteClient(),credentials:vault,persistence:persistence,speech:FixtureDictation())
+        for _ in 0..<100 { await store.refresh(); if store.chats.count == 2 { break }; try? await Task.sleep(nanoseconds:10_000_000) }
+        expect(store.selectedProvider == .gemini && store.chats.count == 2, "The readThread fixture lists two Gemini chats")
+        let owner = UUID()
+        store.setThreadVisible(true, owner: owner)
+        await store.selectChat(store.chats[0])
+        await store.refreshThread()
+        for _ in 0..<100 { if case .loaded = store.thread { break }; await store.refreshThread(); try? await Task.sleep(nanoseconds:10_000_000) }
+        expect(store.thread == .loaded([ThreadTurn(role:"user",text:"First question"),ThreadTurn(role:"assistant",text:"First answer")], truncated:false),
+               "A Gemini thread shows the turns from /v1/thread")
+        var asked = mac.threadRequests()
+        expect(!asked.isEmpty && asked.allSatisfy { $0.queryItems?.first(where:{$0.name == "provider"})?.value == "gemini" && $0.queryItems?.first(where:{$0.name == "chatID"})?.value == first },
+               "Every Gemini thread request names provider gemini and the selected chat's UUID")
+        expect(!mac.received.contains { $0.0.hasPrefix("POST /v1/commands") }, "Selecting a Gemini chat still posts no command")
+        // Switching Gemini chats switches the thread, and a slow answer for the old chat is never shown.
+        mac.hold("/v1/thread")
+        await store.selectChat(store.chats[1])
+        for _ in 0..<200 { if mac.heldCount("/v1/thread") > 0 { break }; try? await Task.sleep(nanoseconds:5_000_000) }
+        let held = mac.heldCount("/v1/thread")
+        expect(held > 0 && store.selectedChat?.id == second, "The new chat's thread request is waiting on the Mac")
+        await store.selectChat(store.chats[0])
+        mac.release("/v1/thread")
+        for _ in 0..<100 { await store.refreshThread(); if case .loaded = store.thread { break }; try? await Task.sleep(nanoseconds:10_000_000) }
+        expect(store.selectedChat?.id == first && store.thread == .loaded([ThreadTurn(role:"user",text:"First question"),ThreadTurn(role:"assistant",text:"First answer")], truncated:false),
+               "A late answer for the chat that was left is not shown for the chat now selected")
+        await store.selectChat(store.chats[1])
+        for _ in 0..<100 { await store.refreshThread(); if store.thread == .loaded([ThreadTurn(role:"user",text:"Second question")], truncated:false) { break }; try? await Task.sleep(nanoseconds:10_000_000) }
+        expect(store.thread == .loaded([ThreadTurn(role:"user",text:"Second question")], truncated:false), "Choosing another Gemini chat shows that chat's thread")
+        asked = mac.threadRequests()
+        expect(asked.contains { $0.queryItems?.first(where:{$0.name == "chatID"})?.value == second }, "The second chat's UUID was requested")
+        // An "unavailable" reply shows its message.
+        mac.setThread(second, status: "unavailable", message: "Gemini can’t show this chat right now.")
+        await store.refreshThread(userInitiated: true)
+        expect(store.thread == .unavailable("Gemini can’t show this chat right now."), "An unavailable Gemini thread shows the Mac's message")
+        // An older companion that lists readThread but has no /v1/thread route: update prompt, no hammering.
+        let missing = ChatRecord(id: UUID().uuidString.lowercased(), title: "Unknown", state: "Saved")
+        await store.selectChat(missing)
+        await store.refreshThread(userInitiated: true)
+        expect(store.thread == .needsUpdate, "A 404 shows the Update the Mac companion notice for Gemini too")
+        // The Mac drops readThread: back to the fixed message and no more requests.
+        mac.setProviders([claude, .init(id:"gemini",name:"Gemini",installed:true,readiness:"ready",capabilities:["gemini","chatActivity","sendPrompt"],reason:nil)])
+        for _ in 0..<100 { await store.refresh(); if store.providerInfo?.supports("readThread") != true { break }; try? await Task.sleep(nanoseconds:10_000_000) }
+        let before = mac.threadRequests().count
+        await store.selectChat(store.chats[0])
+        await store.refreshThread(userInitiated: true)
+        expect(store.thread == .unavailable("Gemini threads aren’t available yet.") && mac.threadRequests().count == before,
+               "Without readThread the thread is the fixed message and no request is made")
+        store.setThreadVisible(false, owner: owner)
     }
 
     @MainActor static func duplicateSlotRegression() async throws {

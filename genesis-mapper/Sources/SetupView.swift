@@ -10,6 +10,7 @@ struct SetupAgent: Identifiable {
         SetupAgent(id: "claude", name: "Claude", bundle: "com.anthropic.claudefordesktop", download: URL(string: "https://claude.ai/download")),
         SetupAgent(id: "codex", name: "Codex", bundle: "com.openai.codex", download: URL(string: "https://openai.com/codex/")),
         SetupAgent(id: "muse", name: "Muse", bundle: "com.meta.endo", download: nil),
+        SetupAgent(id: "gemini", name: "Gemini", bundle: "com.google.GeminiMacOS", download: nil),
     ]
     var installedURL: URL? { NSWorkspace.shared.urlForApplication(withBundleIdentifier: bundle) }
     var running: Bool { !NSRunningApplication.runningApplications(withBundleIdentifier: bundle).isEmpty }
@@ -126,7 +127,7 @@ struct SetupView: View {
     private let accent = Color(red: 0.61, green: 0.36, blue: 0.96)
 
     private var installed: Bool { state.place == .applications }
-    private var anyAgent: Bool { state.agents.contains { $0.installed } }
+    private var anyAgent: Bool { state.agents.contains { $0.installed && $0.agent.id != "gemini" } }
     private var paired: Bool { !bridge.devices.isEmpty }
     private var allDone: Bool { installed && state.trusted && anyAgent && paired }
 

@@ -15,7 +15,7 @@ struct GlassesFollowPanel: View {
                 Label("Follow this controller", systemImage: "eyeglasses")
                     .font(.headline)
             }
-            .disabled(store.isDemo || store.selectedProvider == .muse || !store.isPaired)
+            .disabled(store.isDemo || store.selectedProvider == .muse || store.selectedProvider == .gemini || !store.isPaired)
             .accessibilityIdentifier("glasses.enabled")
             .accessibilityHint("Show this controller’s confirmed conversation and draft on your G2 glasses.")
 

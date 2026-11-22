@@ -18,7 +18,9 @@ final class ControllerStore: ObservableObject {
     @Published private(set) var thread: ThreadState = .idle
     @Published var draft = "" { didSet { persistDraft(); publishGlassesDraft() } }
     @Published private(set) var artifacts: [ArtifactRecord] = []
-    @Published private(set) var connectionMessage = "Pair your Mac to connect"
+    @Published private(set) var linkMessage = "Pair your Mac to connect"
+    /// The status line under the chat: the link to the Mac, or, while Gemini is open, why nothing can be sent.
+    var connectionMessage: String { isViewOnly && (isDemo || providerInfo?.supports(ProviderID.geminiCapability) == true) ? ProviderID.viewOnlyNotice : linkMessage }
     @Published private(set) var isBusy = false
     private var navigating = false
     private var queuedMenuSteps: [String] = []
@@ -62,6 +64,7 @@ final class ControllerStore: ObservableObject {
     /// The Sends this app is waiting on right now, each from its start until its own receipt is handled.
     @Published private var sendingCommandIDs = Set<String>()
     private var threadInFlight: String?
+    private var geminiThreadMisses = 0
     /// Macs whose companion answered the thread route with 404 this session; not asked again until Refresh or a Mac change.
     private var threadNotOnCompanion = Set<String>()
     private var glassesConfirmedChatID: String?
@@ -117,8 +120,11 @@ final class ControllerStore: ObservableObject {
         guard let chat = selectedChat, !chat.id.isEmpty else { return false }
         return selectedProvider != .codex || isDemo || UUID(uuidString: chat.id) != nil
     }
+    /// Gemini is view-only only when the connected Mac's gemini provider does not list `sendPrompt` (a stage-1 companion,
+    /// or no answer yet). Then every action that would send the Mac a command is off.
+    var isViewOnly: Bool { selectedProvider == .gemini && providerInfo?.isGeminiViewOnly == true }
     var canDictate: Bool {
-        isPaired && hasDictationChat && !isBusy && !isFinalizing && (providerInfo?.supportsPhoneDictation == true || !macIsReady)
+        !isViewOnly && isPaired && hasDictationChat && !isBusy && !isFinalizing && (providerInfo?.supportsPhoneDictation == true || !macIsReady)
     }
     /// The Mac is answering and the selected app is ready to be controlled.
     private var macIsReady: Bool { status != nil && providerInfo?.readiness == "ready" }
@@ -126,7 +132,13 @@ final class ControllerStore: ObservableObject {
         .make(provider:selectedProvider,info:providerInfo,paired:isPaired,hasChat:hasDictationChat,
               busy:isBusy,recording:isRecording,finalizing:isFinalizing)
     }
-    var canMapChats: Bool { providerInfo?.supports("openChat") == true }
+    var canMapChats: Bool { providerInfo?.supports(selectedProvider == .gemini ? ProviderID.geminiCapability : "openChat") == true }
+    /// The providers to offer. Gemini only where the connected Mac says it can show Gemini chats (or in the demo);
+    /// a Gemini selection already made stays in the list so the picker never loses its own choice.
+    var availableProviders: [ProviderID] {
+        let base: [ProviderID] = [.codex, .claude, .muse]
+        return isDemo || status?.advertisesGemini == true || selectedProvider == .gemini ? base + [.gemini] : base
+    }
     var navigationOnly: Bool { providerInfo?.navigationOnly == true }
     var availableShortcuts: [ControllerShortcut] { providerInfo?.controllerShortcuts ?? [] }
     var availableActions: [RemoteAction] { providerInfo?.availableActions ?? [] }
@@ -137,6 +149,7 @@ final class ControllerStore: ObservableObject {
         action.requiresChat && !(action.id == "nativeVoice" && selectedProvider == .muse)
     }
     func canRunAction(_ id: String) -> Bool {
+        if isViewOnly { return false }
         // A local recording must remain stoppable even if the Mac disconnects.
         if id == "dictate", isRecording { return true }
         guard !isBusy, let action = action(id), providerInfo?.supportsControllerAction(action) == true,
@@ -149,7 +162,7 @@ final class ControllerStore: ObservableObject {
     /// True while a command in flight is the only thing stopping this action,
     /// so its key stays lit and a press can wait its turn. See `DeferredTap`.
     func canDeferAction(_ id: String) -> Bool {
-        guard isBusy, DeferredTap.mayWait(id), let action = action(id), providerInfo?.supportsControllerAction(action) == true,
+        guard !isViewOnly, isBusy, DeferredTap.mayWait(id), let action = action(id), providerInfo?.supportsControllerAction(action) == true,
               !needsChat(action) || selectedChat != nil else { return false }
         if ["previousControllerChat", "nextControllerChat"].contains(id) { return historyDestination(id) != nil }
         return true
@@ -162,6 +175,7 @@ final class ControllerStore: ObservableObject {
     func hint(forAction id: String) -> ControllerHint {
         let app = selectedProvider.name, mac = selectedHost?.name ?? "your Mac"
         let name: String = id == "dictate" ? "Hold to Talk" : id == "sendPrompt" ? "Send" : (action(id)?.title ?? "This key")
+        if isViewOnly { return .init(title: "Gemini is view-only", message: ProviderID.viewOnlyNotice) }
         if !isPaired {
             return .init(title: "Pair a Mac first", message: "\(name) needs a Mac to work with. Pair one in Settings.", step: .pairMac, stepLabel: "Open Settings")
         }
@@ -199,6 +213,12 @@ final class ControllerStore: ObservableObject {
         }
         if id == "stop", selectedProvider == .muse {
             return .init(title: "Stop isn’t available for Muse", message: "Muse can’t be stopped from the controller. Stop it in Muse on the Mac.")
+        }
+        if id == "stop", selectedProvider == .gemini {
+            return .init(title: "Stop isn’t available for Gemini", message: ProviderID.geminiStopNotice)
+        }
+        if selectedProvider == .gemini, ["newChat", "artifacts"].contains(id) {
+            return .init(title: "\(name) isn’t available for Gemini", message: "Gemini can’t do this from the controller yet. Use Gemini on the Mac.")
         }
         if id == "nativeVoice", providerInfo?.supports("nativeVoice") != true {
             return .init(title: "Voice isn’t connected here", message: "Two-way voice mode is not connected here yet. Use Hold to talk to dictate a draft, then Send.")
@@ -246,11 +266,13 @@ final class ControllerStore: ObservableObject {
     }
 
     func actionUnavailableReason(_ id: String) -> String? {
+        if isViewOnly { return ProviderID.viewOnlyNotice }
         if id == "dictate", isRecording { return nil }
         if id == "nativeVoice", providerInfo?.supports("nativeVoice") != true {
             return "Two-way voice mode is not connected here yet. Use Hold to talk to dictate a draft, then Send."
         }
         if id == "stop", selectedProvider == .muse { return "Muse can’t be stopped from the controller. Stop it in Muse on the Mac." }
+        if id == "stop", selectedProvider == .gemini { return ProviderID.geminiStopNotice }
         guard let action = action(id), providerInfo?.supportsControllerAction(action) == true else { return "This action is not available for this connection." }
         if isBusy { return "Another action is finishing." }
         if needsChat(action) && selectedChat == nil { return "Choose a chat first." }
@@ -317,7 +339,7 @@ final class ControllerStore: ObservableObject {
         if !isPaired { return "Pair this Mac to see its available chats." }
         guard let info = providerInfo else {
             if status == nil {
-                return connectionMessage == "Connecting…" || refreshGeneration == gate.generation
+                return linkMessage == "Connecting…" || refreshGeneration == gate.generation
                     ? "Connecting to \(selectedHost?.name ?? "your Mac"). Wait for the connection, then try again."
                     : "Refresh the connection to check this Mac’s available controls."
             }
@@ -335,7 +357,7 @@ final class ControllerStore: ObservableObject {
         return isRefreshingChats ? "Loading \(selectedProvider.name) chats…" : "No existing \(selectedProvider.name) chats were found on this Mac."
     }
     var canSend: Bool {
-        selectedChat != nil && !draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty &&
+        !isViewOnly && selectedChat != nil && !draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty &&
         !isBusy && !isRecording && !isFinalizing && providerInfo?.supports("sendPrompt") == true &&
         currentRoute.map { settings.ledger.pendingSends[$0.storageKey] == nil } == true
     }
@@ -380,7 +402,7 @@ final class ControllerStore: ObservableObject {
     /// saved, and a white "idle" light on a working chat would be a false claim.
     var lightsAreLive: Bool {
         isDemo || (status != nil && providerInfo?.readiness == "ready"
-                   && (selectedProvider != .codex || providerInfo?.supports("chatActivity") == true))
+                   && (![.codex, .gemini].contains(selectedProvider) || providerInfo?.supports("chatActivity") == true))
     }
     /// Between full refreshes, re-reads only what the chats are doing, so a
     /// light is a few seconds old at most. Claude only: reading its sidebar
@@ -393,6 +415,7 @@ final class ControllerStore: ObservableObject {
         switch selectedProvider {
         case .claude: guard providerInfo?.supports("openChat") == true else { return }
         case .codex: guard providerInfo?.supports("chatActivity") == true else { return }
+        case .gemini: guard providerInfo?.supports(ProviderID.geminiCapability) == true, providerInfo?.supports("chatActivity") == true else { return }
         case .muse: return
         }
         let generation = gate.generation, provider = selectedProvider
@@ -413,6 +436,7 @@ final class ControllerStore: ObservableObject {
     private func threadSelectionChanged() {
         thread = .idle
         guard threadVisible else { return }
+        if geminiThreadUnreadable { thread = Self.geminiThread; return }
         if isDemo { demoReplies = 0; thread = demoThreadNow(); growDemoThread() } else { Task { await refreshThread() } }
     }
 
@@ -420,6 +444,8 @@ final class ControllerStore: ObservableObject {
     /// replaces shown messages with anything but newer ones; a tap on Refresh may show an error.
     func refreshThread(userInitiated: Bool = false) async {
         guard threadVisible else { return }
+        // Gemini threads are read only from a Mac whose gemini provider lists `readThread`; otherwise the Mac is not asked.
+        if geminiThreadUnreadable { if thread != Self.geminiThread { thread = Self.geminiThread }; return }
         if isDemo { thread = demoThreadNow(); return }
         guard let chat = selectedChat, let route = currentRoute else { return }
         if userInitiated { threadNotOnCompanion.remove(selectedHostID) }
@@ -442,8 +468,14 @@ final class ControllerStore: ObservableObject {
                 thread = .failed(RemoteError.invalidResponse.localizedDescription); return
             }
             let next: ThreadState
-            if reply.status == "ok" { next = .loaded(reply.turns ?? [], truncated: reply.truncated == true) }
+            if reply.status == "ok" { geminiThreadMisses = 0; next = .loaded(reply.turns ?? [], truncated: reply.truncated == true) }
             else {
+                // Gemini's file can be busy for a moment while it writes a reply; a background re-poll keeps the
+                // shown messages until the Mac has said "unavailable" three times running.
+                if provider == .gemini, !userInitiated, case .loaded = thread {
+                    geminiThreadMisses += 1
+                    if geminiThreadMisses < 3 { return }
+                }
                 let note = reply.message?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
                 next = .unavailable(note.isEmpty ? "This conversation can’t be shown right now." : note)
             }
@@ -455,6 +487,11 @@ final class ControllerStore: ObservableObject {
             thread = .failed(threadFailureText(error))
         }
     }
+
+    /// Gemini is selected, outside the demo, and the connected Mac has not said it can read Gemini threads
+    /// (a stage 1/2 companion, or a Mac that has not answered yet). Such a Mac is never asked for a thread.
+    private var geminiThreadUnreadable: Bool { selectedProvider == .gemini && !isDemo && providerInfo?.supports("readThread") != true }
+    private static let geminiThread = ThreadState.unavailable("Gemini threads aren’t available yet.")
 
     private func threadFailureText(_ error: Error) -> String {
         if case let RemoteError.server(code, _) = error, code != 401 {
@@ -508,12 +545,12 @@ final class ControllerStore: ObservableObject {
         guard id != selectedHostID, hosts.contains(where: { $0.id == id }) else { return }
         threadNotOnCompanion.removeAll()
         persistDraft(); invalidateSelection(); selectedHostID = id; restoreSelection(); persist()
-        if isDemo { loadDemo() } else { connectionMessage = isPaired ? "Connecting…" : "Pair this Mac"; Task { await refresh() } }
+        if isDemo { loadDemo() } else { linkMessage = isPaired ? "Connecting…" : "Pair this Mac"; Task { await refresh() } }
     }
     func selectProvider(_ provider: ProviderID) {
         guard provider != selectedProvider else { return }
         persistDraft(); invalidateSelection(); selectedProvider = provider; restoreSelection(); persist()
-        if isDemo { loadDemo() } else { connectionMessage = isPaired ? "Connecting…" : "Pair this Mac"; Task { await refresh() } }
+        if isDemo { loadDemo() } else { linkMessage = isPaired ? "Connecting…" : "Pair this Mac"; Task { await refresh() } }
     }
     /// Home is "no chat selected", on the deck and in the menus alike. The
     /// chat's draft stays saved for when its key is pressed again. Nothing is
@@ -524,7 +561,7 @@ final class ControllerStore: ObservableObject {
     }
 
     func enableGlassesFollow(takeover: Bool = false) {
-        guard foreground, !isDemo, selectedProvider != .muse else {
+        guard foreground, !isDemo, selectedProvider != .muse, selectedProvider != .gemini else {
             glasses.stop("Glasses follow is available for Codex and Claude while this app is open."); return
         }
         do {
@@ -596,25 +633,27 @@ final class ControllerStore: ObservableObject {
         guard host.hostID == status.hostID else { throw RemoteError.wrongHost }
     }
     private func applyStatus(_ status: HostStatus) {
+        // A saved Gemini choice meeting a Mac that has no Gemini goes back to a provider that is there.
+        if selectedProvider == .gemini, !isDemo, !status.hasGemini { selectProvider(.claude); return }
         self.status = status
         // A thread still waiting on the Mac's first answer need not wait for the next thread poll.
-        if case .idle = thread, threadVisible { Task { await refreshThread() } }
+        if threadVisible, thread == .idle || thread == Self.geminiThread { Task { await refreshThread() } }
         let provider = status.providers.first { $0.id == selectedProvider.rawValue }
         switch provider?.readiness {
-        case "ready": connectionMessage = "Connected · \(selectedHost?.name ?? status.hostName)"
-        case "locked": connectionMessage = "Mac locked · unlock to control"
-        case "needsAccessibility": connectionMessage = "Allow Accessibility on this Mac"
-        case "closed": connectionMessage = provider?.reason?.contains("too narrow") == true
+        case "ready": linkMessage = "Connected · \(selectedHost?.name ?? status.hostName)"
+        case "locked": linkMessage = "Mac locked · unlock to control"
+        case "needsAccessibility": linkMessage = "Allow Accessibility on this Mac"
+        case "closed": linkMessage = provider?.reason?.contains("too narrow") == true
             ? "\(selectedProvider.name)’s window is too narrow on this Mac" : "Open \(selectedProvider.name) on this Mac"
         default:
-            if provider?.id == "codex", provider?.supports("newChat") == true { connectionMessage = "New chat ready · saved chats unavailable" }
-            else { connectionMessage = provider?.supports("artifacts") == true ? "Artifacts ready · chat controls unavailable" : (provider?.reason ?? "Provider unavailable") }
+            if provider?.id == "codex", provider?.supports("newChat") == true { linkMessage = "New chat ready · saved chats unavailable" }
+            else { linkMessage = provider?.supports("artifacts") == true ? "Artifacts ready · chat controls unavailable" : (provider?.reason ?? "Provider unavailable") }
         }
     }
     private func failConnection(_ error: Error) {
         status = nil
-        if case RemoteError.unpaired = error { connectionMessage = "Pair this Mac" }
-        else { connectionMessage = "Offline · drafts saved on iPhone" }
+        if case RemoteError.unpaired = error { linkMessage = "Pair this Mac" }
+        else { linkMessage = "Offline · drafts saved on iPhone" }
     }
     private func refreshStatus() async {
         guard !isDemo, !isBusy, refreshGeneration != gate.generation else { return }
@@ -650,7 +689,7 @@ final class ControllerStore: ObservableObject {
             // slow chat scan must not add its latency to mappings or artifacts.
             async let mappings: Void = refreshProfile(host: host, token: token, provider: provider, generation: generation)
             async let list: Void = refreshChats(host: host, token: token, provider: provider, generation: generation,
-                                               enabled: capability?.supports("openChat") == true)
+                                               enabled: capability?.supports(provider == .gemini ? ProviderID.geminiCapability : "openChat") == true)
             async let shelf: Void = refreshArtifacts(host: host, token: token, provider: provider, generation: generation,
                                                      chat: selectedChat, enabled: capability?.supports("artifacts") == true)
             async let receipts: Void = recoverPendingSend()
@@ -824,7 +863,7 @@ final class ControllerStore: ObservableObject {
     /// list is not fresh enough to say. Used to explain a failed open.
     func missingChatMessage(_ slot: SlotMapping) -> String? {
         // Not for Codex: its list is capped, and lights going live must not change when this hint appears.
-        guard !isDemo, lightsAreLive, selectedProvider != .codex, !chats.isEmpty, !chats.contains(where: { $0.id == slot.targetID }) else { return nil }
+        guard !isDemo, lightsAreLive, selectedProvider != .codex, selectedProvider != .gemini, !chats.isEmpty, !chats.contains(where: { $0.id == slot.targetID }) else { return nil }
         if leftOutChatTitles.contains(slot.title) {
             return "More than one \(selectedProvider.name) chat is titled “\(slot.title)”, so this key can’t tell them apart. Rename one on the Mac, or hold the key to choose another chat."
         }
@@ -845,8 +884,11 @@ final class ControllerStore: ObservableObject {
         }
         if id == "artifacts" { requestedPanel = "artifacts"; await refreshArtifacts(); return true }
         if ["previousControllerChat", "nextControllerChat"].contains(id), let (index, chat) = historyDestination(id) {
-            let receipt = await execute(action:"openChat",chatID:chat.id)
-            guard receipt?.isConfirmed == true else { return false }
+            // Gemini's chats are only selected here; the Mac is not asked to open them.
+            if selectedProvider != .gemini {
+                let receipt = await execute(action:"openChat",chatID:chat.id)
+                guard receipt?.isConfirmed == true else { return false }
+            }
             changeChat(chat, historyIndex:index); return true
         }
         if id == "sendPrompt" {
@@ -890,6 +932,9 @@ final class ControllerStore: ObservableObject {
         if isDemo {
             acknowledgeCompletion(chat.id); changeChat(chat, preferredSlotIndex: preferredSlotIndex); return
         }
+        // Choosing a Gemini chat only selects it here, as the target of Send. The Mac's Gemini window never
+        // switches chats, so no openChat is sent, even when the Mac lists that capability.
+        if selectedProvider == .gemini { changeChat(chat, preferredSlotIndex: preferredSlotIndex); return }
         guard providerInfo?.supports("openChat") == true else { lastError = chatAvailabilityMessage; return }
         let receipt = await execute(action: "openChat", chatID: chat.id)
         guard let receipt, receipt.isConfirmed else { return }
@@ -1180,6 +1225,11 @@ final class ControllerStore: ObservableObject {
     private func execute(action: String, chatID: String?, text: String? = nil, artifactID: String? = nil, id: String = UUID().uuidString,
                          navigationSession: String? = nil, replaceDraft: Bool = false) async -> CommandReceipt? {
         guard !isBusy else { return nil }
+        // Gemini takes only sendPrompt, and only from a Mac that lists it. Never openChat, stop, newChat or voice.
+        if isViewOnly { return CommandReceipt(id: id, status: "failed", message: ProviderID.viewOnlyNotice) }
+        if selectedProvider == .gemini, action != "sendPrompt" {
+            return CommandReceipt(id: id, status: "failed", message: action == "stop" ? ProviderID.geminiStopNotice : "Gemini can’t do that from the controller yet.")
+        }
         if isDemo {
             let receipt = CommandReceipt(id: id, status: "confirmed", message: "Demo only — no Mac action performed.")
             lastReceipt = receipt; return receipt
@@ -1237,7 +1287,7 @@ final class ControllerStore: ObservableObject {
     }
 
     func refreshArtifacts() async {
-        guard !isDemo, !isBusy, providerInfo?.supports("artifacts") == true else { return }
+        guard !isDemo, selectedProvider != .gemini, !isBusy, providerInfo?.supports("artifacts") == true else { return }
         let generation = gate.generation, provider = selectedProvider
         let chat = selectedChat
         do {
@@ -1286,20 +1336,22 @@ final class ControllerStore: ObservableObject {
         ]
         status = HostStatus(protocolVersion: 1, hostID: identity, hostName: selectedHost?.name ?? "Mini 2",
             providers: ProviderID.allCases.map { provider in
-                var actions = provider == .muse ? [] : demoActions.filter { provider == .claude || ["newChat","modelAndEffort","toggleSidebar","toggleTerminal","keyboardShortcuts"].contains($0.id) }
+                var actions = provider == .muse || provider == .gemini ? [] : demoActions.filter { provider == .claude || ["newChat","modelAndEffort","toggleSidebar","toggleTerminal","keyboardShortcuts"].contains($0.id) }
                 if provider == .codex, let index = actions.firstIndex(where: { $0.id == "modelAndEffort" }) {
                     actions[index].title = "Change model"
                     actions[index].detail = "Open model and reasoning choices for the current Codex view on your Mac."
                     actions[index].requiresChat = false
                 }
-                let base = provider == .muse ? ["artifacts"] : provider == .claude ? ["openChat","sendPrompt","stop","artifacts","menuNavigation"] : ["openChat","artifacts","menuNavigation"]
+                let base = provider == .gemini ? [ProviderID.geminiCapability, "chatActivity", "sendPrompt", "readThread"] : provider == .muse ? ["artifacts"] : provider == .claude ? ["openChat","sendPrompt","stop","artifacts","menuNavigation"] : ["openChat","artifacts","menuNavigation"]
                 return .init(id:provider.rawValue,name:provider.name,installed:true,readiness:"ready",capabilities:base + actions.map(\.id),
                              reason:"Design preview only. No Mac commands are sent. Native live voice is not connected.",actions:actions)
             })
-        chats = ["Controller app", "OMAC workspace", "Design studio", "Weekly review", "Build notes", "Ideas & experiments"].enumerated().map {
+        // Gemini only reports Working or Saved, so it has fewer chats than the others.
+        let demoTitles = selectedProvider == .gemini ? ["Research notes", "Trip planning", "Recipe ideas"] : ["Controller app", "OMAC workspace", "Design studio", "Weekly review", "Build notes", "Ideas & experiments"]
+        let demoStates = selectedProvider == .gemini ? ["Working", "Saved", "Saved"] : ["Working", "Unread", "Needs input", "Idle", "Something went wrong", "Idle"]
+        chats = demoTitles.enumerated().map {
             // One of each light, so the demo shows what the colors mean.
-            ChatRecord(id: "demo-\(selectedProvider.rawValue)-\($0.offset)", title: $0.element,
-                       state: ["Working", "Unread", "Needs input", "Idle", "Something went wrong", "Idle"][$0.offset])
+            ChatRecord(id: "demo-\(selectedProvider.rawValue)-\($0.offset)", title: $0.element, state: demoStates[$0.offset])
         }
         if settings.profiles[scope] == nil {
             profile = .init(provider: selectedProvider.rawValue, revision: 1, slots: chats.enumerated().map {
@@ -1307,7 +1359,7 @@ final class ControllerStore: ObservableObject {
             }); settings.profiles[scope] = profile
         }
         if selectedChat == nil { selectedChat = chats[0]; settings.selectedChats[scope] = chats[0]; selectedSlotIndex = 0 }
-        connectionMessage = "Interactive preview · no Mac connected"
+        linkMessage = "Interactive preview · no Mac connected"
         loadDemoArtifacts()
         threadSelectionChanged()
     }
@@ -1354,6 +1406,14 @@ final class ControllerStore: ObservableObject {
         }
         #endif
         guard let chat, let index = chat.id.split(separator: "-").last.flatMap({ Int($0) }) else { return .idle }
+        if chat.id.hasPrefix("demo-gemini-") {
+            let geminiSamples: [[ThreadTurn]] = [
+                [.init(role: "user", text: "Find three good sources on how sourdough starters work."), .init(role: "assistant", text: "Here are three: a food-science explainer on wild yeast and bacteria, a baker’s guide to feeding schedules, and a short paper on starter acidity. I can summarize any of them.")],
+                [.init(role: "user", text: "Plan a long weekend in Lisbon."), .init(role: "assistant", text: "Day one: Alfama and the castle. Day two: Belém and the riverside. Day three: a day trip to Sintra."), .init(role: "user", text: "Keep it to two days of walking.")],
+                [.init(role: "user", text: "What can I make with chickpeas and spinach?"), .init(role: "assistant", text: "A quick curry, a warm salad with lemon, or baked patties. The curry takes about twenty minutes.")]
+            ]
+            return .loaded(geminiSamples[index % geminiSamples.count], truncated: false)
+        }
         func u(_ t: String) -> ThreadTurn { .init(role: "user", text: t) }
         func a(_ t: String) -> ThreadTurn { .init(role: "assistant", text: t) }
         let samples: [[ThreadTurn]] = [
@@ -1368,6 +1428,7 @@ final class ControllerStore: ObservableObject {
     }
 
     private func loadDemoArtifacts() {
+        guard selectedProvider != .gemini else { artifacts = []; return }
         artifacts = ["Build notes", "Design review", "Test report"].enumerated().map {
             .init(id: "demo-artifact-\($0.offset)", title: $0.element, kind: "text", url: nil,
                   mimeType: "text/plain", hostID: status?.hostID ?? "", provider: selectedProvider.rawValue,

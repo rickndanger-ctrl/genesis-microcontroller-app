@@ -36,6 +36,7 @@ import Foundation
         museRootCauses()
         museDetails()
         codexChecks()
+        geminiChecks()
         summaries()
         // A Muse window too narrow to control is one cause, reported once.
         let covered = SelfCheck.muse(.init(installed: true, running: true, navigable: false, messageBoxes: 0, answering: false, chats: 0, sharedTitles: 0, callControls: 0, windowTooNarrow: true), mac: .init(unlocked: true, accessibility: true))
@@ -166,6 +167,30 @@ import Foundation
             let call = item(run(muse(calls: calls)), "Call control")
             expect(call?.ok == false && call?.detail == "Not showing. A call may already be in progress.", "\(calls) call controls fails with the call-in-progress hint")
         }
+    }
+
+    static func geminiChecks() {
+        func gem(installed: Bool = true, readable: Bool = true, chats: Int = 2, problem: String = "") -> SelfCheck.Gemini {
+            .init(installed: installed, running: false, databaseReadable: readable, chats: chats, problem: problem, threadsReadable: readable)
+        }
+        let healthy = SelfCheck.gemini(gem(), mac: good)
+        expect(healthy.map(\.name) == ["Chat list", "Chats", "Threads", "Send"] && healthy.filter { $0.name != "Send" }.allSatisfy { $0.ok && $0.provider == "gemini" }, "A healthy Gemini returns its items, and needs neither Accessibility nor an open app")
+        expect(item(healthy, "Chats")?.detail == "2 chats offered.", "Gemini chats gives the count")
+        let missing = SelfCheck.gemini(gem(installed: false), mac: .init(unlocked: false, accessibility: false))
+        expect(missing.count == 1 && missing[0].name == "Installed" && !missing[0].ok, "Gemini not installed returns one item")
+        expect(SelfCheck.gemini(gem(), mac: .init(unlocked: false, accessibility: true)).first?.name == "Reachable", "A locked Mac returns one Reachable item for Gemini")
+        let broken = SelfCheck.gemini(gem(readable: false, chats: 0, problem: "Layout changed."), mac: good)
+        expect(broken.count == 4 && !broken[0].ok && broken[0].detail == "Layout changed." && !broken[1].ok, "An unreadable list fails both items and says why")
+        expect(!SelfCheck.gemini(gem(chats: 0), mac: good)[1].ok, "No chats is flagged")
+        expect(item(healthy, "Threads")?.ok == true && !broken[2].ok && broken[2].provider == "gemini", "Gemini Threads is ok when conversations read, failed when not")
+        var drifted = gem(); drifted.threadsReadable = false; drifted.threadsProblem = "Layout moved."
+        expect(item(SelfCheck.gemini(drifted, mac: good), "Threads")?.detail == "Layout moved." && !SelfCheck.gemini(gem(readable: true), mac: good)[1].detail.isEmpty, "Gemini Threads says why it cannot read")
+        var withTool = gem(); withTool.sendCommandFound = true
+        let closedSend = item(SelfCheck.gemini(withTool, mac: good), "Send")
+        expect(closedSend?.ok == true && closedSend?.detail.contains("opened when you send") == true, "A closed Gemini with the tool is ready to send")
+        withTool.hubLive = true
+        expect(item(SelfCheck.gemini(withTool, mac: good), "Send")?.detail.contains("Gemini is open") == true, "An open Gemini says so")
+        expect(item(SelfCheck.gemini(gem(), mac: good), "Send")?.ok == false, "No tool, no Send")
     }
 
     static func codexChecks() {

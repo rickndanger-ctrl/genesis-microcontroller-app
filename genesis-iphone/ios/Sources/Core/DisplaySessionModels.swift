@@ -20,7 +20,7 @@ struct GlassesDisplayState: Codable, Equatable {
         String(String.UnicodeScalarView(text.unicodeScalars.prefix(maximumDraftScalars)))
     }
     var valid: Bool {
-        provider != .muse && (chatID == nil || !(chatID?.isEmpty ?? true)) &&
+        provider != .muse && provider != .gemini && (chatID == nil || !(chatID?.isEmpty ?? true)) &&
         (slotIndex == nil || (0...5).contains(slotIndex!)) && (0...999).contains(page) &&
         (view == .home || chatID != nil) && draft.unicodeScalars.count <= Self.maximumDraftScalars &&
         (0...9_007_199_254_740_991).contains(refreshNonce)

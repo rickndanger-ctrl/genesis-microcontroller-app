@@ -77,10 +77,12 @@ struct ControllerScreen: View {
         guard store.artifacts.indices.contains(artifactIndex) else { return "No artifacts" }
         return store.artifacts[artifactIndex].title
     }
-    private var providerName: String { store.selectedProvider.rawValue == "codex" ? "Codex" : store.selectedProvider.rawValue.capitalized }
+    private var providerName: String { store.selectedProvider.name }
     private var codexDraftOnly: Bool { store.selectedProvider == .codex && store.providerInfo?.supports("sendPrompt") != true }
     private var codexQueuesPrompt: Bool { store.selectedProvider == .codex && store.providerInfo?.supports("sendPrompt") == true }
-    private var slotPrefix: String { store.selectedProvider == .claude ? "C" : store.selectedProvider == .muse ? "M" : "A" }
+    private var slotPrefix: String { store.selectedProvider.slotPrefix }
+    /// The status line is one line, except the view-only notice, which is a full sentence.
+    private var statusLines: Int { store.isViewOnly ? 2 : 1 }
     private var canChangeLayout: Bool {
         !heldTalk && !talkGestureActive && !store.isRecording && !store.isFinalizing && !chatDialActive && !artifactDialActive
     }
@@ -375,11 +377,11 @@ struct ControllerScreen: View {
 
     private func providerMenu<Label: View>(@ViewBuilder label: () -> Label) -> some View {
         Menu {
-            ForEach([ProviderID.codex, .claude, .muse], id: \.rawValue) { provider in
+            ForEach(store.availableProviders, id: \.rawValue) { provider in
                 Button {
                     ControllerSound.shared.keyClick(); store.selectProvider(provider)
                 } label: {
-                    SwiftUI.Label(provider == .codex ? "Codex" : provider.rawValue.capitalized,
+                    SwiftUI.Label(provider.name,
                                   systemImage: provider == store.selectedProvider ? "checkmark" : "bubble.left")
                 }
             }
@@ -389,7 +391,7 @@ struct ControllerScreen: View {
     }
 
     private func providerIcon(_ provider: ProviderID) -> String {
-        provider == .codex ? "terminal" : provider == .claude ? "sun.max" : "sparkle"
+        provider == .codex ? "terminal" : provider == .claude ? "sun.max" : provider == .gemini ? "sparkles" : "sparkle"
     }
 
     private func routeLabel(_ title: String, icon: String) -> some View {
@@ -414,7 +416,7 @@ struct ControllerScreen: View {
                     .accessibilityIdentifier("controller.currentChat")
                 HStack(spacing: 5) {
                     Circle().fill(store.providerInfo?.readiness == "ready" ? Color.green : Color.orange).frame(width: 5, height: 5)
-                    Text(store.connectionMessage).font(.system(size: isPad ? 12 : 11, weight: .medium)).lineLimit(1)
+                    Text(store.connectionMessage).font(.system(size: isPad ? 12 : 11, weight: .medium)).lineLimit(statusLines)
                 }.foregroundStyle(GenesisPalette.dim)
             }
             Spacer(minLength: 0)
@@ -560,7 +562,7 @@ struct ControllerScreen: View {
                     .accessibilityIdentifier("controller.currentChat")
                 HStack(spacing: 5) {
                     Circle().fill(store.providerInfo?.readiness == "ready" ? Color.green : Color.orange).frame(width: 5, height: 5)
-                    Text(store.connectionMessage).lineLimit(lines)
+                    Text(store.connectionMessage).lineLimit(max(lines, statusLines))
                 }
                 .font(.system(size: 12, weight: .medium))
                 .foregroundStyle(DeckDisplayPanel<EmptyView>.dim)
@@ -849,7 +851,7 @@ struct ControllerScreen: View {
         HStack(spacing: 8) {
             Button { ControllerSound.shared.keyClick(); Task { await store.runAction("previousControllerChat") } } label: { Label("Previous", systemImage:"arrow.left") }
                 .disabled(!store.canRunAction("previousControllerChat"))
-            if store.availableActions.contains(where: { $0.id == "newChat" }) {
+            if store.availableActions.contains(where: { $0.id == "newChat" }) || store.selectedProvider == .gemini {
                 Button { ControllerSound.shared.keyClick(); Task { await store.runAction("newChat") } } label: { Label("New chat", systemImage:"square.and.pencil") }
                     .disabled(!store.canRunAction("newChat"))
             }
@@ -919,13 +921,13 @@ struct ControllerScreen: View {
                 }
             }.padding(4).genesisPanel(radius: 17)
             HStack(spacing: 6) {
-                ForEach([ProviderID.codex, .claude, .muse], id: \.rawValue) { provider in
+                ForEach(store.availableProviders, id: \.rawValue) { provider in
                     let selected = store.selectedProvider == provider
                     Button { ControllerSound.shared.keyClick(); store.selectProvider(provider) } label: {
                         HStack(spacing: 6) {
                             Image(systemName: providerIcon(provider))
-                            Text(provider == .codex ? "Codex" : provider.rawValue.capitalized)
-                        }.font(.system(size: isPad ? 15 : 13, weight: .semibold)).frame(maxWidth: .infinity).frame(minHeight: isPad ? 48 : 42)
+                            Text(provider.name).lineLimit(1).minimumScaleFactor(0.8)
+                        }.font(.system(size: isPad ? 15 : 13, weight: .semibold)).frame(maxWidth: .infinity).frame(minHeight: isPad ? 48 : store.availableProviders.count > 3 ? 44 : 42)
                             .foregroundStyle(selected ? Color.white : GenesisPalette.ink)
                             .background {
                                 if selected { Capsule().fill(GenesisPalette.ink).shadow(color: slotColor.opacity(0.40), radius: 8, y: 3) }
@@ -941,7 +943,7 @@ struct ControllerScreen: View {
         HStack(spacing: 8) {
             Circle().fill(store.providerInfo?.readiness == "ready" ? Color.green : Color.orange).frame(width: isPad ? 8 : 6, height: isPad ? 8 : 6)
                 .shadow(color: store.providerInfo?.readiness == "ready" ? .green : .orange, radius: 4)
-            Text(store.connectionMessage).font(.system(size: isPad ? 14 : 11, weight: .medium)).lineLimit(1)
+            Text(store.connectionMessage).font(.system(size: isPad ? 14 : 11, weight: .medium)).lineLimit(statusLines)
             Spacer()
             if store.isBusy { ProgressView().controlSize(.mini) }
             threadOpenButton
@@ -1329,7 +1331,7 @@ struct ControllerScreen: View {
             }
             TextField(codexDraftOnly ? "Local draft — Send is not connected yet" : "Hold the microphone, or type a draft…", text: $store.draft, axis: .vertical)
                 .focused($draftFocused)
-                .font(.system(size: isPad ? 17 : 14)).lineLimit(isPad ? 3...8 : 2...5).disabled(store.selectedChat == nil || store.isRecording || store.isFinalizing)
+                .font(.system(size: isPad ? 17 : 14)).lineLimit(isPad ? 3...8 : 2...5).disabled(store.selectedChat == nil || store.isRecording || store.isFinalizing || store.isViewOnly)
                 // The field shows its first lines and cannot scroll while it
                 // is disabled for dictation, so new words past the last line
                 // never appeared. The live view over it follows the newest.

@@ -3,7 +3,7 @@ import Foundation
 /// One line of the activity log.
 struct ActivityEntry: Codable, Equatable {
     var time: Date
-    var provider: String   // "claude", "muse", "codex"
+    var provider: String   // "claude", "muse", "codex", "gemini"
     var action: String     // e.g. "openChat", "sendPrompt"
     var status: String     // "confirmed", "failed", "uncertain", "queued", "refused"
     var message: String    // the result message shown to the user
