@@ -23,6 +23,7 @@ struct ThreadPane: View {
     let accent: Color
     var style: ThreadStyle? = nil
     @State private var pinned = true
+    @State private var nearBottom = true
     @State private var owner = UUID()
     private var look: ThreadStyle { style ?? .light(accent) }
 
@@ -94,15 +95,28 @@ struct ThreadPane: View {
                     }
                     ForEach(Array(turns.enumerated()), id: \.offset) { index, turn in bubble(turn, index: index) }
                     Color.clear.frame(height: 1).id("thread.end")
-                        .onAppear { pinned = true }.onDisappear { pinned = false }
                 }
                 .padding(10)
             }
             .defaultScrollAnchor(.bottom)
-            .onChange(of: turns) { if pinned { proxy.scrollTo("thread.end", anchor: .bottom) } }
+            // Only the reader's own scrolling unpins the view. A new message makes the
+            // content taller before this view hears about it, so judging "at the bottom"
+            // from the layout at that moment would always say no and leave the reply hidden.
+            .onScrollGeometryChange(for: Bool.self) { geometry in
+                geometry.contentOffset.y + geometry.containerSize.height >= geometry.contentSize.height - 48
+            } action: { _, atBottom in nearBottom = atBottom }
+            .onScrollPhaseChange { old, new in
+                if new == .interacting { pinned = false }
+                else if new == .idle, old != .idle, old != .animating { pinned = nearBottom }
+            }
+            .onChange(of: turns) {
+                guard pinned else { return }
+                withAnimation(.easeOut(duration: 0.2)) { proxy.scrollTo("thread.end", anchor: .bottom) }
+            }
         }
         // A new chat starts at its newest message.
         .id(store.selectedChat?.id)
+        .onChange(of: store.selectedChat?.id) { pinned = true }
     }
 
     private func bubble(_ turn: ThreadTurn, index: Int) -> some View {

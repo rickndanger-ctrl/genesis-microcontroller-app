@@ -403,14 +403,14 @@ final class ControllerStore: ObservableObject {
     private func threadSelectionChanged() {
         thread = .idle
         guard threadVisible else { return }
-        if isDemo { thread = Self.demoThread(for: selectedChat) } else { Task { await refreshThread() } }
+        if isDemo { demoReplies = 0; thread = demoThreadNow(); growDemoThread() } else { Task { await refreshThread() } }
     }
 
     /// Reads the open chat from the Mac. A background re-poll never shows a spinner or
     /// replaces shown messages with anything but newer ones; a tap on Refresh may show an error.
     func refreshThread(userInitiated: Bool = false) async {
         guard threadVisible else { return }
-        if isDemo { thread = Self.demoThread(for: selectedChat); return }
+        if isDemo { thread = demoThreadNow(); return }
         guard let chat = selectedChat, let route = currentRoute else { return }
         if userInitiated { threadNotOnCompanion.remove(selectedHostID) }
         else if threadNotOnCompanion.contains(selectedHostID) { thread = .needsUpdate; return }
@@ -1299,6 +1299,31 @@ final class ControllerStore: ObservableObject {
         connectionMessage = "Interactive preview · no Mac connected"
         loadDemoArtifacts()
         threadSelectionChanged()
+    }
+
+    /// `--demo-thread-grows` adds a sample reply every two seconds while a thread is on
+    /// screen, so previews and UI tests can watch the pane follow new messages.
+    static var demoThreadGrows = false
+    private var demoReplies = 0
+    private var demoGrowth: Task<Void, Never>?
+
+    private func demoThreadNow() -> ThreadState {
+        guard case let .loaded(turns, truncated) = Self.demoThread(for: selectedChat), demoReplies > 0 else { return Self.demoThread(for: selectedChat) }
+        let extra = (1...demoReplies).map { ThreadTurn(role: "assistant", text: "Sample reply \($0). It runs long enough to take a few lines in the pane, so each one pushes the list further down the screen than the last.") }
+        return .loaded(turns + extra, truncated: truncated)
+    }
+
+    private func growDemoThread() {
+        demoGrowth?.cancel()
+        guard Self.demoThreadGrows, threadVisible else { return }
+        demoGrowth = Task { [weak self] in
+            while !Task.isCancelled {
+                try? await Task.sleep(nanoseconds: 2_000_000_000)
+                guard !Task.isCancelled, let self, self.threadVisible, self.demoReplies < 8 else { return }
+                self.demoReplies += 1
+                self.thread = self.demoThreadNow()
+            }
+        }
     }
 
     private static func demoThread(for chat: ChatRecord?) -> ThreadState {
