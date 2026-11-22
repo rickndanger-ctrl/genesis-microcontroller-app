@@ -263,6 +263,26 @@ enum ClaudeThread {
         return ThreadTurn(role: type, text: text)
     }
 
+    /// A message the person sent while Claude was still working. Claude Code stores it as a
+    /// "queued_command" attachment, not as a user record, so without this it never shows in the thread.
+    /// Only ones a person typed count: background task notices use the same record and are left out.
+    static func queued(_ record: [String: Any]) -> ThreadTurn? {
+        guard record["type"] as? String == "attachment", isBool(record["isSidechain"], false), !isBool(record["isMeta"], true),
+              let attachment = record["attachment"] as? [String: Any], attachment["type"] as? String == "queued_command",
+              attachment["commandMode"] as? String == "prompt" else { return nil }
+        let human = isBool(attachment["humanTurn"], true) || (attachment["origin"] as? [String: Any])?["kind"] as? String == "human"
+        guard human else { return nil }
+        var text: String
+        if let string = attachment["prompt"] as? String { text = string }
+        else if let blocks = attachment["prompt"] as? [Any] {
+            text = blocks.compactMap { $0 as? [String: Any] }.filter { $0["type"] as? String == "text" }
+                .compactMap { $0["text"] as? String }.filter { !scaffolding(ThreadLimits.clean($0)) }.joined(separator: "\n")
+        } else { return nil }
+        text = ThreadLimits.clean(text)
+        if text.isEmpty || scaffolding(text) { return nil }
+        return ThreadTurn(role: "user", text: text)
+    }
+
     /// What a transcript line says at its top level, found without decoding the message inside it.
     struct LineFields {
         var type: String?, uuid: String?, sessionId: String?
@@ -415,6 +435,10 @@ enum ClaudeThread {
                 if (type == "user" || type == "assistant"), !fields.hasToolUseResult {
                     if length > ThreadLimits.lineBytes { limited = true }
                     else { let full = try record ?? decode(); turn = visible(full) }
+                } else if type == "attachment", length <= ThreadLimits.lineBytes,
+                          memmem(base + start, length, "\"queued_command\"", 16) != nil {
+                    // Attachments are decoded only when they could be a message sent while Claude was working.
+                    if let full = try? (record ?? decode()) { turn = queued(full) }
                 }
                 nodes[uuid] = (fields.parentIsNull ? nil : fields.parent, turn); leaf = uuid
             }
