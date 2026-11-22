@@ -490,6 +490,59 @@ final class ControllerUITests: XCTestCase {
     }
 
     @MainActor
+    func testThreadKeepsShowingWhenTheWindowOfMessagesSlides() throws {
+        guard UIDevice.current.userInterfaceIdiom == .pad else { throw XCTSkip("Checks the iPad full-screen pane") }
+        continueAfterFailure = false
+        let app = XCUIApplication()
+        app.launchArguments = ["--demo", "--demo-thread-grows", "--demo-thread-slides"]
+        XCUIDevice.shared.orientation = .landscapeLeft
+        app.launch()
+        XCTAssertTrue(app.buttons["controller.fullscreen"].waitForExistence(timeout: 8))
+        waitForObservedOrientation(app, landscape: true)
+        app.buttons["controller.fullscreen"].tap()
+        XCTAssertTrue(app.buttons["controller.exitFullscreen"].waitForExistence(timeout: 3))
+        if app.buttons["thread.show"].exists { app.buttons["thread.show"].tap() }
+        app.buttons["C2, OMAC workspace"].tap()
+        func element(_ id: String) -> XCUIElement { app.descendants(matching: .any).matching(identifier: id).firstMatch }
+        let pane = element("thread.pane")
+        XCTAssertTrue(pane.waitForExistence(timeout: 3))
+        for n in 1...6 {
+            let reply = app.descendants(matching: .any).matching(NSPredicate(format: "label CONTAINS %@", "Sample reply \(n).")).firstMatch
+            XCTAssertTrue(reply.waitForExistence(timeout: 6), "Reply \(n) arrives")
+            usleep(600_000)
+            XCTAssertTrue(reply.frame.intersects(pane.frame), "Reply \(n) is drawn inside the pane")
+            saveFullscreenScreenshot("Sliding thread reply \(n)")
+        }
+    }
+
+    /// Replays a thread saved from a Mac (TEST_RUNNER_GENESIS_THREAD_FILE) to check how real messages draw.
+    @MainActor func testReplaySavedThreadDraws() throws {
+        guard UIDevice.current.userInterfaceIdiom == .pad, let path = ProcessInfo.processInfo.environment["GENESIS_THREAD_FILE"] else {
+            throw XCTSkip("Needs an iPad and a saved thread file")
+        }
+        continueAfterFailure = true
+        let app = XCUIApplication()
+        app.launchArguments = ["--demo"]
+        app.launchEnvironment["GENESIS_THREAD_FILE"] = path
+        XCUIDevice.shared.orientation = .landscapeLeft
+        app.launch()
+        XCTAssertTrue(app.buttons["controller.fullscreen"].waitForExistence(timeout: 8))
+        waitForObservedOrientation(app, landscape: true)
+        app.buttons["controller.fullscreen"].tap()
+        XCTAssertTrue(app.buttons["controller.exitFullscreen"].waitForExistence(timeout: 3))
+        if app.buttons["thread.show"].exists { app.buttons["thread.show"].tap() }
+        func element(_ id: String) -> XCUIElement { app.descendants(matching: .any).matching(identifier: id).firstMatch }
+        let pane = element("thread.pane")
+        XCTAssertTrue(pane.waitForExistence(timeout: 3))
+        sleep(2)
+        saveFullscreenScreenshot("Replayed thread, first chat")
+        app.buttons["C2, OMAC workspace"].tap()
+        sleep(2)
+        saveFullscreenScreenshot("Replayed thread, after switching chat")
+        let shown = app.descendants(matching: .any).matching(NSPredicate(format: "identifier BEGINSWITH %@", "thread.message.")).allElementsBoundByIndex
+        XCTAssertTrue(shown.contains { $0.frame.intersects(pane.frame) && $0.frame.height > 4 }, "At least one message is drawn inside the pane")
+    }
+
     func testThreadFollowsNewRepliesUnlessScrolledUp() {
         continueAfterFailure = false
         let app = XCUIApplication()

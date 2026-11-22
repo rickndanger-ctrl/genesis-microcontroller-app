@@ -38,6 +38,16 @@ struct ThreadPane: View {
         .modifier(PanelIf(on: look.panel))
         .onAppear { store.setThreadVisible(true, owner: owner) }
         .onDisappear { store.setThreadVisible(false, owner: owner) }
+        // The pane keeps itself registered and asks for the thread while it is on screen.
+        // If the system reports it gone while it is still drawn, the next pass puts it back,
+        // so a visible pane can never be left with nothing in it.
+        .task(id: store.selectedChat?.id) {
+            while !Task.isCancelled {
+                store.setThreadVisible(true, owner: owner)
+                await store.refreshThread()
+                try? await Task.sleep(nanoseconds: 4_000_000_000)
+            }
+        }
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier("thread.pane")
     }
@@ -66,8 +76,7 @@ struct ThreadPane: View {
             notice("Choose a chat to see its thread")
         } else {
             switch store.thread {
-            case .idle: Color.clear
-            case .loading: ProgressView().controlSize(.small).frame(maxWidth: .infinity, maxHeight: .infinity)
+            case .idle, .loading: ProgressView().controlSize(.small).frame(maxWidth: .infinity, maxHeight: .infinity)
             case .needsUpdate: notice("Update the Mac companion to see threads here")
             case let .unavailable(message), let .failed(message): notice(message)
             case let .loaded(turns, truncated):
@@ -87,7 +96,8 @@ struct ThreadPane: View {
     private func messages(_ turns: [ThreadTurn], truncated: Bool) -> some View {
         ScrollViewReader { proxy in
             ScrollView {
-                LazyVStack(spacing: 8) {
+                // At most a dozen messages, so every row is laid out: a lazy stack guesses heights and can scroll past its content.
+                VStack(spacing: 8) {
                     if truncated {
                         Text("Earlier messages are on your Mac")
                             .font(.caption).foregroundStyle(look.dim).padding(.vertical, 4)
@@ -111,7 +121,7 @@ struct ThreadPane: View {
             }
             .onChange(of: turns) {
                 guard pinned else { return }
-                withAnimation(.easeOut(duration: 0.2)) { proxy.scrollTo("thread.end", anchor: .bottom) }
+                proxy.scrollTo("thread.end", anchor: .bottom)
             }
         }
         // A new chat starts at its newest message.

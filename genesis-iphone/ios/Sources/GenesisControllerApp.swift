@@ -21,6 +21,7 @@ struct GenesisControllerApp: App {
         }
         #endif
         ControllerStore.demoThreadGrows = arguments.contains("--demo") && arguments.contains("--demo-thread-grows")
+        ControllerStore.demoThreadSlides = ControllerStore.demoThreadGrows && arguments.contains("--demo-thread-slides")
         return ControllerStore(demo: arguments.contains("--demo"), demoFollow: arguments.contains("--demo-follow"))
     }
 
