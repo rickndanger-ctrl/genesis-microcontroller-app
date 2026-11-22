@@ -61,6 +61,24 @@ import Foundation
         expect(visible("assistant", text("x"), ["sourceToolAssistantUUID": uuid(9)]) == nil, "tool-sourced dropped")
         expect(visible("assistant", [["type": "text", "text": "x", "hidden": true]]) == nil, "hidden block dropped")
         expect(visible("system", "x") == nil, "system record is not a message")
+
+        // A message sent while Claude was working is stored as a queued_command attachment.
+        func queued(_ attachment: [String: Any], _ extra: [String: Any] = [:]) -> ThreadTurn? {
+            var record: [String: Any] = ["type": "attachment", "isSidechain": false, "attachment": attachment]
+            for (key, value) in extra { record[key] = value }
+            return ClaudeThread.queued(record)
+        }
+        let typed: [String: Any] = ["type": "queued_command", "prompt": "second message", "commandMode": "prompt", "humanTurn": true]
+        expect(queued(typed) == ThreadTurn(role: "user", text: "second message"), "queued human message is a user turn")
+        expect(queued(["type": "queued_command", "prompt": "by origin", "commandMode": "prompt", "origin": ["kind": "human"]])?.text == "by origin", "human by origin")
+        expect(queued(["type": "queued_command", "prompt": "<task-notification>x</task-notification>", "commandMode": "task-notification",
+                       "origin": ["kind": "task-notification"]]) == nil, "task notice is not a message")
+        expect(queued(["type": "queued_command", "prompt": "<system-reminder>x</system-reminder>", "commandMode": "prompt"]) == nil, "unmarked prompt dropped")
+        expect(queued(["type": "queued_command", "prompt": "<system-reminder>x</system-reminder>", "commandMode": "prompt", "humanTurn": true]) == nil, "wrapper dropped")
+        expect(queued(["type": "deferred_tools_record", "prompt": "x", "commandMode": "prompt", "humanTurn": true]) == nil, "other attachment dropped")
+        expect(queued(typed, ["isSidechain": true]) == nil, "queued sidechain dropped")
+        expect(queued(typed, ["isMeta": true]) == nil, "queued meta dropped")
+        expect(queued(["type": "queued_command", "prompt": 5, "commandMode": "prompt", "humanTurn": true]) == nil, "odd prompt dropped")
         expect(visible("user", "a\u{0001}b\u{0000}c\n d ")?.text == "abc\n d", "control characters removed and trimmed")
         expect(visible("user", "  \n ") == nil, "blank dropped")
 

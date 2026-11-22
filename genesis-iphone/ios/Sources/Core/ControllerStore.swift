@@ -403,14 +403,14 @@ final class ControllerStore: ObservableObject {
     private func threadSelectionChanged() {
         thread = .idle
         guard threadVisible else { return }
-        if isDemo { thread = Self.demoThread(for: selectedChat) } else { Task { await refreshThread() } }
+        if isDemo { demoReplies = 0; thread = demoThreadNow(); growDemoThread() } else { Task { await refreshThread() } }
     }
 
     /// Reads the open chat from the Mac. A background re-poll never shows a spinner or
     /// replaces shown messages with anything but newer ones; a tap on Refresh may show an error.
     func refreshThread(userInitiated: Bool = false) async {
         guard threadVisible else { return }
-        if isDemo { thread = Self.demoThread(for: selectedChat); return }
+        if isDemo { thread = demoThreadNow(); return }
         guard let chat = selectedChat, let route = currentRoute else { return }
         if userInitiated { threadNotOnCompanion.remove(selectedHostID) }
         else if threadNotOnCompanion.contains(selectedHostID) { thread = .needsUpdate; return }
@@ -1301,7 +1301,47 @@ final class ControllerStore: ObservableObject {
         threadSelectionChanged()
     }
 
+    /// `--demo-thread-grows` adds a sample reply every two seconds while a thread is on
+    /// screen, so previews and UI tests can watch the pane follow new messages.
+    static var demoThreadGrows = false
+    /// `--demo-thread-slides` also keeps only the newest five messages, as the Mac does.
+    static var demoThreadSlides = false
+    private var demoReplies = 0
+    private var demoGrowth: Task<Void, Never>?
+
+    private func demoThreadNow() -> ThreadState {
+        guard case let .loaded(turns, truncated) = Self.demoThread(for: selectedChat), demoReplies > 0 else { return Self.demoThread(for: selectedChat) }
+        let extra = (1...demoReplies).map { n -> ThreadTurn in
+            let line = "Sample reply \(n). It runs long enough to take a few lines in the pane, so each one pushes the list further down the screen than the last."
+            // A real chat mixes one-line and page-long messages.
+            return ThreadTurn(role: "assistant", text: Self.demoThreadSlides && n % 2 == 0 ? Array(repeating: line, count: 9).joined(separator: "\n") : line)
+        }
+        // The Mac sends only the newest messages, so a real thread slides: every poll can change every row.
+        if Self.demoThreadSlides { return .loaded(Array((turns + extra).suffix(5)), truncated: true) }
+        return .loaded(turns + extra, truncated: truncated)
+    }
+
+    private func growDemoThread() {
+        demoGrowth?.cancel()
+        guard Self.demoThreadGrows, threadVisible else { return }
+        demoGrowth = Task { [weak self] in
+            while !Task.isCancelled {
+                try? await Task.sleep(nanoseconds: 2_000_000_000)
+                guard !Task.isCancelled, let self, self.threadVisible, self.demoReplies < 8 else { return }
+                self.demoReplies += 1
+                self.thread = self.demoThreadNow()
+            }
+        }
+    }
+
     private static func demoThread(for chat: ChatRecord?) -> ThreadState {
+        #if targetEnvironment(simulator)
+        // Simulator only: replay a thread saved from a Mac, to reproduce a layout seen on a device.
+        if chat != nil, let path = ProcessInfo.processInfo.environment["GENESIS_THREAD_FILE"], let data = FileManager.default.contents(atPath: path),
+           let reply = try? JSONDecoder().decode(ThreadResponse.self, from: data) {
+            return .loaded(reply.turns ?? [], truncated: reply.truncated == true)
+        }
+        #endif
         guard let chat, let index = chat.id.split(separator: "-").last.flatMap({ Int($0) }) else { return .idle }
         func u(_ t: String) -> ThreadTurn { .init(role: "user", text: t) }
         func a(_ t: String) -> ThreadTurn { .init(role: "assistant", text: t) }

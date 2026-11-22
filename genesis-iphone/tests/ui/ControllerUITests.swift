@@ -490,6 +490,99 @@ final class ControllerUITests: XCTestCase {
     }
 
     @MainActor
+    func testThreadKeepsShowingWhenTheWindowOfMessagesSlides() throws {
+        guard UIDevice.current.userInterfaceIdiom == .pad else { throw XCTSkip("Checks the iPad full-screen pane") }
+        continueAfterFailure = false
+        let app = XCUIApplication()
+        app.launchArguments = ["--demo", "--demo-thread-grows", "--demo-thread-slides"]
+        XCUIDevice.shared.orientation = .landscapeLeft
+        app.launch()
+        XCTAssertTrue(app.buttons["controller.fullscreen"].waitForExistence(timeout: 8))
+        waitForObservedOrientation(app, landscape: true)
+        app.buttons["controller.fullscreen"].tap()
+        XCTAssertTrue(app.buttons["controller.exitFullscreen"].waitForExistence(timeout: 3))
+        if app.buttons["thread.show"].exists { app.buttons["thread.show"].tap() }
+        app.buttons["C2, OMAC workspace"].tap()
+        func element(_ id: String) -> XCUIElement { app.descendants(matching: .any).matching(identifier: id).firstMatch }
+        let pane = element("thread.pane")
+        XCTAssertTrue(pane.waitForExistence(timeout: 3))
+        for n in 1...6 {
+            let reply = app.descendants(matching: .any).matching(NSPredicate(format: "label CONTAINS %@", "Sample reply \(n).")).firstMatch
+            XCTAssertTrue(reply.waitForExistence(timeout: 6), "Reply \(n) arrives")
+            usleep(600_000)
+            XCTAssertTrue(reply.frame.intersects(pane.frame), "Reply \(n) is drawn inside the pane")
+            saveFullscreenScreenshot("Sliding thread reply \(n)")
+        }
+    }
+
+    /// Replays a thread saved from a Mac (TEST_RUNNER_GENESIS_THREAD_FILE) to check how real messages draw.
+    @MainActor func testReplaySavedThreadDraws() throws {
+        guard UIDevice.current.userInterfaceIdiom == .pad, let path = ProcessInfo.processInfo.environment["GENESIS_THREAD_FILE"] else {
+            throw XCTSkip("Needs an iPad and a saved thread file")
+        }
+        continueAfterFailure = true
+        let app = XCUIApplication()
+        app.launchArguments = ["--demo"]
+        app.launchEnvironment["GENESIS_THREAD_FILE"] = path
+        XCUIDevice.shared.orientation = .landscapeLeft
+        app.launch()
+        XCTAssertTrue(app.buttons["controller.fullscreen"].waitForExistence(timeout: 8))
+        waitForObservedOrientation(app, landscape: true)
+        app.buttons["controller.fullscreen"].tap()
+        XCTAssertTrue(app.buttons["controller.exitFullscreen"].waitForExistence(timeout: 3))
+        if app.buttons["thread.show"].exists { app.buttons["thread.show"].tap() }
+        func element(_ id: String) -> XCUIElement { app.descendants(matching: .any).matching(identifier: id).firstMatch }
+        let pane = element("thread.pane")
+        XCTAssertTrue(pane.waitForExistence(timeout: 3))
+        sleep(2)
+        saveFullscreenScreenshot("Replayed thread, first chat")
+        app.buttons["C2, OMAC workspace"].tap()
+        sleep(2)
+        saveFullscreenScreenshot("Replayed thread, after switching chat")
+        let shown = app.descendants(matching: .any).matching(NSPredicate(format: "identifier BEGINSWITH %@", "thread.message.")).allElementsBoundByIndex
+        XCTAssertTrue(shown.contains { $0.frame.intersects(pane.frame) && $0.frame.height > 4 }, "At least one message is drawn inside the pane")
+    }
+
+    func testThreadFollowsNewRepliesUnlessScrolledUp() {
+        continueAfterFailure = false
+        let app = XCUIApplication()
+        app.launchArguments = ["--demo", "--demo-thread-grows"]
+        XCUIDevice.shared.orientation = .portrait
+        app.launch()
+        XCTAssertTrue(app.buttons["controller.fullscreen"].waitForExistence(timeout: 8))
+        func element(_ id: String) -> XCUIElement { app.descendants(matching: .any).matching(identifier: id).firstMatch }
+        app.buttons["C2, OMAC workspace"].tap()
+        let open = app.buttons["thread.open"]
+        XCTAssertTrue(open.waitForExistence(timeout: 5))
+        open.tap()
+        XCTAssertTrue(element("thread.pane").waitForExistence(timeout: 3))
+        let pane = element("thread.pane")
+
+        // New replies arrive every two seconds. Without touching the pane, each newest one must be on screen.
+        var newest = 0
+        for _ in 0..<40 where newest < 3 {
+            let labelled = app.descendants(matching: .any).matching(NSPredicate(format: "label CONTAINS %@", "Sample reply \(newest + 1).")).firstMatch
+            if labelled.waitForExistence(timeout: 1) { newest += 1; XCTAssertTrue(labelled.isHittable, "Reply \(newest) is on screen without scrolling") }
+        }
+        XCTAssertEqual(newest, 3, "Three sample replies arrived")
+
+        // After the reader scrolls up, the pane stays where they put it.
+        // One short drag: a full swipe at the top of the list would pull the sheet itself down.
+        pane.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.45))
+            .press(forDuration: 0.1, thenDragTo: pane.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.80)))
+        XCTAssertTrue(pane.exists, "Scrolling the thread does not close it")
+        let later = app.descendants(matching: .any).matching(NSPredicate(format: "label CONTAINS %@", "Sample reply 6.")).firstMatch
+        _ = later.waitForExistence(timeout: 9)
+        XCTAssertFalse(later.exists && later.isHittable, "A reply that arrives while scrolled up does not pull the view down")
+
+        // Scrolling back to the end follows again.
+        pane.swipeUp(); pane.swipeUp()
+        let last = app.descendants(matching: .any).matching(NSPredicate(format: "label CONTAINS %@", "Sample reply 8.")).firstMatch
+        XCTAssertTrue(last.waitForExistence(timeout: 12))
+        XCTAssertTrue(last.isHittable, "Back at the end, the newest reply is on screen")
+    }
+
+    @MainActor
     private func waitForObservedOrientation(_ app: XCUIApplication, landscape: Bool) {
         // Check actual app bounds, not only the orientation requested from the
         // simulator: a rejected rotation must not count as portrait coverage.

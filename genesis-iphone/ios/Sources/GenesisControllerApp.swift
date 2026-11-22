@@ -20,6 +20,8 @@ struct GenesisControllerApp: App {
             return ControllerStore(credentials: EphemeralCredentials(), persistence: ControllerPersistence(directory: scratch), glassesPreferences: nil)
         }
         #endif
+        ControllerStore.demoThreadGrows = arguments.contains("--demo") && arguments.contains("--demo-thread-grows")
+        ControllerStore.demoThreadSlides = ControllerStore.demoThreadGrows && arguments.contains("--demo-thread-slides")
         return ControllerStore(demo: arguments.contains("--demo"), demoFollow: arguments.contains("--demo-follow"))
     }
 

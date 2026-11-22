@@ -23,6 +23,7 @@ struct ThreadPane: View {
     let accent: Color
     var style: ThreadStyle? = nil
     @State private var pinned = true
+    @State private var nearBottom = true
     @State private var owner = UUID()
     private var look: ThreadStyle { style ?? .light(accent) }
 
@@ -37,6 +38,16 @@ struct ThreadPane: View {
         .modifier(PanelIf(on: look.panel))
         .onAppear { store.setThreadVisible(true, owner: owner) }
         .onDisappear { store.setThreadVisible(false, owner: owner) }
+        // The pane keeps itself registered and asks for the thread while it is on screen.
+        // If the system reports it gone while it is still drawn, the next pass puts it back,
+        // so a visible pane can never be left with nothing in it.
+        .task(id: store.selectedChat?.id) {
+            while !Task.isCancelled {
+                store.setThreadVisible(true, owner: owner)
+                await store.refreshThread()
+                try? await Task.sleep(nanoseconds: 4_000_000_000)
+            }
+        }
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier("thread.pane")
     }
@@ -65,8 +76,7 @@ struct ThreadPane: View {
             notice("Choose a chat to see its thread")
         } else {
             switch store.thread {
-            case .idle: Color.clear
-            case .loading: ProgressView().controlSize(.small).frame(maxWidth: .infinity, maxHeight: .infinity)
+            case .idle, .loading: ProgressView().controlSize(.small).frame(maxWidth: .infinity, maxHeight: .infinity)
             case .needsUpdate: notice("Update the Mac companion to see threads here")
             case let .unavailable(message), let .failed(message): notice(message)
             case let .loaded(turns, truncated):
@@ -86,7 +96,8 @@ struct ThreadPane: View {
     private func messages(_ turns: [ThreadTurn], truncated: Bool) -> some View {
         ScrollViewReader { proxy in
             ScrollView {
-                LazyVStack(spacing: 8) {
+                // At most a dozen messages, so every row is laid out: a lazy stack guesses heights and can scroll past its content.
+                VStack(spacing: 8) {
                     if truncated {
                         Text("Earlier messages are on your Mac")
                             .font(.caption).foregroundStyle(look.dim).padding(.vertical, 4)
@@ -94,15 +105,28 @@ struct ThreadPane: View {
                     }
                     ForEach(Array(turns.enumerated()), id: \.offset) { index, turn in bubble(turn, index: index) }
                     Color.clear.frame(height: 1).id("thread.end")
-                        .onAppear { pinned = true }.onDisappear { pinned = false }
                 }
                 .padding(10)
             }
             .defaultScrollAnchor(.bottom)
-            .onChange(of: turns) { if pinned { proxy.scrollTo("thread.end", anchor: .bottom) } }
+            // Only the reader's own scrolling unpins the view. A new message makes the
+            // content taller before this view hears about it, so judging "at the bottom"
+            // from the layout at that moment would always say no and leave the reply hidden.
+            .onScrollGeometryChange(for: Bool.self) { geometry in
+                geometry.contentOffset.y + geometry.containerSize.height >= geometry.contentSize.height - 48
+            } action: { _, atBottom in nearBottom = atBottom }
+            .onScrollPhaseChange { old, new in
+                if new == .interacting { pinned = false }
+                else if new == .idle, old != .idle, old != .animating { pinned = nearBottom }
+            }
+            .onChange(of: turns) {
+                guard pinned else { return }
+                proxy.scrollTo("thread.end", anchor: .bottom)
+            }
         }
         // A new chat starts at its newest message.
         .id(store.selectedChat?.id)
+        .onChange(of: store.selectedChat?.id) { pinned = true }
     }
 
     private func bubble(_ turn: ThreadTurn, index: Int) -> some View {
