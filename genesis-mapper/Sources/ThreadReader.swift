@@ -494,6 +494,8 @@ enum ClaudeThread {
 enum CodexThread {
     typealias Call = (String, [String: Any]) throws -> [String: Any]
     static let turnPage = 5, itemPage = 100, requestLimit = 24
+    /// One page of a chat's items can carry tool output and images, far more than a chat list does.
+    static let responseLimit = 64 * 1_048_576
 
     private static func identifier(_ raw: Any?) throws -> String {
         guard let id = raw as? String, !id.isEmpty, id.utf8.count <= 256,
@@ -748,6 +750,7 @@ enum ThreadReader {
         return make(provider: "muse", chatID: chatID, turnsNewestFirst: built.turns.reversed(), limited: seen.olderEntries)
     }
     static let tooFarBackMessage = "This chat\u{2019}s recent messages are too far back to read right now. Try again after its next reply."
+    static let tooLargeMessage = "This chat\u{2019}s latest messages are too large to show here."
     static let refreshMessage = "Refresh the chats on your phone, then try again."
     static let codexUnavailable = "Codex could not provide this chat\u{2019}s messages right now. Open Codex on this Mac and try again."
     static let claudeUnavailable = "This Claude chat could not be read safely from its transcript right now."
@@ -760,6 +763,8 @@ enum ThreadReader {
             return .unavailable(provider: provider, chatID: chatID, failure(error))
         } catch CodexInventoryError.timeout {
             return .unavailable(provider: provider, chatID: chatID, failure(.timeout))
+        } catch CodexInventoryError.tooLarge {
+            return .unavailable(provider: provider, chatID: chatID, tooLargeMessage)
         } catch {
             // Other errors can carry paths or text; only a fixed sentence leaves here.
             return .unavailable(provider: provider, chatID: chatID, failure(.unreadable))
@@ -786,7 +791,8 @@ enum ThreadReader {
     static func codex(threadID: String, chatID: String) async -> ThreadSnapshot {
         let task = Task.detached(priority: .userInitiated) { () -> ThreadSnapshot in
             finish(provider: "codex", chatID: chatID, {
-                let socket = try CodexMetadataSocket(path: try CodexReadOnly.socketPath(), timeout: ThreadLimits.seconds)
+                let socket = try CodexMetadataSocket(path: try CodexReadOnly.socketPath(), timeout: ThreadLimits.seconds,
+                                                     frameLimit: CodexThread.responseLimit, messageLimit: CodexThread.responseLimit)
                 try socket.initializeSession()
                 return try CodexThread.read(threadID: threadID, call: socket.call)
             }, failure: { $0 == .timeout ? "Codex took too long to answer. Try again." : codexUnavailable })

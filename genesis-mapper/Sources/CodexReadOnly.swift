@@ -100,8 +100,9 @@ enum CodexInventoryProtocol {
         let final: Bool
         let payload: Data
     }
-    static func serverFrame(_ bytes: Data) throws -> (Frame, Int)? {
-        let data = Array(bytes)
+    /// Only the header is copied out; a large payload is sliced once, when the whole frame has arrived.
+    static func serverFrame(_ bytes: Data, frameLimit: Int = CodexInventoryProtocol.frameLimit) throws -> (Frame, Int)? {
+        let data = Array(bytes.prefix(14))
         guard data.count >= 2 else { return nil }
         let opcode = data[0] & 0x0f, final = data[0] & 0x80 != 0
         guard data[0] & 0x70 == 0, data[1] & 0x80 == 0, [0, 1, 8, 9, 10].contains(opcode) else { throw CodexInventoryError.invalidResponse }
@@ -115,8 +116,9 @@ enum CodexInventoryProtocol {
         }
         guard length <= frameLimit else { throw CodexInventoryError.tooLarge }
         guard opcode < 8 || (final && length <= 125) else { throw CodexInventoryError.invalidResponse }
-        guard data.count >= offset + Int(length) else { return nil }
-        return (Frame(opcode: opcode, final: final, payload: Data(data[offset..<(offset + Int(length))])), offset + Int(length))
+        guard bytes.count >= offset + Int(length) else { return nil }
+        let from = bytes.startIndex + offset
+        return (Frame(opcode: opcode, final: final, payload: Data(bytes[from..<(from + Int(length))])), offset + Int(length))
     }
     static func clientFrame(_ payload: Data, opcode: UInt8 = 1, mask: [UInt8]? = nil) throws -> Data {
         guard payload.count <= messageLimit, [1, 10].contains(opcode) else { throw CodexInventoryError.tooLarge }
@@ -168,7 +170,12 @@ final class CodexMetadataSocket {
     private let deadline: Double
     private var buffered = Data()
     private var nextID = 1
-    init(path: String, timeout: Double = 8) throws {
+    /// The chat list keeps the small default. Reading one chat's messages passes a larger limit,
+    /// because a single page can carry tool output and images.
+    private let frameLimit: Int, messageLimit: Int
+    init(path: String, timeout: Double = 8, frameLimit: Int = CodexInventoryProtocol.frameLimit,
+         messageLimit: Int = CodexInventoryProtocol.messageLimit) throws {
+        self.frameLimit = frameLimit; self.messageLimit = messageLimit
         deadline = ProcessInfo.processInfo.systemUptime + timeout
         let resolved = URL(fileURLWithPath: path).resolvingSymlinksInPath().path
         var info = stat()
@@ -224,12 +231,12 @@ final class CodexMetadataSocket {
     }
     private func receive() throws {
         try wait(POLLIN)
-        var bytes = [UInt8](repeating: 0, count: 16_384)
+        var bytes = [UInt8](repeating: 0, count: 262_144)
         let count = Darwin.read(descriptor, &bytes, bytes.count)
         if count < 0 { if errno == EINTR || errno == EAGAIN { return }; throw CodexInventoryError.unavailable }
         guard count > 0 else { throw CodexInventoryError.unavailable }
         buffered.append(contentsOf: bytes.prefix(count))
-        guard buffered.count <= CodexInventoryProtocol.messageLimit + 16_384 else { throw CodexInventoryError.tooLarge }
+        guard buffered.count <= messageLimit + 262_144 else { throw CodexInventoryError.tooLarge }
     }
     private func handshake() throws {
         let key = Data((0..<16).map { _ in UInt8.random(in: 0...255) }).base64EncodedString()
@@ -249,7 +256,7 @@ final class CodexMetadataSocket {
     private func message() throws -> [String: Any] {
         var fragments: Data?, frameCount = 0
         while frameCount < 128 {
-            if let (frame, count) = try CodexInventoryProtocol.serverFrame(buffered) {
+            if let (frame, count) = try CodexInventoryProtocol.serverFrame(buffered, frameLimit: frameLimit) {
                 buffered.removeFirst(count); frameCount += 1
                 if frame.opcode == 8 { throw CodexInventoryError.unavailable }
                 if frame.opcode == 9 { try write(CodexInventoryProtocol.clientFrame(frame.payload, opcode: 10)); continue }
@@ -261,7 +268,7 @@ final class CodexMetadataSocket {
                     guard fragments != nil else { throw CodexInventoryError.invalidResponse }
                     fragments!.append(frame.payload)
                 }
-                guard let payload = fragments, payload.count <= CodexInventoryProtocol.messageLimit else { throw CodexInventoryError.tooLarge }
+                guard let payload = fragments, payload.count <= messageLimit else { throw CodexInventoryError.tooLarge }
                 if frame.final {
                     guard let object = try? JSONSerialization.jsonObject(with: payload) as? [String: Any] else { throw CodexInventoryError.invalidResponse }
                     return object
