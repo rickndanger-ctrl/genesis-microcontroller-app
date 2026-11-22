@@ -5,6 +5,10 @@ import Darwin
 struct CodexSavedChat: Equatable, Sendable {
     let id: String
     let name: String
+    /// Where Codex keeps this chat's rollout file. Only used to see how recently the chat was written to.
+    var rolloutPath: String? = nil
+    /// Set by the activity check (see CodexActivity); false when it could not tell.
+    var working = false
 }
 
 enum CodexInventoryError: LocalizedError {
@@ -26,20 +30,23 @@ enum CodexReadOnly {
     static func chats(maximum: Int = 500) async throws -> [CodexSavedChat] {
         let task = Task.detached(priority: .userInitiated) {
             let connection = try CodexMetadataSocket(path: try socketPath())
-            return try connection.list(maximum: maximum)
+            var chats = try connection.list(maximum: maximum)
+            // Best effort on the same connection: any failure leaves every chat "Saved".
+            connection.markWorking(&chats, home: try home().path, now: Date())
+            return chats
         }
         return try await withTaskCancellationHandler(operation: { try await task.value }, onCancel: { task.cancel() })
     }
-    static func socketPath() throws -> String {
+    static func home() throws -> URL {
         let environment = ProcessInfo.processInfo.environment
-        let home: URL
         if let path = environment["CODEX_HOME"], !path.isEmpty {
             guard path.hasPrefix("/") else { throw CodexInventoryError.unavailable }
-            home = URL(fileURLWithPath: path, isDirectory: true)
-        } else {
-            home = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".codex", isDirectory: true)
+            return URL(fileURLWithPath: path, isDirectory: true)
         }
-        return home.appendingPathComponent("app-server-control/app-server-control.sock").path
+        return FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".codex", isDirectory: true)
+    }
+    static func socketPath() throws -> String {
+        try home().appendingPathComponent("app-server-control/app-server-control.sock").path
     }
 }
 
@@ -70,7 +77,8 @@ enum CodexInventoryProtocol {
         if let source = row["source"] as? [String: Any], source.keys.contains(where: { $0.lowercased() == "subagent" }) { return nil }
         if let source = row["source"] as? String, source.lowercased() == "subagent" { return nil }
         // Profile labels have a 240-character limit. Identity always uses UUID.
-        return CodexSavedChat(id: id.uuidString.lowercased(), name: String(name.prefix(240)))
+        let path = (row["path"] as? String).flatMap { $0.isEmpty ? nil : $0 }
+        return CodexSavedChat(id: id.uuidString.lowercased(), name: String(name.prefix(240)), rolloutPath: path)
     }
     static func result(_ message: [String: Any], id: Int) throws -> [String: Any]? {
         guard let number = message["id"] as? NSNumber,
@@ -167,7 +175,7 @@ enum CodexInventoryProtocol {
 
 final class CodexMetadataSocket {
     private var descriptor: Int32 = -1
-    private let deadline: Double
+    private var deadline: Double
     private var buffered = Data()
     private var nextID = 1
     /// The chat list keeps the small default. Reading one chat's messages passes a larger limit,
@@ -289,6 +297,31 @@ final class CodexMetadataSocket {
         try Task.checkCancellation()
         defer { nextID += 1 }
         return try response(["id": nextID, "method": method, "params": params], id: nextID)
+    }
+    /// Shortens what is left of this connection's time. Never extends it.
+    func tighten(to seconds: Double) { deadline = min(deadline, ProcessInfo.processInfo.systemUptime + seconds) }
+    /// Flags chats whose newest turn is still running. Costs one stat per listed chat, plus one
+    /// `thread/turns/list` (limit 1, no items) for each chat written to in the last two minutes,
+    /// at most `CodexActivity.probeLimit`, all inside `CodexActivity.budget`. Never throws:
+    /// the first failure stops the check and the chats not yet checked stay as they were.
+    func markWorking(_ chats: inout [CodexSavedChat], home: String, now: Date) {
+        var modified = [String: Date]()
+        for chat in chats {
+            guard let path = chat.rolloutPath, CodexActivity.trustedRolloutPath(path, home: home) else { continue }
+            var info = stat()
+            guard stat(path, &info) == 0, info.st_mode & S_IFMT == S_IFREG else { continue }
+            modified[chat.id] = Date(timeIntervalSince1970: Double(info.st_mtimespec.tv_sec) + Double(info.st_mtimespec.tv_nsec) / 1e9)
+        }
+        let ids = CodexActivity.probeOrder(modified, now: now)
+        guard !ids.isEmpty else { return }
+        tighten(to: CodexActivity.budget)
+        var working = Set<String>()
+        for id in ids {
+            guard let result = try? call("thread/turns/list", CodexActivity.turnRequest(threadID: id)) else { break }
+            let newest = (result["data"] as? [[String: Any]])?.first
+            if CodexActivity.isWorking(newestTurn: newest, modified: modified[id], now: now) { working.insert(id) }
+        }
+        for index in chats.indices where working.contains(chats[index].id) { chats[index].working = true }
     }
     func initializeSession() throws {
         _ = try response(CodexInventoryProtocol.initialize(id: nextID), id: nextID); nextID += 1

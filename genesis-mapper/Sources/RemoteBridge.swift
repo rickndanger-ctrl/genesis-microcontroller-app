@@ -225,8 +225,8 @@ import CoreImage.CIFilterBuiltins
         else {flight=(UUID(),Task {try await CodexReadOnly.chats(maximum:500)});codexRefresh=flight}
         do {
             let saved=try await flight.task.value
-            // The separate daemon supplies metadata, not live desktop activity.
-            let records=saved.map{RemoteChat(id:$0.id,title:String($0.name.prefix(240)),state:"Saved")}
+            // The separate daemon supplies metadata. "Working" comes only from CodexActivity's check; every other chat stays "Saved".
+            let records=saved.map{RemoteChat(id:$0.id,title:String($0.name.prefix(240)),state:$0.working ? "Working":"Saved")}
             if codexRefresh?.id==flight.id {
                 codexChats=records;codexInventoryAvailable=true;codexInventoryCheckedAt=Date();codexRefresh=nil
             }
