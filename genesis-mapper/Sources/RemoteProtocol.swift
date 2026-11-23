@@ -99,7 +99,7 @@ enum RemoteActionCatalog {
 }
 
 enum RemotePolicy {
-    static let providers = ["codex", "claude", "muse"]
+    static let providers = ["codex", "claude", "muse", "gemini"]
     static let commands = ["openChat", "sendPrompt", "stop", "openArtifact", "nativeVoice", "launchApp", "restartService"] + RemoteActionCatalog.commandIDs
     static let maximumBody = 131_072
     static func digest(_ bytes: Data) -> String { SHA256.hash(data: bytes).map { String(format:"%02x", $0) }.joined() }
@@ -122,6 +122,8 @@ enum RemotePolicy {
         for slot in profile.slots {
             guard ["empty","chat","action"].contains(slot.kind), slot.title.count <= 240, slot.targetID.count <= 512 else {throw RemoteFault(status:422,message:"Invalid slot mapping.")}
             if slot.kind == "chat", slot.targetID.isEmpty {throw RemoteFault(status:422,message:"A chat mapping needs a target.")}
+            // Gemini is read-only for now: its keys only point at chats (by exact conversation ID), never at a command.
+            if profile.provider == "gemini", slot.kind == "action" || (slot.kind == "chat" && UUID(uuidString:slot.targetID) == nil) {throw RemoteFault(status:422,message:"Gemini keys can only point at Gemini chats.")}
             if slot.kind == "action", !(commands + RemoteActionCatalog.localMappingIDs).contains(slot.targetID) {throw RemoteFault(status:422,message:"Unsupported shortcut.")}
         }
     }

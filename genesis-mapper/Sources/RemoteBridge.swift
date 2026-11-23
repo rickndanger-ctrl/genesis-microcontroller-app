@@ -70,6 +70,14 @@ import CoreImage.CIFilterBuiltins
     private var codexInventoryAvailable=false
     private var codexInventoryCheckedAt:Date?
     private var codexRefresh:(id:UUID,task:Task<[CodexSavedChat],Error>)?
+    /// Gemini's chat list (read-only, stage 1): the last reading of its summary database, and the read in flight.
+    private var geminiChats:[RemoteChat]=[]
+    private var geminiReading:GeminiChatList.Reading?
+    private var geminiCheckedAt:Date?
+    private var geminiRefresh:(id:UUID,task:Task<GeminiChatList.Reading,Never>)?
+    /// Busy readings in a row. The last good list is kept through two of them, so a read that lands on one of Gemini's own writes does not blank the deck.
+    private var geminiBusyStreak=0
+    private var geminiReadable:Bool {if case .rows=geminiReading {return true};return false}
     var hostName:String {Host.current().localizedName ?? "Mac"}
     var isLocked:Bool {
         let session=CGSessionCopyCurrentDictionary() as? [String:Any]
@@ -182,8 +190,11 @@ import CoreImage.CIFilterBuiltins
         if !isLocked,codexRefresh==nil,Date().timeIntervalSince(codexInventoryCheckedAt ?? .distantPast)>30 {
             Task {_ = await loadCodexChats()}
         }
+        if !isLocked,geminiRefresh==nil,Date().timeIntervalSince(geminiCheckedAt ?? .distantPast)>10 {
+            Task {_ = await loadGeminiChats()}
+        }
         let providers=RemotePolicy.providers.map { provider -> RemoteProvider in
-            let bundle=provider=="claude" ? "com.anthropic.claudefordesktop":provider=="muse" ? "com.meta.endo":"com.openai.codex"
+            let bundle=provider=="claude" ? "com.anthropic.claudefordesktop":provider=="muse" ? "com.meta.endo":provider=="gemini" ? GeminiChatList.bundle:"com.openai.codex"
             let installed=NSWorkspace.shared.urlForApplication(withBundleIdentifier:bundle) != nil
             let running=NSRunningApplication.runningApplications(withBundleIdentifier:bundle).first != nil
             if provider=="codex" {
@@ -196,6 +207,12 @@ import CoreImage.CIFilterBuiltins
                 let restart = !isLocked && installed && codexInventoryCheckedAt != nil && queueAvailable && CodexService.canRestart(codexService) ? ["restartService"]:[]
                 let capabilities=restart+RemoteCodexAvailability.capabilities(installed:installed,running:running,unlocked:!isLocked,accessibility:AXIsProcessTrusted(),inventoryAvailable:codexInventoryAvailable,launchIDs:CodexNativeActionPolicy.pageLinks.keys.sorted(),nativeIDs:CodexNativeActions.descriptors.map(\.id),queueAvailable:queueAvailable)
                 return RemoteProvider(id:provider,name:"Codex",installed:installed,readiness:readiness,capabilities:capabilities,reason:reason,actions:CodexNativeActions.descriptors)
+            }
+            if provider=="gemini" {
+                // The list and its lights come from Gemini's own summary database. Only sendPrompt (and openChat, which just checks the chat) is accepted.
+                let ready=installed && !isLocked && geminiReadable
+                let reason=isLocked ? "Unlock this Mac to read Gemini\u{2019}s chats.":!installed ? "Install Gemini on this Mac.":geminiCheckedAt==nil ? "Checking this Mac\u{2019}s Gemini chats\u{2026}":geminiReadable ? (geminiTool() != nil ? "Chats, their messages, their activity and Send are connected. Send opens Gemini in the background if it is closed. Stop, new chats and voice are not available.":"Chats, their messages and their activity are shown. Send needs the command inside the Gemini app, which was not found."):GeminiChatList.unreadableReason(geminiReading)
+                return RemoteProvider(id:provider,name:"Gemini",installed:installed,readiness:isLocked ? "locked":ready ? "ready":"unavailable",capabilities:ready ? [GeminiChatList.capability,"chatActivity","openChat",GeminiThread.capability]+(geminiTool() != nil ? ["sendPrompt"]:[]):[],reason:reason,actions:[])
             }
             if provider=="muse" {
                 // Chats open through Accessibility. A draft is pasted into Muse's
@@ -238,6 +255,23 @@ import CoreImage.CIFilterBuiltins
             return []
         }
     }
+    /// Gemini's chats, read off the main thread from its summary database; titles and run status only. Shared while a read runs, reused for 5 s.
+    func loadGeminiChats(force:Bool=false) async -> [RemoteChat] {
+        guard !isLocked,NSWorkspace.shared.urlForApplication(withBundleIdentifier:GeminiChatList.bundle) != nil else{return []}
+        if !force,let checked=geminiCheckedAt,Date().timeIntervalSince(checked)<5 {return geminiReadable ? geminiChats:[]}
+        let flight:(id:UUID,task:Task<GeminiChatList.Reading,Never>)
+        if let current=geminiRefresh {flight=current}
+        else {flight=(UUID(),Task.detached(priority:.utility){GeminiChatList.read()});geminiRefresh=flight}
+        let reading=await flight.task.value
+        let records:[RemoteChat]
+        if case .rows(let rows)=reading {records=GeminiChatList.offered(rows,now:Date()).map{RemoteChat(id:$0.id,title:$0.title,state:$0.state)}} else {records=[]}
+        if reading == .busy,geminiReadable,geminiBusyStreak<2 {
+            if geminiRefresh?.id==flight.id {geminiBusyStreak += 1;geminiCheckedAt=Date();geminiRefresh=nil}
+            return isLocked ? []:geminiChats
+        }
+        if geminiRefresh?.id==flight.id {geminiChats=records;geminiReading=reading;geminiCheckedAt=Date();geminiRefresh=nil;geminiBusyStreak=0}
+        return isLocked ? []:records
+    }
     /// Records what a command was and how it ended. Never the prompt: a
     /// command's text does not reach this function, only its action and result.
     private func note(_ command:RemoteCommand,status:String,message:String,started:Date) {
@@ -274,6 +308,12 @@ import CoreImage.CIFilterBuiltins
         let queue=NSWorkspace.shared.urlForApplication(withBundleIdentifier:codexBundle).flatMap(CodexQueuePolicy.executable) != nil
             && CodexQueuePolicy.usesDefaultHome(environment:ProcessInfo.processInfo.environment,home:FileManager.default.homeDirectoryForCurrentUser)
         items += SelfCheck.codex(.init(installed:installed(codexBundle),running:running(codexBundle),inventoryReachable:codexInventoryAvailable,savedChats:saved.count,menuBarReadable:menus,queueAvailable:queue),mac:mac)
+        let geminiInstalled=installed(GeminiChatList.bundle)
+        let geminiSeen:[RemoteChat]=mac.unlocked && geminiInstalled ? await loadGeminiChats(force:true):[]
+        // Layout of the newest offered chat's own file; no message is read.
+        let firstChat=geminiSeen.first?.id
+        let threadProblem:String?=await Task.detached(priority:.utility){firstChat.map{GeminiThread.layoutProblem(chatID:$0)} ?? GeminiThread.noChatToCheck}.value
+        items += SelfCheck.gemini(.init(installed:geminiInstalled,running:running(GeminiChatList.bundle),databaseReadable:geminiReadable,chats:geminiSeen.count,problem:GeminiChatList.unreadableReason(geminiReading),sendCommandFound:geminiTool() != nil,hubLive:geminiTool().flatMap{GeminiSend.discoverHub(tool:$0)} != nil,threadsReadable:geminiReadable && threadProblem==nil,threadsProblem:threadProblem ?? ""),mac:mac)
         let report=RemoteSelfCheck(checkedAt:Date(),companionVersion:Self.companionVersion,summary:SelfCheck.summary(items),items:items)
         lastSelfCheck=report
         return report
@@ -349,6 +389,41 @@ import CoreImage.CIFilterBuiltins
         }
         let receipt=CodexService.receipt(outcome,answeringAfter:codexInventoryAvailable,chats:chats.count)
         return result(receipt.status,receipt.message)
+    }
+    /// The tool inside the installed Gemini app, when it is there and looks like Google's.
+    private func geminiTool()->URL? {NSWorkspace.shared.urlForApplication(withBundleIdentifier:GeminiChatList.bundle).flatMap(GeminiSend.tool)}
+    /// Gemini accepts a prompt for a chat in its list. Nothing else works: the window cannot be switched, stopped, or given a new chat from here.
+    private func executeGemini(_ command:RemoteCommand) async -> RemoteReceipt {
+        func result(_ state:String,_ message:String)->RemoteReceipt {RemoteReceipt(id:command.id,status:state,message:message)}
+        guard ["openChat","sendPrompt"].contains(command.action) else{return result("failed",GeminiChatList.refusal(for:command.action))}
+        guard enabled,!isLocked else{return result("failed","Unlock this Mac to use Gemini.")}
+        let offered=await loadGeminiChats(force:true)
+        guard !isLocked,case .ok(let chatID)=GeminiSend.checkChat(command.chatID,offered:offered.map(\.id)) else{return result("failed",GeminiSend.notOffered)}
+        if command.action=="openChat" {return result("confirmed",GeminiSend.selected)}
+        if let problem=GeminiSend.promptProblem(command.text) {return result("failed",problem+" Nothing was sent.")}
+        guard let text=command.text,let tool=geminiTool() else{return result("failed",GeminiSend.toolMissing)}
+        // Gemini's hub exists only while the app runs. Start the app without bringing it forward, then wait for the hub.
+        func running()->Bool {NSRunningApplication.runningApplications(withBundleIdentifier:GeminiChatList.bundle).contains{!$0.isTerminated}}
+        if !running(),let application=NSWorkspace.shared.urlForApplication(withBundleIdentifier:GeminiChatList.bundle) {
+            let configuration=NSWorkspace.OpenConfiguration();configuration.activates=false;configuration.addsToRecentItems=false
+            _ = try? await NSWorkspace.shared.openApplication(at:application,configuration:configuration)
+        }
+        var hub=GeminiSend.discoverHub(tool:tool)
+        let waitUntil=Date().addingTimeInterval(GeminiSend.hubWait)
+        while hub==nil,Date()<waitUntil,enabled,!isLocked {
+            try? await Task.sleep(nanoseconds:400_000_000)
+            hub=GeminiSend.discoverHub(tool:tool)
+        }
+        guard enabled,!isLocked,let hub else{return result("failed",GeminiSend.closed)}
+        switch await GeminiSend.checkHub(hub,chatID:chatID) {
+        case .ready:break
+        case .unknownChat:return result("failed","The running Gemini does not know this chat. Refresh the chats; nothing was sent.")
+        case .unreachable:return result("failed","Gemini did not answer on this Mac. Open Gemini, then send again. Nothing was sent.")
+        }
+        let outcome=await GeminiSend.send(tool:tool,hub:hub,chatID:chatID,text:text)
+        // Let the light come on promptly, without holding the receipt back: read the list again now and once more as the run shows up.
+        Task {_ = await self.loadGeminiChats(force:true);try? await Task.sleep(nanoseconds:1_500_000_000);_ = await self.loadGeminiChats(force:true)}
+        return result(outcome.status,outcome.message)
     }
     private func launchApp(_ command:RemoteCommand) async -> RemoteReceipt {
         func result(_ state:String,_ message:String)->RemoteReceipt {RemoteReceipt(id:command.id,status:state,message:message)}
@@ -644,6 +719,7 @@ import CoreImage.CIFilterBuiltins
             if request.method=="GET",path=="/v1/chats" {
                 guard RemotePolicy.providers.contains(parameter("provider")) else{return .error(422,"Unknown provider.")}
                 if parameter("provider")=="codex" {return .json(RemoteChatList(chats:await loadCodexChats()))}
+                if parameter("provider")=="gemini" {return .json(RemoteChatList(chats:await loadGeminiChats()))}
                 if parameter("provider")=="muse" {let chats=await loadMuseChats();return .json(RemoteChatList(chats:chats,leftOut:RemoteLeftOut.titles(museLeftOut)))}
                 let chats=loadChats(parameter("provider"))
                 return .json(RemoteChatList(chats:chats,leftOut:RemoteLeftOut.titles(claudeLeftOut)))
@@ -722,6 +798,16 @@ import CoreImage.CIFilterBuiltins
     private func readThread(provider:String,chatID:String) async -> ThreadSnapshot {
         func unavailable(_ message:String)->ThreadSnapshot {.unavailable(provider:provider,chatID:chatID,message)}
         guard !isLocked else{return unavailable("Unlock this Mac to read this chat.")}
+        if provider=="gemini" {
+            // Gemini keeps each conversation in its own file. The chat must be one the list offers; the read runs off the main actor and never logs text.
+            guard NSWorkspace.shared.urlForApplication(withBundleIdentifier:GeminiChatList.bundle) != nil else{return unavailable(GeminiThread.notInstalled)}
+            let offered=await loadGeminiChats()
+            guard !isLocked else{return unavailable("Unlock this Mac to read this chat.")}
+            guard geminiReadable else{return unavailable(GeminiChatList.unreadableReason(geminiReading))}
+            let ids=offered.map(\.id)
+            let snapshot=await Task.detached(priority:.userInitiated){GeminiThread.snapshot(chatID:chatID,offered:ids)}.value
+            return isLocked ? unavailable("Unlock this Mac to read this chat."):snapshot
+        }
         switch provider {
         case "codex":
             guard let chat=await loadCodexChats().first(where:{$0.id==chatID}) else{return unavailable("This chat is not in Codex\u{2019}s chat list on this Mac. Refresh the chats and try again.")}
@@ -736,8 +822,10 @@ import CoreImage.CIFilterBuiltins
             // kind of local session shares the title. A cloud-only chat with the same title is not covered.
             guard let title=RemoteClaudeLookup.savedTarget(id:chatID,candidates:Array(recentChats.values),profileSlots:savedSlots,knownTitles:known)?.title else{return unavailable(ThreadReader.refreshMessage)}
             return await ThreadReader.claude(title:title,chatID:chatID)
-        default:
+        case "muse":
             return await museThread(chatID)
+        default:
+            return unavailable("This provider\u{2019}s threads aren\u{2019}t available.")
         }
     }
     /// One Muse read per chat per three seconds: a poll that arrives while one is running or just done shares it.
@@ -936,6 +1024,8 @@ import CoreImage.CIFilterBuiltins
     func execute(_ command:RemoteCommand) async -> RemoteReceipt {
         func result(_ state:String,_ message:String)->RemoteReceipt {RemoteReceipt(id:command.id,status:state,message:message)}
         guard let store else{return result("failed","Remote storage unavailable.")}
+        // Gemini takes openChat (a check only) and sendPrompt; everything else is refused. Decided before any other provider's path can claim the command.
+        if command.provider=="gemini" {return await executeGemini(command)}
         if RemoteNavigationLease.commands.contains(command.action) {
             let previousID=command.provider=="claude" && command.action=="menuSelect" ? verifiedActiveClaudeChat()?.id:nil
             let outcome=await menuNavigation.perform(action:command.action,session:command.navigationSession ?? "",provider:command.provider,chatID:command.chatID,generation:command.generation,isCurrent:{self.navigationContextIsCurrent(provider:command.provider,chatID:command.chatID)})

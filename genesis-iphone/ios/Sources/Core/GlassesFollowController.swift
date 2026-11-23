@@ -84,7 +84,7 @@ final class GlassesFollowController: ObservableObject {
     func enable(host: RemoteHost, token: String, provider: ProviderID, chatID: String?, slotIndex: Int?,
                 draft: String, recording: Bool, takeover: Bool = false) {
         guard !enabled, !connecting else { return }
-        guard provider != .muse, host.hostID != nil, UUID(uuidString: sourceID) != nil else {
+        guard provider != .muse, provider != .gemini, host.hostID != nil, UUID(uuidString: sourceID) != nil else {
             message = "Glasses follow supports paired Codex and Claude connections."; return
         }
         generation &+= 1; let expected = generation

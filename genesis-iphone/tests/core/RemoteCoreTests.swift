@@ -145,6 +145,57 @@ import Foundation
         expect(GlassesFeature.storageKey(demo: true) != GlassesFeature.storageKey(demo: false), "The demo and the real app keep separate settings")
     }
 
+    static func geminiChecks() {
+        let ready = ProviderInfo(id: "gemini", name: "Gemini", installed: true, readiness: "ready", capabilities: ["gemini", "chatActivity"], reason: nil)
+        expect(ProviderID.gemini.name == "Gemini" && ProviderID.gemini.slotPrefix == "G" && ProviderID(rawValue: "gemini") == .gemini, "Gemini is a provider named Gemini with keys G1 to G6")
+        expect(ready.isGeminiViewOnly && !ready.supports("sendPrompt"), "A Mac whose Gemini lacks sendPrompt is view-only")
+        expect(ready.supports("gemini") && ready.supports("chatActivity"), "A ready Gemini can be read and shows activity")
+        let stage1 = ProviderInfo(id: "gemini", name: "Gemini", installed: true, readiness: "ready",
+                                  capabilities: ["gemini", "chatActivity", "stop", "newChat", "artifacts", "nativeVoice", "menuNavigation", "launchApp"], reason: nil)
+        for action in ["sendPrompt", "stop", "newChat", "artifacts", "nativeVoice", "menuNavigation", "launchApp", "readThread"] {
+            expect(!stage1.supports(action), "Stage-1 Gemini never supports \(action), whatever the Mac lists")
+        }
+        expect(stage1.isGeminiViewOnly && !stage1.supportsPhoneDictation && stage1.availableActions.isEmpty && stage1.controllerShortcuts.isEmpty && !stage1.navigationOnly,
+               "Nothing is offered to run on a view-only Gemini")
+        let stage2 = ProviderInfo(id: "gemini", name: "Gemini", installed: true, readiness: "ready",
+                                  capabilities: ["gemini", "chatActivity", "sendPrompt", "stop", "newChat", "artifacts", "nativeVoice", "menuNavigation", "launchApp"], reason: nil)
+        expect(!stage2.isGeminiViewOnly && stage2.supports("sendPrompt") && stage2.supportsPhoneDictation && stage2.supports("gemini"), "A Gemini that lists sendPrompt can be sent to and dictated")
+        for action in ["stop", "newChat", "artifacts", "nativeVoice", "menuNavigation", "launchApp", "readThread"] {
+            expect(!stage2.supports(action), "Stage-2 Gemini still never supports \(action)")
+        }
+        let stage2Open = ProviderInfo(id: "gemini", name: "Gemini", installed: true, readiness: "ready", capabilities: ["gemini", "chatActivity", "sendPrompt", "openChat"], reason: nil)
+        expect(stage2Open.supports("openChat") && !stage2Open.isGeminiViewOnly, "openChat may be listed for Gemini, and is optional")
+        expect(Set(stage2.availableActions.map(\.id)) == ["sendPrompt", "dictate"] || Set(stage2.availableActions.map(\.id)).isSubset(of: ["sendPrompt", "dictate"]),
+               "Only Send and Hold to Talk are offered on a sendable Gemini")
+        let lockedSend = ProviderInfo(id: "gemini", name: "Gemini", installed: true, readiness: "locked", capabilities: ["gemini", "chatActivity", "sendPrompt"], reason: nil)
+        expect(!lockedSend.supports("sendPrompt") && !lockedSend.isGeminiViewOnly, "A locked Mac cannot send, but it is not view-only")
+        let locked = ProviderInfo(id: "gemini", name: "Gemini", installed: true, readiness: "locked", capabilities: [], reason: nil)
+        expect(!locked.supports("gemini"), "A locked Mac cannot be read")
+        let claude = ProviderInfo(id: "claude", name: "Claude", installed: true, readiness: "ready", capabilities: ["openChat", "sendPrompt"], reason: nil)
+        func status(_ providers: [ProviderInfo]) -> HostStatus { HostStatus(protocolVersion: 1, hostID: "h", hostName: "Mac", providers: providers) }
+        expect(status([claude, ready]).advertisesGemini && status([claude, ready]).hasGemini, "A Mac that lists the gemini capability shows Gemini")
+        expect(!status([claude]).advertisesGemini && !status([claude]).hasGemini, "An older companion shows no Gemini")
+        let missing = ProviderInfo(id: "gemini", name: "Gemini", installed: false, readiness: "unavailable", capabilities: [], reason: nil)
+        expect(!status([claude, missing]).advertisesGemini && !status([claude, missing]).hasGemini, "A Mac without Gemini installed shows no Gemini")
+        expect(!status([claude, locked]).advertisesGemini && status([claude, locked]).hasGemini, "Gemini installed but unreadable is kept, not advertised")
+        let control = DictationControlPresentation.make(provider: .gemini, info: ready, paired: true, hasChat: true, busy: false, recording: false, finalizing: false)
+        expect(control.label == "VIEW ONLY" && control.explanation == "Gemini is view-only for now. Sending comes in a later update.", "Hold to Talk says Gemini is view-only on a Mac without sendPrompt")
+        let sendControl = DictationControlPresentation.make(provider: .gemini, info: stage2, paired: true, hasChat: true, busy: false, recording: false, finalizing: false)
+        expect(sendControl.label == "HOLD TO TALK" && sendControl.icon == "mic", "Hold to Talk works on a Gemini that can be sent to")
+        expect(ProviderID.geminiStopNotice == "Gemini can’t be stopped from the controller. Stop it in Gemini on the Mac.", "The Gemini stop line is the agreed sentence")
+        expect(ProviderID.viewOnlyNotice == "Gemini is view-only for now. Sending comes in a later update.", "The view-only line is the agreed sentence")
+        // Reading a thread is its own capability: a Mac that does not list it is never asked for one.
+        expect(!ready.supports("readThread") && !stage1.supports("readThread") && !stage2.supports("readThread"), "A Gemini without readThread cannot read a thread")
+        let reader = ProviderInfo(id: "gemini", name: "Gemini", installed: true, readiness: "ready", capabilities: ["gemini", "chatActivity", "sendPrompt", "readThread"], reason: nil)
+        expect(reader.supports("readThread") && !reader.isGeminiViewOnly && reader.supports("sendPrompt"), "A Gemini that lists readThread can read a thread")
+        let lockedReader = ProviderInfo(id: "gemini", name: "Gemini", installed: true, readiness: "locked", capabilities: ["gemini", "readThread"], reason: nil)
+        expect(!lockedReader.supports("readThread"), "A locked Mac cannot read a Gemini thread")
+        let viewOnlyReader = ProviderInfo(id: "gemini", name: "Gemini", installed: true, readiness: "ready", capabilities: ["gemini", "chatActivity", "readThread"], reason: nil)
+        expect(viewOnlyReader.supports("readThread") && viewOnlyReader.isGeminiViewOnly, "A view-only Gemini can still read threads")
+        let saved = try? JSONDecoder().decode([String: ProviderID].self, from: JSONEncoder().encode(["selected": ProviderID.gemini]))
+        expect(saved?["selected"] == ProviderID.gemini, "A saved Gemini selection survives a restart")
+    }
+
     static func wifiPairingChecks() throws {
         let pin = String(repeating: "A", count: 42) + "_"
         let wifi = PairingPayload(v: 2, name: "Test Mac", hostID: "CFC99A4B-34EB-4E90-8413-97BE5866FE84",
@@ -181,6 +232,7 @@ import Foundation
         dialTrackingChecks()
         deferredTapChecks()
         glassesFeatureChecks()
+        geminiChecks()
         let valid = PairingPayload(v: 1, name: "Test Mac", hostID: "CFC99A4B-34EB-4E90-8413-97BE5866FE84",
             baseURL: "https://test-mac.example.ts.net:8451", token: String(repeating: "t", count: 64))
         let restored = try PairingPayload.decode(pairingURL(valid))

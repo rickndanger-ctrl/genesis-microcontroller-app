@@ -1104,6 +1104,105 @@ final class ControllerUITests: XCTestCase {
         XCTAssertTrue(app.staticTexts["Demo only — no prompt sent."].exists)
     }
 
+    /// The demo Gemini has a thread for its chats: in the pane where there is one, otherwise in the sheet.
+    @MainActor
+    private func assertGeminiDemoThread(_ app: XCUIApplication, containing text: String) {
+        func element(_ id: String) -> XCUIElement { app.descendants(matching: .any).matching(identifier: id).firstMatch }
+        if app.buttons["thread.show"].exists { app.buttons["thread.show"].tap() }
+        var sheet = false
+        if !element("thread.pane").waitForExistence(timeout: 2), app.buttons["thread.open"].exists { app.buttons["thread.open"].tap(); sheet = true }
+        let first = element("thread.message.0")
+        XCTAssertTrue(first.waitForExistence(timeout: 4), "A Gemini chat shows its demo thread")
+        XCTAssertTrue(first.label.hasPrefix("You: ") && first.label.contains(text), "The demo Gemini thread starts with the user's question")
+        XCTAssertFalse(app.staticTexts["Gemini threads aren’t available yet."].exists, "Gemini no longer says threads are unavailable")
+        if sheet {
+            app.buttons["Done"].tap()
+            let gone = NSPredicate { _, _ in !element("thread.pane").exists }
+            expectation(for: gone, evaluatedWith: nil)
+            waitForExpectations(timeout: 5)
+        }
+    }
+
+    @MainActor
+    func testGeminiSendsOnTheDashboardAndCannotStop() {
+        continueAfterFailure = false
+        let app = XCUIApplication()
+        app.launchArguments = ["--demo"]
+        XCUIDevice.shared.orientation = UIDevice.current.userInterfaceIdiom == .pad ? .landscapeLeft : .portrait
+        app.launch()
+        XCTAssertTrue(app.buttons["Claude"].waitForExistence(timeout: 8))
+        for name in ["Codex", "Claude", "Muse", "Gemini"] {
+            let button = app.buttons[name]
+            XCTAssertTrue(button.exists, "\(name) is offered in demo")
+            XCTAssertGreaterThanOrEqual(button.frame.height, 44, "\(name) is a full-size touch target")
+            XCTAssertTrue(app.frame.insetBy(dx: -1, dy: -1).contains(button.frame), "\(name) stays on screen")
+        }
+        app.buttons["Gemini"].tap()
+        XCTAssertTrue(app.buttons["Gemini"].isSelected)
+        let key = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "G1,")).firstMatch
+        XCTAssertTrue(key.waitForExistence(timeout: 3), "Gemini chats fill the chat keys")
+        key.tap()
+        assertGeminiDemoThread(app, containing: "sourdough")
+        XCTAssertFalse(app.staticTexts.matching(NSPredicate(format: "label CONTAINS[c] %@", "view-only")).firstMatch.exists,
+                       "A Gemini that can be sent to is not view-only")
+        let talk = app.buttons["Start dictation"]
+        XCTAssertTrue(talk.waitForExistence(timeout: 3), "Hold to Talk works for Gemini")
+        talk.press(forDuration: 2.0)
+        let field = app.textFields["Draft for selected chat"]
+        XCTAssertTrue(field.waitForExistence(timeout: 5))
+        XCTAssertEqual(field.value as? String, "Show me the latest changes and what still needs attention.")
+        saveFullscreenScreenshot("Gemini dashboard")
+        app.buttons["Stop"].tap()
+        XCTAssertTrue(app.staticTexts["Gemini can’t be stopped from the controller. Stop it in Gemini on the Mac."].waitForExistence(timeout: 3),
+                      "Stop explains that Gemini can't be stopped here")
+        XCTAssertFalse(app.alerts["Controller update"].exists)
+        app.buttons["Send"].tap()
+        let cleared = NSPredicate { _, _ in (field.value as? String) == "Hold the microphone, or type a draft…" || (field.value as? String) == "" }
+        expectation(for: cleared, evaluatedWith: field)
+        waitForExpectations(timeout: 5)
+        XCTAssertTrue(app.staticTexts["Demo only — no prompt sent."].exists)
+        app.buttons["Claude"].tap()
+        XCTAssertTrue(app.buttons["Claude"].isSelected)
+        XCTAssertTrue(app.buttons["C1, Controller app"].waitForExistence(timeout: 3))
+    }
+
+    @MainActor
+    func testGeminiSendsInFullScreenAndDeckOnly() throws {
+        continueAfterFailure = false
+        let app = XCUIApplication()
+        app.launchArguments = ["--demo"]
+        let pad = UIDevice.current.userInterfaceIdiom == .pad
+        XCUIDevice.shared.orientation = pad ? .landscapeLeft : .portrait
+        app.launch()
+        XCTAssertTrue(app.buttons["controller.fullscreen"].waitForExistence(timeout: 8))
+        app.buttons["controller.fullscreen"].tap()
+        XCTAssertTrue(app.buttons["controller.chooseProvider"].waitForExistence(timeout: 3))
+        chooseFullscreenRoute(app, menu: "controller.chooseProvider", option: "Gemini")
+        XCTAssertFalse(app.staticTexts.matching(NSPredicate(format: "label CONTAINS[c] %@", "view-only")).firstMatch.exists)
+        assertFullscreenDraft(app, expected: nil)
+        assertGeminiDemoThread(app, containing: "sourdough")
+        XCTAssertFalse(app.buttons["controller.sendDraft"].isEnabled, "No draft yet, so Send is off")
+        app.buttons["Start dictation"].press(forDuration: 1.0)
+        XCTAssertTrue(app.buttons["controller.sendDraft"].waitForExistence(timeout: 3))
+        let ready = NSPredicate { _, _ in app.buttons["controller.sendDraft"].isEnabled }
+        expectation(for: ready, evaluatedWith: app)
+        waitForExpectations(timeout: 5)
+        saveFullscreenScreenshot("Gemini full screen")
+        guard pad else {
+            app.buttons["controller.exitFullscreen"].tap()
+            return
+        }
+        app.buttons["controller.deckOnly"].tap()
+        XCTAssertTrue(app.buttons["controller.shrink"].waitForExistence(timeout: 3))
+        XCTAssertEqual(app.buttons["controller.chooseProvider"].value as? String, "Gemini")
+        XCTAssertTrue(app.buttons["controller.sendDraft"].isEnabled, "Deck only keeps the ready Gemini draft")
+        XCTAssertGreaterThanOrEqual(app.buttons["controller.chooseProvider"].frame.height, 44)
+        saveFullscreenScreenshot("Gemini deck only")
+        app.buttons["controller.shrink"].tap()
+        app.buttons["controller.exitFullscreen"].tap()
+        XCTAssertTrue(app.buttons["controller.fullscreen"].waitForExistence(timeout: 3))
+    }
+
     @MainActor
     func testProviderHostAndDraftIsolation() {
         continueAfterFailure = false

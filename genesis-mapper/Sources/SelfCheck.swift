@@ -2,7 +2,7 @@ import Foundation
 
 /// One line of the "Check this Mac" report.
 struct SelfCheckItem: Codable, Equatable {
-    var provider: String   // "mac", "claude", "muse", "codex"
+    var provider: String   // "mac", "claude", "muse", "codex", "gemini"
     var name: String       // short label, e.g. "Message box"
     var ok: Bool
     var detail: String     // one plain sentence: what was found, or what to do about it
@@ -40,6 +40,17 @@ enum SelfCheck {
         var savedChats: Int
         var menuBarReadable: Bool
         var queueAvailable: Bool      // the command used to send prompts exists
+    }
+
+    struct Gemini {
+        var installed: Bool; var running: Bool
+        var databaseReadable: Bool    // the summary database opened with the columns this controller reads
+        var chats: Int                // chats that can be offered
+        var problem: String = ""      // why it could not be read, when it could not
+        var sendCommandFound = false  // the send command inside the Gemini app exists and looks genuine
+        var hubLive = false           // Gemini is open and its local hub is listed
+        var threadsReadable = false   // the newest offered chat's own file has the layout this controller reads
+        var threadsProblem = ""       // why not, when it does not
     }
 
     // MARK: Mac
@@ -171,6 +182,33 @@ enum SelfCheck {
             SelfCheckItem(provider: "codex", name: "Menu controls",
                           ok: codex.running && mac.accessibility && codex.menuBarReadable,
                           detail: menuDetail),
+        ]
+    }
+
+    // MARK: Gemini
+
+    static func gemini(_ gemini: Gemini, mac: Mac) -> [SelfCheckItem] {
+        if !gemini.installed {
+            return [SelfCheckItem(provider: "gemini", name: "Installed", ok: false,
+                                  detail: "Gemini is not installed on this Mac. Install it to see its chats here.")]
+        }
+        if !mac.unlocked {
+            return [SelfCheckItem(provider: "gemini", name: "Reachable", ok: false,
+                                  detail: "This Mac is locked. Unlock it to read Gemini\u{2019}s chats.")]
+        }
+        // Reading needs neither Gemini open nor Accessibility: it only reads a file Gemini keeps.
+        return [
+            item("gemini", "Chat list", gemini.databaseReadable,
+                 ok: "Gemini\u{2019}s chat list can be read.",
+                 problem: gemini.problem.isEmpty ? "Gemini\u{2019}s chat list could not be read." : gemini.problem),
+            SelfCheckItem(provider: "gemini", name: "Chats", ok: gemini.databaseReadable && gemini.chats > 0,
+                          detail: gemini.databaseReadable ? (gemini.chats > 0 ? "\(count(gemini.chats, "chat")) offered." : "No chats found.") : "Chats cannot be listed until the chat list can be read."),
+            item("gemini", "Threads", gemini.threadsReadable,
+                 ok: "Gemini\u{2019}s conversations can be read.",
+                 problem: gemini.threadsProblem.isEmpty ? "Gemini\u{2019}s conversations could not be read." : gemini.threadsProblem),
+            item("gemini", "Send", gemini.sendCommandFound,
+                 ok: gemini.hubLive ? "The send command was found and Gemini is open." : "The send command was found. Gemini is closed; it is opened when you send.",
+                 problem: "The send command was not found in the installed Gemini app."),
         ]
     }
 

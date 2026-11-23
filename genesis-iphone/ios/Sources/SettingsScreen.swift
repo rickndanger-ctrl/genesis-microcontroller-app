@@ -262,7 +262,7 @@ struct MappingScreen: View {
     @State private var saving = false
     /// Why the last change did not save. Shown here: an alert behind this sheet would never be seen.
     @State private var failure: String?
-    private var prefix: String { store.selectedProvider == .codex ? "A" : store.selectedProvider == .claude ? "C" : "M" }
+    private var prefix: String { store.selectedProvider.slotPrefix }
 
     var body: some View {
         NavigationStack {

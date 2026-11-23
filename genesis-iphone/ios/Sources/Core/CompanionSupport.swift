@@ -94,7 +94,7 @@ enum CompanionSupport {
 }
 
 struct SelfCheckItem: Codable, Equatable, Identifiable {
-    var provider: String   // "mac", "claude", "muse", "codex"
+    var provider: String   // "mac", "claude", "muse", "codex", "gemini"
     var name: String
     var ok: Bool
     var detail: String
@@ -114,7 +114,7 @@ struct SelfCheckReport: Codable, Equatable {
     var items: [SelfCheckItem]
 
     private static let knownTitles: [(provider: String, title: String)] = [
-        ("mac", "This Mac"), ("claude", "Claude"), ("muse", "Muse"), ("codex", "Codex"),
+        ("mac", "This Mac"), ("claude", "Claude"), ("muse", "Muse"), ("codex", "Codex"), ("gemini", "Gemini"),
     ]
 
     /// Items grouped by provider: mac, claude, muse, codex, then any other provider in first-seen order.
