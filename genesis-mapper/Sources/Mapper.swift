@@ -79,7 +79,7 @@ final class ClaudeAccess {
     }
     func sessions(_ nodes: [AXUIElement]) -> [Session] {
         var result=[Session]()
-        for e in nodes where value(e,kAXRoleAttribute) as? String == kAXButtonRole {
+        for e in nodes where Self.isRowRole(value(e,kAXRoleAttribute) as? String) {
             let label=text(e)
             for state in states where label.hasPrefix(state+" ") {
                 result.append(Session(title:String(label.dropFirst(state.count+1)),state:state));break
@@ -194,12 +194,16 @@ final class ClaudeAccess {
             contextIsCurrent:{contextIsCurrent() && AXIsProcessTrusted() && NSWorkspace.shared.frontmostApplication?.processIdentifier==processIdentifier && NSRunningApplication.runningApplications(withBundleIdentifier:self.bundle).first?.processIdentifier==processIdentifier},
             read:{self.navigationSnapshot(title,deadline:$0)})
     }
+    /// Claude has drawn a sidebar session row as a button and, since its
+    /// project-grouped sidebar (Nov 2026), as a link. Either still needs its
+    /// own "More options for <title>" menu to count as that chat.
+    static func isRowRole(_ role:String?) -> Bool { role == kAXButtonRole || role == "AXLink" }
     // A session can have matching menus in its sidebar row and primary toolbar.
     // Only navigable sidebar buttons establish distinct destinations.
     func sidebarTargets(_ title:String,in all:[AXUIElement]) -> [AXUIElement] {
         var matches=[AXUIElement]()
         for e in all {
-            guard value(e,kAXRoleAttribute) as? String == kAXButtonRole else {continue}
+            guard Self.isRowRole(value(e,kAXRoleAttribute) as? String) else {continue}
             let label=text(e)
             guard !title.isEmpty,label.contains(title) else {continue}
             // Status badges can decorate the button label. Known suffixes are
