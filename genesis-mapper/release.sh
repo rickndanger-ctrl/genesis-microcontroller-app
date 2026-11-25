@@ -31,4 +31,10 @@ spctl --assess --type execute --verbose=2 "$APP"
 
 ditto -c -k --keepParent "$APP" "$ZIP"
 (cd "$DIST" && shasum -a 256 "$(basename "$ZIP")" | tee "$(basename "$ZIP").sha256")
+# The installer keeps one fixed name so the site can link to
+# releases/latest/download/Agent-Micro-Controller-Mac.dmg for every version.
+DMG="$DIST/Agent-Micro-Controller-Mac.dmg"
+"$ROOT/make-dmg.sh" "$APP" "$DMG"
+(cd "$DIST" && shasum -a 256 "$(basename "$DMG")" | tee "$(basename "$DMG").sha256")
 echo "Ready: $ZIP"
+echo "Ready: $DMG"
