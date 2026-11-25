@@ -724,7 +724,15 @@ final class ControllerUITests: XCTestCase {
         XCTAssertTrue(tryDemo.waitForExistence(timeout: 8), "An unpaired install offers the demo")
         XCTAssertTrue(app.buttons["Pair a Mac"].firstMatch.exists, "Pairing stays the first choice")
         XCTAssertFalse(app.buttons["controller.exitDemo"].exists)
+        // Closing the guide is not a dead end: the dashboard keeps the Mac app link and the scanner.
+        let setupCard = app.descendants(matching: .any)["controller.macSetup"]
+        XCTAssertTrue(setupCard.waitForExistence(timeout: 5), "An unpaired dashboard shows how to set up the Mac")
+        XCTAssertTrue(app.descendants(matching: .any)["controller.shareMacLink"].exists, "with the Mac app link")
         saveFullscreenScreenshot("Fresh install, before pairing")
+        app.buttons["controller.setupScan"].tap()
+        XCTAssertTrue(close.waitForExistence(timeout: 5), "Scan the code reopens the guide with its scanner")
+        close.tap()
+        XCTAssertTrue(close.waitForNonExistence(timeout: 5))
 
         tryDemo.tap()
         let exitDemo = app.buttons["controller.exitDemo"]
@@ -732,6 +740,7 @@ final class ControllerUITests: XCTestCase {
         let chat = app.descendants(matching: .any).matching(identifier: "Chat dial").firstMatch
         XCTAssertEqual(chat.value as? String, "C1, Controller app", "The demo opens on sample chats")
         XCTAssertFalse(tryDemo.exists, "The demo does not offer itself again")
+        XCTAssertFalse(setupCard.exists, "The demo hides the setup card")
         app.buttons["C2, OMAC workspace"].tap()
         let opened = NSPredicate(format: "value CONTAINS %@", "Current chat")
         expectation(for: opened, evaluatedWith: app.buttons["C2, OMAC workspace"])
@@ -752,6 +761,7 @@ final class ControllerUITests: XCTestCase {
         app.buttons["Settings and Mac pairing"].tap()
         let settingsExit = app.buttons["settings.exitDemo"]
         XCTAssertTrue(settingsExit.waitForExistence(timeout: 5))
+        XCTAssertTrue(app.descendants(matching: .any)["settings.shareMacLink"].exists, "Settings offers the Mac app link next to the scanner")
         settingsExit.tap()
         XCTAssertTrue(tryDemo.waitForExistence(timeout: 5), "Exit demo in Settings also returns to the unpaired controller")
     }
