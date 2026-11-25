@@ -58,13 +58,12 @@ struct SettingsScreen: View {
                         .font(.caption).foregroundStyle(.secondary)
                 }
                 Section("Pair a Mac") {
-                    Text("No Mac app yet? Each Mac needs the free companion first. Send yourself the link, download it on the Mac, then scan its code here.")
-                        .font(.subheadline).foregroundStyle(.secondary)
+                    // Scan stays first so it's on screen even in the iPad's shorter sheet.
+                    Button { ControllerSound.shared.keyClick(); scanning = true } label: { Label("Scan pairing code", systemImage: "qrcode.viewfinder") }
                     MacAppLinkButton()
                         .accessibilityIdentifier("settings.shareMacLink")
-                    Text("Already have it? On your Mac, open Agent Micro Controller and choose Set Up and Pair a Phone from its dial in the menu bar. Scan the code with this device on the same Wi-Fi as the Mac. To use the Mac away from home, also set up Tailscale on both.")
-                        .font(.subheadline).foregroundStyle(.secondary)
-                    Button { ControllerSound.shared.keyClick(); scanning = true } label: { Label("Scan pairing code", systemImage: "qrcode.viewfinder") }
+                    Text("No Mac app yet? Each Mac needs the free companion: send yourself the link and download it there. Then, on the Mac, choose Set Up and Pair a Phone from the Agent Micro Controller dial in the menu bar and scan its code on the same Wi-Fi. To use a Mac away from home, also set up Tailscale on both.")
+                        .font(.caption).foregroundStyle(.secondary)
                     TextField("Or paste a private pairing link", text: $pairingLink).textInputAutocapitalization(.never).autocorrectionDisabled()
                         .privacySensitive()
                     Button(pairing ? "Connecting…" : "Pair this Mac") { ControllerSound.shared.keyClick(); pair(pairingLink) }.disabled(pairing || pairingLink.isEmpty)
