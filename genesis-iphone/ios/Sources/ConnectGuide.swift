@@ -19,7 +19,7 @@ struct ConnectGuide: View {
             ScrollViewReader { proxy in
             ScrollView {
                 VStack(alignment: .leading, spacing: 18) {
-                    Text("Your phone becomes a control deck for Claude, Codex and Muse on your Mac. It takes about a minute.")
+                    Text("Your phone becomes a control deck for Claude, Codex, Muse and Gemini on your Mac. It takes about a minute.")
                         .font(.body).foregroundStyle(.secondary)
                         .accessibilityIdentifier("guide.intro")
 
@@ -33,18 +33,14 @@ struct ConnectGuide: View {
                     }
 
                     step(1, "Get the free Mac app") {
-                        Text("On your Mac, download Agent Micro Controller and open it. It walks you through the rest there.")
-                        HStack(spacing: 10) {
-                            ShareLink(item: ConnectionHelp.macAppPage, subject: Text("Agent Micro Controller for Mac"),
-                                      message: Text("Download the Mac app for Agent Micro Controller")) {
-                                Label("Send link", systemImage: "square.and.arrow.up")
-                            }
-                            .buttonStyle(.borderedProminent)
+                        Text("This app needs its free companion on each Mac you want to control. Nothing is installed on your Mac until you download it there.")
+                        MacAppLinkButton(large: true)
                             .accessibilityIdentifier("guide.shareMacLink")
-                            Link(destination: ConnectionHelp.macAppPage) { Text("Open page") }
-                                .buttonStyle(.bordered)
+                        HStack(spacing: 6) {
+                            Text("AirDrop or Messages gets the link onto your Mac in one tap.")
+                            Link("Open page", destination: ConnectionHelp.macAppPage)
                         }
-                        Text("AirDrop or Messages gets the link onto your Mac in one tap.").font(.caption).foregroundStyle(.secondary)
+                        .font(.caption).foregroundStyle(.secondary)
                     }
 
                     step(2, "Scan the code it shows") {
@@ -116,5 +112,23 @@ struct ConnectGuide: View {
                 offerSettings = ConnectionHelp.problem(error).map(ConnectionHelp.fixedInSettings) ?? false
             }
         }
+    }
+}
+
+/// Sends the free Mac app's download page to the person's Mac, usually by
+/// AirDrop or Messages. Offered everywhere pairing is, so nobody is left
+/// with a scan button and nothing on the Mac to scan.
+struct MacAppLinkButton: View {
+    var large = false
+
+    var body: some View {
+        ShareLink(item: ConnectionHelp.macAppPage, subject: Text("Agent Micro Controller for Mac"),
+                  message: Text("Download the free Mac app for Agent Micro Controller")) {
+            Label("Send link to my Mac", systemImage: "square.and.arrow.up")
+                .frame(maxWidth: large ? .infinity : nil, minHeight: large ? 30 : nil)
+        }
+        .buttonStyle(.borderedProminent)
+        .controlSize(large ? .large : .regular)
+        .accessibilityHint("Shares the download page for the free Mac app.")
     }
 }

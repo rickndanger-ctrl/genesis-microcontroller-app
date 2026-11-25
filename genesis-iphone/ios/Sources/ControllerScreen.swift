@@ -761,6 +761,7 @@ struct ControllerScreen: View {
     private var controllerContext: some View {
         header
         switches
+        if !store.isDemo, store.hosts.isEmpty { macSetupCard }
         connection
         if let notice = store.companionNotice {
             Label(notice, systemImage: "arrow.down.circle")
@@ -769,6 +770,32 @@ struct ControllerScreen: View {
                 .accessibilityIdentifier("controller.companionNotice")
         }
         recoveryButtons
+    }
+
+    /// Stays on the dashboard until a Mac is paired, so closing the guide is
+    /// never a dead end: the App Store app puts nothing on the Mac by itself.
+    private var macSetupCard: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text("Set up your Mac").font(.system(size: isPad ? 17 : 15, weight: .bold))
+            Text("1. Get the free Mac app. It isn’t on your Mac until you download it there.")
+                .font(.system(size: isPad ? 14 : 12)).foregroundStyle(GenesisPalette.dim)
+                .fixedSize(horizontal: false, vertical: true)
+            MacAppLinkButton(large: true)
+                .accessibilityIdentifier("controller.shareMacLink")
+            Text("2. Open it on the Mac and scan the code it shows.")
+                .font(.system(size: isPad ? 14 : 12)).foregroundStyle(GenesisPalette.dim)
+                .fixedSize(horizontal: false, vertical: true)
+            Button { ControllerSound.shared.keyClick(); showGuide = true } label: {
+                Label("Scan the code", systemImage: "qrcode.viewfinder").frame(maxWidth: .infinity, minHeight: 30)
+            }
+            .buttonStyle(.bordered).controlSize(.large)
+            .accessibilityIdentifier("controller.setupScan")
+        }
+        .padding(14)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .genesisPanel(radius: 17)
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier("controller.macSetup")
     }
 
     /// Ways out of a state only the Mac can fix, offered wherever the deck is shown.
