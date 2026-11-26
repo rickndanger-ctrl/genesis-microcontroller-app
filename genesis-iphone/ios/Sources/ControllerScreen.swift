@@ -166,6 +166,19 @@ struct ControllerScreen: View {
                 Button("OK", role: .cancel) { ControllerSound.shared.keyClick(); store.lastError = nil }
             }
         } message: { Text(store.lastError ?? "") }
+        // A pairing link or scan can land while Settings or the guide is open
+        // over the deck: close them and say it worked, so the deck is what shows.
+        .onChange(of: store.justPairedMac) { _, name in
+            guard let name else { return }
+            store.justPairedMac = nil
+            showSettings = false; showGuide = false
+            Task { @MainActor in
+                // An alert raised while a sheet is still closing is dropped.
+                try? await Task.sleep(for: .milliseconds(650))
+                store.hint = ControllerHint(title: "Paired with \(name)",
+                    message: "\(name) is ready. Choose a chat with the left dial, or press a key to give it a chat.")
+            }
+        }
         .onChange(of: talkGestureActive) { _, active in
             // onEnded is not called when the system cancels a touch.
             if !active { finishTalkGesture() }

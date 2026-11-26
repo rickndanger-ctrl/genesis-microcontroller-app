@@ -15,6 +15,7 @@ struct SettingsScreen: View {
     @State private var pairing = false
     @State private var message: String?
     @State private var offerSettings = false
+    @State private var removingHost: RemoteHost?
 
     private var selectedPack: ControllerSound.Pack {
         ControllerSound.packs.first { $0.id == soundPack } ?? ControllerSound.defaultPack
@@ -70,7 +71,7 @@ struct SettingsScreen: View {
                     if let message { Text(message).font(.caption).foregroundStyle(.secondary) }
                     if offerSettings { Button("Open Settings") { UIApplication.shared.open(URL(string: UIApplication.openSettingsURLString)!) } }
                 }
-                Section("Your Macs") {
+                Section {
                     ForEach(store.hosts) { host in
                         Button {
                             ControllerSound.shared.keyClick()
@@ -86,7 +87,32 @@ struct SettingsScreen: View {
                                 if host.id == store.selectedHostID { Image(systemName: "checkmark") }
                             }.padding(.vertical, 3)
                         }
+                        .swipeActions(edge: .trailing) {
+                            if !store.isDemo {
+                                Button("Remove", role: .destructive) { ControllerSound.shared.keyClick(); removingHost = host }
+                            }
+                        }
+                        .contextMenu {
+                            if !store.isDemo {
+                                Button("Remove \(host.name)", systemImage: "trash", role: .destructive) { removingHost = host }
+                            }
+                        }
+                        .accessibilityIdentifier("settings.host.\(host.name)")
                     }
+                } header: {
+                    Text("Your Macs")
+                } footer: {
+                    if !store.isDemo, !store.hosts.isEmpty {
+                        Text("To remove a Mac, swipe left on it or touch and hold it.")
+                    }
+                }
+                .confirmationDialog(removingHost.map { "Remove \($0.name)?" } ?? "",
+                                    isPresented: Binding(get: { removingHost != nil }, set: { if !$0 { removingHost = nil } }),
+                                    titleVisibility: .visible, presenting: removingHost) { host in
+                    Button("Remove", role: .destructive) { ControllerSound.shared.keyClick(); store.removeHost(host.id); removingHost = nil }
+                    Button("Cancel", role: .cancel) { removingHost = nil }
+                } message: { _ in
+                    Text("Its chats stop showing here until you pair it again. To remove this iPhone on the Mac too, use the companion's paired-device list.")
                 }
                 Section("Connection") {
                     Text(store.connectionMessage)

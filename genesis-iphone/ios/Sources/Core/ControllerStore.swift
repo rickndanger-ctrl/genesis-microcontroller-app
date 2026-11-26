@@ -170,6 +170,9 @@ final class ControllerStore: ObservableObject {
     /// A press that could not act: what it needs and how to get there. The
     /// deck shows this in place of a general error.
     @Published var hint: ControllerHint?
+    /// The Mac a pairing link or scan just added, so the screen can close
+    /// whatever was open over it and say so. The screen clears it.
+    @Published var justPairedMac: String?
 
     /// Why an action cannot run right now, as something to do about it.
     func hint(forAction id: String) -> ControllerHint {
@@ -547,6 +550,23 @@ final class ControllerStore: ObservableObject {
         persistDraft(); invalidateSelection(); selectedHostID = id; restoreSelection(); persist()
         if isDemo { loadDemo() } else { linkMessage = isPaired ? "Connecting…" : "Pair this Mac"; Task { await refresh() } }
     }
+    /// Forgets a Mac on this device: its address and its secret go. The Mac
+    /// keeps this device in its own list until it is removed there too.
+    /// Pairing it again adds it back.
+    func removeHost(_ id: String) {
+        guard !isDemo, let index = hosts.firstIndex(where: { $0.id == id }) else { return }
+        let wasSelected = id == selectedHostID
+        if wasSelected { persistDraft(); invalidateSelection() }
+        hosts.remove(at: index)
+        credentials.remove(for: id)
+        threadNotOnCompanion.remove(id)
+        if wasSelected { selectedHostID = hosts.first?.id ?? ""; restoreSelection() }
+        persist()
+        if wasSelected {
+            linkMessage = isPaired ? "Connecting…" : "Pair this Mac"
+            if !hosts.isEmpty { Task { await refresh() } }
+        }
+    }
     func selectProvider(_ provider: ProviderID) {
         guard provider != selectedProvider else { return }
         persistDraft(); invalidateSelection(); selectedProvider = provider; restoreSelection(); persist()
@@ -754,7 +774,7 @@ final class ControllerStore: ObservableObject {
         if let existing { hosts[existing] = paired } else { hosts.append(paired) }
         if activate || selectedHostID.isEmpty {
             invalidateSelection(); selectedHostID = paired.id; restoreSelection(); applyStatus(remote); persist()
-            if activate { await refresh() }
+            if activate { justPairedMac = paired.name; await refresh() }
         } else {
             if paired.id == selectedHostID { invalidateSelection(); restoreSelection(); applyStatus(remote) }
             persist()
