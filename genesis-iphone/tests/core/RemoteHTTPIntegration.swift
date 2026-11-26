@@ -371,6 +371,24 @@ final class FixtureCredentials: ControllerCredentialVault {
         try await freshStore.pair(URL(string:"genesiscontroller://pair?data=\(firstPairingData)")!)
         expect(freshStore.hosts.count == 1 && freshStore.selectedHost?.hostID == first.hostID && freshStore.isPaired,
                "First QR pairing adds and selects the verified Mac")
+        expect(freshStore.justPairedMac == first.name, "A pairing link tells the screen which Mac was just paired")
+
+        // Removing a Mac forgets its address and its secret on this device.
+        let removeCredentials = FixtureCredentials()
+        let removeStore = ControllerStore(client: client, credentials: removeCredentials,
+            persistence: ControllerPersistence(directory: temporary.appendingPathComponent("remove")))
+        try await removeStore.pair(URL(string:"genesiscontroller://pair?data=\(firstPairingData)")!)
+        let removedID = removeStore.selectedHostID
+        expect(removeCredentials.token(for: removedID) != nil, "The paired Mac's secret is saved before removal")
+        removeStore.removeHost(removedID)
+        expect(removeStore.hosts.isEmpty && removeStore.selectedHost == nil && !removeStore.isPaired,
+               "Removing the only Mac leaves the controller unpaired")
+        expect(removeCredentials.token(for: removedID) == nil, "Removing a Mac deletes its saved secret")
+        let reopened = ControllerStore(client: client, credentials: removeCredentials,
+            persistence: ControllerPersistence(directory: temporary.appendingPathComponent("remove")))
+        expect(reopened.hosts.isEmpty, "A removed Mac stays removed after the app restarts")
+        try await removeStore.pair(URL(string:"genesiscontroller://pair?data=\(firstPairingData)")!)
+        expect(removeStore.hosts.count == 1 && removeStore.isPaired, "A removed Mac can be paired again")
 
         // Version 2 pairing: the QR code carries a single-use code, which is
         // traded for a secret that belongs to this device alone.
